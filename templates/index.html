@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能医疗咨询系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 顶部标题栏 -->
+        <div class="header">
+            <h1>🏥 智能医疗咨询系统</h1>
+            <p class="subtitle">眼科健康咨询 · 智能分诊 · 在线预约</p>
+            <div class="header-actions">
+                <button id="exportBtn" class="btn-secondary">📄 导出病例</button>
+                <button id="resetBtn" class="btn-danger">🔄 重新开始</button>
+            </div>
+        </div>
+
+        <!-- 聊天区域 -->
+        <div class="chat-container">
+            <div id="chatMessages" class="chat-messages">
+                <!-- 欢迎消息 -->
+                <div class="message assistant-message">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <div class="message-text">
+                            您好！我是智能医疗咨询助手。我可以为您提供眼科健康咨询、症状评估和医生预约服务。请告诉我您有什么不舒服的地方？
+                        </div>
+                        <div class="message-time" id="welcomeTime"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 输入区域 -->
+            <div class="chat-input-container">
+                <div class="input-wrapper">
+                    <textarea 
+                        id="userInput" 
+                        placeholder="请描述您的症状或健康问题..."
+                        rows="1"
+                    ></textarea>
+                    <button id="sendBtn" class="btn-send">
+                        <span id="sendIcon">📤</span>
+                        <span id="sendText">发送</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 状态栏 -->
+        <div class="status-bar">
+            <span class="status-item">
+                <span class="status-label">当前阶段：</span>
+                <span id="currentStage" class="status-value">初始化</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">会话ID：</span>
+                <span id="sessionId" class="status-value">未连接</span>
+            </span>
+        </div>
+    </div>
+
+    <!-- 加载动画 -->
+    <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+        <div class="loading-spinner"></div>
+        <span>AI正在思考...</span>
+    </div>
+
+    <!-- JSON预览模态框 -->
+    <div id="jsonModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>患者病例数据</h2>
+                <button class="modal-close" onclick="closeJsonModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="jsonContent"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-primary" onclick="downloadJson()">💾 下载JSON</button>
+                <button class="btn-secondary" onclick="closeJsonModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>
+
