@@ -16,7 +16,7 @@ def get_llm():
     """
     api_key = os.getenv("SILICONFLOW_API_KEY")
     base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B")
     
     if not api_key:
         raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
@@ -39,7 +39,7 @@ def get_streaming_llm():
     """
     api_key = os.getenv("SILICONFLOW_API_KEY")
     base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B")
     
     if not api_key:
         raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
