@@ -3,13 +3,14 @@ FastAPI主应用 - 智能体集群系统后端服务
 """
 import json
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from agents.agent_manager import AgentManager
+from database.appointment_service import AppointmentService
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -27,6 +28,9 @@ templates = Jinja2Templates(directory="templates")
 # 全局智能体管理器
 agent_manager = AgentManager()
 
+# 全局数据库服务
+appointment_service = AppointmentService()
+
 # 会话存储（生产环境应使用Redis等）
 sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -34,7 +38,7 @@ sessions: Dict[str, Dict[str, Any]] = {}
 class ChatMessage(BaseModel):
     """聊天消息模型"""
     message: str
-    session_id: str = None
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -83,11 +87,48 @@ async def chat(message: ChatMessage):
             "content": response
         })
         
+        # 检查是否完成对话，如果完成则保存到数据库
+        is_completed = agent.is_completed()
+        
+        print(f"[调试] 对话完成状态: {is_completed}, 需要预约: {agent.needs_appointment}")
+        
+        if is_completed and agent.needs_appointment:
+            try:
+                print("[调试] 开始获取患者数据并保存到数据库...")
+                
+                # 获取患者数据
+                patient_data = agent.get_patient_data()
+                
+                print(f"[调试] 患者数据: {json.dumps(patient_data, ensure_ascii=False)}")
+                
+                # 保存到数据库
+                db_result = appointment_service.process_appointment(patient_data)
+                
+                print(f"[数据库] 预约处理结果: {db_result}")
+                
+                if db_result['success']:
+                    # 将数据库操作结果保存到会话
+                    sessions[session_id]["appointment_result"] = db_result
+                    
+                    # 在响应中添加预约成功信息
+                    response += f"\n\n✅ {db_result['message']}"
+                    response += f"\n预约ID：{db_result['appointment_id']}"
+                    response += f"\n患者ID：{db_result['patient_id']}"
+                else:
+                    # 预约失败，追加错误信息
+                    response += f"\n\n⚠️ 预约失败：{db_result['message']}"
+                    
+            except Exception as e:
+                import traceback
+                print(f"[数据库错误] 保存数据失败: {str(e)}")
+                traceback.print_exc()
+                response += f"\n\n⚠️ 数据保存失败，但您的信息已记录，请联系客服。"
+        
         # 返回响应
         return ChatResponse(
             response=response,
             session_id=session_id,
-            is_completed=agent.is_completed(),
+            is_completed=is_completed,
             stage=agent.stage.value
         )
     
@@ -167,6 +208,65 @@ async def get_stats():
     }
 
 
+@app.get("/api/appointments")
+async def get_appointments():
+    """
+    获取所有预约记录（用于验证数据库操作）
+    """
+    try:
+        query = """
+            SELECT 
+                a.Appointment_ID,
+                a.Patient_Name,
+                a.Appointment_Time,
+                a.Appointment_Status,
+                d.Name as Doctor_Name,
+                d.Title as Doctor_Title
+            FROM appointment a
+            LEFT JOIN doctor d ON a.Doctor_ID = d.Doctor_ID
+            ORDER BY a.Appointment_ID DESC
+            LIMIT 50
+        """
+        appointments = appointment_service.db.execute_query(query)
+        return {
+            "success": True,
+            "count": len(appointments),
+            "appointments": appointments
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询预约记录失败: {str(e)}")
+
+
+@app.get("/api/patients")
+async def get_patients():
+    """
+    获取所有患者记录（用于验证数据库操作）
+    """
+    try:
+        query = """
+            SELECT 
+                Patient_ID,
+                Visit_Card_Number,
+                Name,
+                Gender,
+                Age,
+                Phone_Number,
+                Chief_Complaint,
+                Visit_Date
+            FROM patient
+            ORDER BY Patient_ID DESC
+            LIMIT 50
+        """
+        patients = appointment_service.db.execute_query(query)
+        return {
+            "success": True,
+            "count": len(patients),
+            "patients": patients
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询患者记录失败: {str(e)}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
@@ -180,6 +280,9 @@ async def startup_event():
 async def shutdown_event():
     """应用关闭事件"""
     print("系统正在关闭...")
+    # 关闭数据库连接
+    appointment_service.close()
+    print("数据库连接已关闭")
 
 
 if __name__ == "__main__":
