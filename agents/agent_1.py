@@ -161,10 +161,10 @@ class HealthAgent:
 对话内容：{user_input}
 
 请提取以下信息：
-- name: 姓名
-- age: 年龄
-- gender: 性别（男/女）
-- contact: 联系方式（手机号）
+- name: 姓名（中文人名，2-4个字）
+- age: 年龄（纯数字，去掉"岁"等字）
+- gender: 性别（只填"男"或"女"）
+- contact: 联系方式（11位手机号，纯数字）
 - id_number: 身份证号（如果提到）
 
 只返回JSON格式，不要有其他内容：
@@ -194,16 +194,41 @@ class HealthAgent:
                         self.data_handler.update_patient_info(field, value)
                         chinese_name = field_name_map.get(field, field)
                         self.collected_fields.add(chinese_name)
+                        print(f"[调试] 提取到 {chinese_name}: {value}")
         except Exception as e:
+            print(f"[警告] LLM提取患者信息失败: {e}")
             # 如果LLM提取失败，使用简单的规则提取
-            if "姓名" not in self.collected_fields:
-                # 简单的姓名提取逻辑
-                words = user_input.split()
-                for word in words:
-                    if len(word) >= 2 and len(word) <= 4:
-                        self.data_handler.update_patient_info("name", word)
-                        self.collected_fields.add("姓名")
-                        break
+            import re
+            
+            # 提取手机号（11位数字）
+            if "联系方式" not in self.collected_fields:
+                phone_pattern = r'1[3-9]\d{9}'
+                phone_match = re.search(phone_pattern, user_input)
+                if phone_match:
+                    self.data_handler.update_patient_info("contact", phone_match.group())
+                    self.collected_fields.add("联系方式")
+                    print(f"[调试] 规则提取到手机号: {phone_match.group()}")
+            
+            # 提取年龄（数字+岁，或单独的数字）
+            if "年龄" not in self.collected_fields:
+                age_pattern = r'(\d{1,2})\s*岁|年龄.*?(\d{1,2})'
+                age_match = re.search(age_pattern, user_input)
+                if age_match:
+                    age = age_match.group(1) or age_match.group(2)
+                    self.data_handler.update_patient_info("age", age)
+                    self.collected_fields.add("年龄")
+                    print(f"[调试] 规则提取到年龄: {age}")
+            
+            # 提取性别
+            if "性别" not in self.collected_fields:
+                if "男" in user_input or "男性" in user_input:
+                    self.data_handler.update_patient_info("gender", "男")
+                    self.collected_fields.add("性别")
+                    print("[调试] 规则提取到性别: 男")
+                elif "女" in user_input or "女性" in user_input:
+                    self.data_handler.update_patient_info("gender", "女")
+                    self.collected_fields.add("性别")
+                    print("[调试] 规则提取到性别: 女")
     
     def _extract_appointment_info(self, user_input: str):
         """提取预约信息"""
@@ -267,16 +292,26 @@ class HealthAgent:
     
     def _extract_comprehensive_info(self, user_input: str):
         """使用LLM全面提取用户输入中的所有信息"""
+        # 获取最近的AI问题，用于理解用户回答的上下文
+        recent_question = ""
+        if len(self.conversation_history) >= 2:
+            recent_question = self.conversation_history[-2].get("content", "")
+        
         extraction_prompt = f"""
-【重要】请从以下用户的回答中提取所有医疗和个人信息。
+【重要】请从用户的回答中提取所有医疗和个人信息。
 
-用户回答：{user_input}
+AI刚刚的问题：{recent_question}
+
+用户的回答：{user_input}
 
 提取规则：
-1. 提取用户明确提到的所有信息
-2. 如果用户说"无"、"没有"，该字段填写"无"或"没有"
-3. 如果没提到的信息，字段值为空字符串 ""
-4. 特别注意：姓名、年龄、性别、手机号等基本信息
+1. 根据AI的问题理解用户的回答
+2. 如果用户说"无"、"没有"、"没"等否定词，相应字段填写"无"
+3. 如果用户用逗号分隔多个信息，按顺序对应AI提问的内容
+4. 如果信息未提及，字段值为空字符串 ""
+5. 手机号格式：提取11位数字
+6. 年龄：只提取数字（如"78岁"→"78"）
+7. 性别：只返回"男"或"女"
 
 请提取以下信息（如果存在）：
 1. 患者基本信息：
@@ -315,6 +350,7 @@ class HealthAgent:
             if start != -1 and end > start:
                 json_str = content[start:end]
                 extracted_data = json.loads(json_str)
+                print(f"[调试] LLM提取的数据: {extracted_data}")
                 
                 # 更新患者基本信息 - 只要提取到有效值就更新
                 for field in ["name", "age", "gender", "contact", "id_number"]:
@@ -346,21 +382,30 @@ class HealthAgent:
                     self.collected_fields.add("症状持续时间")
                 
                 # 更新病史 - 总是使用最新提取的信息
-                if "medical_history" in extracted_data and extracted_data["medical_history"] and extracted_data["medical_history"].strip():
-                    self.data_handler.update_field("medical_history", extracted_data["medical_history"])
-                    self.collected_fields.add("既往病史")
+                # 更新病史 - 即使是"无"也要记录
+                if "medical_history" in extracted_data and extracted_data["medical_history"]:
+                    value = extracted_data["medical_history"].strip()
+                    if value:  # 包括"无"等回答
+                        self.data_handler.update_field("medical_history", value)
+                        self.collected_fields.add("既往病史")
                 
-                if "medication_history" in extracted_data and extracted_data["medication_history"] and extracted_data["medication_history"].strip():
-                    self.data_handler.update_field("medication_history", extracted_data["medication_history"])
-                    self.collected_fields.add("用药史")
+                if "medication_history" in extracted_data and extracted_data["medication_history"]:
+                    value = extracted_data["medication_history"].strip()
+                    if value:
+                        self.data_handler.update_field("medication_history", value)
+                        self.collected_fields.add("用药史")
                 
-                if "allergy_history" in extracted_data and extracted_data["allergy_history"] and extracted_data["allergy_history"].strip():
-                    self.data_handler.update_field("allergy_history", extracted_data["allergy_history"])
-                    self.collected_fields.add("过敏史")
+                if "allergy_history" in extracted_data and extracted_data["allergy_history"]:
+                    value = extracted_data["allergy_history"].strip()
+                    if value:
+                        self.data_handler.update_field("allergy_history", value)
+                        self.collected_fields.add("过敏史")
                 
-                if "family_history" in extracted_data and extracted_data["family_history"] and extracted_data["family_history"].strip():
-                    self.data_handler.update_field("family_history", extracted_data["family_history"])
-                    self.collected_fields.add("家族史")
+                if "family_history" in extracted_data and extracted_data["family_history"]:
+                    value = extracted_data["family_history"].strip()
+                    if value:
+                        self.data_handler.update_field("family_history", value)
+                        self.collected_fields.add("家族史")
                 
                 # 更新预约信息
                 if "preferred_time" in extracted_data and extracted_data["preferred_time"] and extracted_data["preferred_time"].strip():
@@ -383,6 +428,21 @@ class HealthAgent:
         """根据对话内容更新阶段"""
         user_lower = user_input.lower()
         response_lower = ai_response.lower()
+        
+        # 🔥 全局预约意图检测 - 用户在任何阶段主动提出预约，立即设置标志并跳转
+        if not self.needs_appointment:
+            appointment_keywords = ["预约", "挂号", "看医生", "就诊", "看病"]
+            if any(keyword in user_lower for keyword in appointment_keywords):
+                print(f"[调试] 检测到用户预约意图，当前阶段: {self.stage}")
+                self.needs_appointment = True
+                # 如果还在早期阶段，直接跳到信息收集阶段
+                if self.stage in [ConversationStage.GREETING, 
+                                  ConversationStage.HEALTH_CONSULTATION, 
+                                  ConversationStage.SYMPTOM_ASSESSMENT,
+                                  ConversationStage.APPOINTMENT_INQUIRY]:
+                    self.stage = ConversationStage.PATIENT_INFO_COLLECTION
+                    print(f"[调试] 跳转到患者信息收集阶段")
+                    return  # 直接返回，不再执行后续逻辑
         
         if self.stage == ConversationStage.GREETING:
             # 用户描述了症状，进入健康咨询阶段
@@ -412,20 +472,29 @@ class HealthAgent:
         elif self.stage == ConversationStage.PATIENT_INFO_COLLECTION:
             # 检查是否收集了基本信息（要求更高，至少3项）
             required = {"姓名", "年龄", "性别", "联系方式"}
-            if len(required & self.collected_fields) >= 3:  # 至少收集了3项
+            collected_count = len(required & self.collected_fields)
+            print(f"[调试] 患者信息收集阶段 - 已收集: {required & self.collected_fields} ({collected_count}/4)")
+            if collected_count >= 3:  # 至少收集了3项
+                print(f"[调试] 基本信息已足够，转入眼科分诊阶段")
                 self.stage = ConversationStage.OPHTHALMOLOGY_TRIAGE
         
         elif self.stage == ConversationStage.OPHTHALMOLOGY_TRIAGE:
             # 眼科分诊要收集更多症状详情
             symptom_related = {"症状描述", "症状持续时间", "现病史"}
-            if len(symptom_related & self.collected_fields) >= 2:
+            collected_symptom = len(symptom_related & self.collected_fields)
+            print(f"[调试] 眼科分诊阶段 - 已收集症状: {symptom_related & self.collected_fields} ({collected_symptom}/3)")
+            if collected_symptom >= 2:
+                print(f"[调试] 症状信息已足够，转入病史采集阶段")
                 self.stage = ConversationStage.MEDICAL_HISTORY
         
         elif self.stage == ConversationStage.MEDICAL_HISTORY:
             # 病史采集要求更完整
             history_related = {"既往病史", "用药史", "过敏史"}
+            collected_history = len(history_related & self.collected_fields)
+            print(f"[调试] 病史采集阶段 - 已收集: {history_related & self.collected_fields} ({collected_history}/3)")
             # 至少收集了2项病史相关信息
-            if len(history_related & self.collected_fields) >= 2:
+            if collected_history >= 2:
+                print(f"[调试] 病史信息已足够，转入预约阶段")
                 self.stage = ConversationStage.APPOINTMENT_BOOKING
         
         elif self.stage == ConversationStage.APPOINTMENT_BOOKING:
@@ -433,12 +502,25 @@ class HealthAgent:
             appointment_related = {"期望时间", "紧急程度"}
             critical_missing = self._get_missing_critical_fields()
             
-            # 只有预约信息齐全且关键必填项不超过2个缺失时才完成
-            if len(appointment_related & self.collected_fields) >= 2 and len(critical_missing) <= 2:
+            print(f"[调试] 预约阶段 - 已收集预约信息: {appointment_related & self.collected_fields}")
+            print(f"[调试] 预约阶段 - 缺失关键字段: {critical_missing}")
+            
+            # 放宽条件：只要收集了期望时间或者对话已进行多轮，且关键信息基本齐全即可完成
+            has_time_info = "期望时间" in self.collected_fields
+            has_basic_info = len(critical_missing) <= 3  # 最多缺3个字段
+            enough_conversation = len(self.conversation_history) >= 10  # 至少5轮对话(用户+助手各5条)
+            
+            if (has_time_info and has_basic_info) or (enough_conversation and has_basic_info):
+                print("[调试] 满足完成条件，转入完成阶段")
                 self.stage = ConversationStage.COMPLETED
     
     def chat(self, user_input: str) -> str:
         """处理用户输入并返回响应"""
+        print(f"\n[调试] ========== 开始处理用户输入 ==========")
+        print(f"[调试] 当前阶段: {self.stage}")
+        print(f"[调试] 需要预约: {self.needs_appointment}")
+        print(f"[调试] 用户输入: {user_input[:50]}...")
+        
         # 记录对话历史
         self.conversation_history.append({
             "role": "user",
@@ -446,7 +528,9 @@ class HealthAgent:
         })
         
         # 提取信息
+        print(f"[调试] 开始提取信息...")
         self._extract_info_from_response(user_input)
+        print(f"[调试] 已收集字段: {self.collected_fields}")
         
         # 生成回复
         stage_desc = self._get_stage_prompt()
