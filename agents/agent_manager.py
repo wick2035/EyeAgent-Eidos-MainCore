@@ -12,28 +12,38 @@ class AgentManager:
         self.agents: Dict[str, Any] = {}
         self.active_sessions: Dict[str, str] = {}  # session_id -> agent_id
     
-    def create_agent(self, agent_id: str, agent_type: str = "health"):
+    def create_agent(self, agent_id: str, agent_type: str = "health", user_id: int = None, phone_number: str = None):
         """创建新的智能体实例"""
+        print(f"[AgentManager] 创建新Agent - agent_id={agent_id}, user_id={user_id}, phone_number={phone_number}")
         if agent_type == "health":
-            self.agents[agent_id] = HealthAgent()
+            self.agents[agent_id] = HealthAgent(user_id=user_id, phone_number=phone_number)
         else:
             raise ValueError(f"未知的智能体类型: {agent_type}")
         
+        print(f"[AgentManager] Agent创建完成 - total_agents={len(self.agents)}")
         return self.agents[agent_id]
     
     def get_agent(self, agent_id: str):
         """获取智能体实例"""
         return self.agents.get(agent_id)
     
-    def get_or_create_agent(self, session_id: str, agent_type: str = "health"):
+    def get_or_create_agent(self, session_id: str, agent_type: str = "health", user_id: int = None, phone_number: str = None):
         """获取或创建会话对应的智能体"""
+        print(f"[AgentManager] get_or_create_agent 被调用 - session_id={session_id}, user_id={user_id}, phone_number={phone_number}")
+        print(f"[AgentManager] 当前 active_sessions: {list(self.active_sessions.keys())}")
+        
         if session_id not in self.active_sessions:
+            print(f"[AgentManager] Session不存在，创建新Agent")
             agent_id = f"{agent_type}_{session_id}"
-            self.create_agent(agent_id, agent_type)
+            self.create_agent(agent_id, agent_type, user_id=user_id, phone_number=phone_number)
             self.active_sessions[session_id] = agent_id
+        else:
+            print(f"[AgentManager] Session已存在，返回已有Agent")
         
         agent_id = self.active_sessions[session_id]
-        return self.agents[agent_id]
+        agent = self.agents[agent_id]
+        print(f"[AgentManager] 返回Agent - agent.user_id={agent.user_id}, agent.phone_number={agent.phone_number}")
+        return agent
     
     def remove_agent(self, session_id: str):
         """移除智能体"""
@@ -44,10 +54,10 @@ class AgentManager:
             del self.active_sessions[session_id]
     
     def reset_agent(self, session_id: str):
-        """重置智能体"""
-        agent = self.get_or_create_agent(session_id)
-        if agent:
-            agent.reset()
+        """重置智能体 - 完全删除并等待重新创建"""
+        # 完全删除agent，下次get_or_create_agent时会重新创建
+        # 这样可以确保切换用户后能加载新用户的历史信息
+        self.remove_agent(session_id)
     
     def get_active_sessions_count(self) -> int:
         """获取活跃会话数"""

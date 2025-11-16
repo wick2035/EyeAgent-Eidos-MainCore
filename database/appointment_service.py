@@ -108,13 +108,16 @@ class AppointmentService:
     
     def create_patient(self, patient_data: Dict[str, Any]) -> int:
         """
-        创建新患者病例
+        创建新患者病例（每次预约都创建新的病例记录）
+        
+        【重要】patient 表的一条记录代表一次就诊/一个病例，不是一个人。
+        同一个人多次就诊会有多条 patient 记录，通过 Phone_Number 可以关联。
         
         Args:
             patient_data: 从一号智能体获取的患者数据字典
             
         Returns:
-            新创建的患者ID
+            新创建的患者ID（病例ID）
             
         Raises:
             Exception: 数据库操作失败时抛出异常
@@ -126,13 +129,15 @@ class AppointmentService:
         gender = patient_info.get('gender', '')
         contact = patient_info.get('contact', '')
         
-        # 检查患者是否已存在
+        # 【修改逻辑】每次预约都创建新病例，不再复用旧记录
+        # 但可以检查是否有历史记录，用于日志提示
         existing_patient = self._check_patient_exists(contact, name)
         if existing_patient:
-            logger.info(f"患者已存在，使用现有ID: {existing_patient['Patient_ID']}")
-            return existing_patient['Patient_ID']
+            logger.info(f"患者 {name} 有历史就诊记录，本次创建新病例")
+        else:
+            logger.info(f"新患者 {name}，创建首次病例记录")
         
-        # 生成就诊卡号
+        # 生成就诊卡号（每次都生成新的）
         visit_card_number = self._generate_visit_card_number()
         
         # 准备插入数据

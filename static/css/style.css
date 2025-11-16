@@ -54,6 +54,49 @@ body {
     display: flex;
     gap: 10px;
     justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* 用户选择器样式 */
+.user-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.15);
+    padding: 8px 15px;
+    border-radius: 8px;
+    backdrop-filter: blur(10px);
+}
+
+.user-selector label {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.user-selector select {
+    padding: 6px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.9);
+    color: #333;
+    font-size: 13px;
+    cursor: pointer;
+    outline: none;
+    min-width: 200px;
+    max-width: 300px;
+    transition: all 0.3s;
+}
+
+.user-selector select:hover {
+    background: white;
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+.user-selector select:focus {
+    background: white;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3);
 }
 
 /* 聊天容器 */
