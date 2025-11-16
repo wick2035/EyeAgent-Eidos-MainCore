@@ -3,11 +3,12 @@
 """
 import json
 from enum import Enum
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from utils.llm_config import get_llm
 from utils.data_handler import PatientDataHandler
+from database.user_history_service_v2 import UserHistoryServiceV2
 
 
 class ConversationStage(Enum):
@@ -26,7 +27,14 @@ class ConversationStage(Enum):
 class HealthAgent:
     """1号健康咨询智能体"""
     
-    def __init__(self):
+    def __init__(self, user_id: int = None, phone_number: str = None):
+        """
+        初始化健康智能体
+        
+        Args:
+            user_id: 用户ID（Patient_ID，仅查询单个病例，不推荐）
+            phone_number: 手机号（推荐使用，可查询该用户的所有历史病例）
+        """
         self.llm = get_llm()
         self.data_handler = PatientDataHandler()
         self.stage = ConversationStage.GREETING
@@ -34,8 +42,111 @@ class HealthAgent:
         self.collected_fields = set()  # 已收集的字段
         self.needs_appointment = False  # 是否需要预约
         
+        # 用户历史信息相关
+        self.user_id = user_id  # 用户ID（Patient_ID）
+        self.phone_number = phone_number  # 手机号（推荐使用）
+        self.user_history = None  # 用户历史信息
+        self.history_loaded = False  # 历史信息是否已加载
+        self.user_history_text = ""  # 格式化的历史信息文本
+        
         # 初始化对话链
         self.conversation_chain = self._create_conversation_chain()
+    
+    def _load_user_history(self, user_id: Optional[int] = None, phone_number: Optional[str] = None) -> bool:
+        """
+        从数据库加载用户历史信息
+        
+        【重要】优先使用手机号查询（可获取所有病例），其次使用user_id（仅单个病例）
+        
+        Args:
+            user_id: 用户ID（Patient_ID）
+            phone_number: 手机号（推荐使用）
+            
+        Returns:
+            是否成功加载历史信息
+        """
+        # 确定使用的标识：优先手机号，其次user_id
+        phone = phone_number or self.phone_number
+        uid = user_id or self.user_id
+        
+        print(f"[调试] _load_user_history 被调用 - phone={phone}, uid={uid}")
+        print(f"[调试] self.phone_number={self.phone_number}, self.user_id={self.user_id}")
+        
+        if not phone and not uid:
+            print("[调试] 未提供用户ID或手机号，跳过历史信息加载")
+            self.user_history_text = "【新用户】\n本次为初次就诊，暂无历史记录。"
+            self.history_loaded = True
+            return False
+        
+        if self.history_loaded:
+            identifier = phone if phone else f"ID={uid}"
+            print(f"[调试] 用户 {identifier} 的历史信息已加载，跳过重复加载")
+            return True
+        
+        try:
+            history_service = UserHistoryServiceV2()
+            
+            # 优先使用手机号查询（推荐）
+            if phone:
+                print(f"[调试] 开始通过手机号加载用户历史信息: {phone}")
+                self.user_history = history_service.get_user_complete_info_by_phone(phone)
+                print(f"[调试] 查询结果 - has_history: {self.user_history.get('has_history')}")
+                print(f"[调试] 查询结果 - basic_info: {self.user_history.get('basic_info')}")
+                print(f"[调试] 查询结果 - medical_records数量: {len(self.user_history.get('medical_records', []))}")
+                self.user_history_text = history_service.format_user_history_text_by_phone(phone)
+            # 如果没有手机号，使用user_id（仅查询单个病例）
+            elif uid:
+                print(f"[调试] 开始通过Patient_ID加载用户历史信息: {uid}")
+                self.user_history = history_service.get_user_complete_info(uid)
+                print(f"[调试] 查询结果 - has_history: {self.user_history.get('has_history')}")
+                print(f"[调试] 查询结果 - basic_info: {self.user_history.get('basic_info')}")
+                print(f"[调试] 查询结果 - medical_records数量: {len(self.user_history.get('medical_records', []))}")
+                self.user_history_text = history_service.format_user_history_text(uid)
+            
+            print(f"[调试] 格式化的历史信息文本:\n{self.user_history_text}")
+            
+            # 如果用户有历史信息，预填充基本信息到 data_handler
+            if self.user_history and self.user_history.get("has_history"):
+                basic_info = self.user_history.get("basic_info")
+                if basic_info:
+                    # 预填充基本信息
+                    if basic_info.get('Name'):
+                        self.data_handler.update_patient_info('name', basic_info.get('Name'))
+                        self.collected_fields.add("姓名")
+                    if basic_info.get('Age'):
+                        self.data_handler.update_patient_info('age', str(basic_info.get('Age')))
+                        self.collected_fields.add("年龄")
+                    if basic_info.get('Gender'):
+                        self.data_handler.update_patient_info('gender', basic_info.get('Gender'))
+                        self.collected_fields.add("性别")
+                    if basic_info.get('Phone_Number'):
+                        self.data_handler.update_patient_info('contact', basic_info.get('Phone_Number'))
+                        self.collected_fields.add("联系方式")
+                    
+                    # 预填充病史信息
+                    if basic_info.get('Medical_History'):
+                        self.data_handler.update_field('medical_history', basic_info.get('Medical_History'))
+                        self.collected_fields.add("既往病史")
+                    if basic_info.get('Allergy_History'):
+                        self.data_handler.update_field('allergy_history', basic_info.get('Allergy_History'))
+                        self.collected_fields.add("过敏史")
+                    if basic_info.get('Family_History'):
+                        self.data_handler.update_field('family_history', basic_info.get('Family_History'))
+                        self.collected_fields.add("家族史")
+                    
+                    print(f"[调试] 已预填充用户基本信息: {self.collected_fields}")
+            
+            history_service.close()
+            self.history_loaded = True
+            
+            print(f"[调试] 用户历史信息加载完成")
+            return True
+            
+        except Exception as e:
+            print(f"[警告] 加载用户历史信息失败: {e}")
+            self.user_history_text = "【历史信息加载失败】\n暂时无法获取历史就诊记录。"
+            self.history_loaded = True
+            return False
     
     def _create_conversation_chain(self):
         """创建对话链 - 使用LLMChain代替ConversationChain以支持自定义变量"""
@@ -45,6 +156,8 @@ class HealthAgent:
 
 当前对话阶段：{stage}
 
+{user_history}
+
 你的职责：
 1. 提供专业的健康咨询建议
 2. 评估患者症状的严重程度
@@ -52,15 +165,25 @@ class HealthAgent:
 4. 进行详细的眼科分诊问诊，收集患者信息
 5. 帮助患者完成医生预约
 
-【重要】一旦确定患者需要预约，你必须竭尽全力收集以下所有信息：
-- 患者基本信息：姓名、年龄、性别、联系方式、身份证号
+【重要提示】
+- 如果患者是老用户（有历史就诊记录），请在首次问候时主动称呼用户的姓名，让用户感受到被认识和重视
+- 对于老用户，基本信息（姓名、性别、年龄、联系方式）和病史信息已经在系统中，无需重复询问，除非患者信息有变化
+- 老用户的既往病史、过敏史、家族史可以直接引用，重点关注本次的新症状和主诉
+- 对于新用户，需要按照正常流程收集所有信息
+- 【多次预约支持】患者可以预约多个医生，每次对话可以创建新的预约
+- 历史信息中的"历史预约记录"仅包含今天之前的预约，今天及以后的预约不会显示在历史信息中
+- 如果患者已有今天之后的预约，但想预约不同的医生或时间，可以创建新的预约记录
+
+【需要收集的信息】
+一旦确定患者需要预约，确保收集以下信息：
+- 患者基本信息：姓名、年龄、性别、联系方式、身份证号（老用户已有的信息可以跳过）
 - 主诉症状：患者的主要不适
 - 现病史：症状出现的时间、性质、程度、诱因、缓解因素等
 - 详细症状：视力变化、眼痛、眼红、分泌物、其他症状
-- 既往病史：过往的眼科疾病或其他疾病
+- 既往病史：过往的眼科疾病或其他疾病（老用户可参考历史记录）
 - 用药史：正在使用或曾经使用的眼药或其他药物
-- 过敏史：药物过敏、食物过敏等
-- 家族史：家族中是否有眼科疾病或遗传病
+- 过敏史：药物过敏、食物过敏等（老用户可参考历史记录）
+- 家族史：家族中是否有眼科疾病或遗传病（老用户可参考历史记录）
 - 预约信息：期望就诊时间、医生偏好、紧急程度
 
 对话指南：
@@ -69,6 +192,7 @@ class HealthAgent:
 - 根据症状判断严重程度，如果需要就医，主动建议预约
 - 在收集信息时要有针对性，结合患者回答追问细节
 - 对于缺失的重要信息，要主动询问
+- 老用户的对话应该更加自然和个性化，可以提及历史就诊情况
 - 确保收集完整的信息后再完成预约
 
 已收集的信息字段：{collected_fields}
@@ -81,7 +205,7 @@ class HealthAgent:
 助手："""
         
         prompt = PromptTemplate(
-            input_variables=["stage", "collected_fields", "missing_fields", "history", "input"],
+            input_variables=["stage", "user_history", "collected_fields", "missing_fields", "history", "input"],
             template=template
         )
         
@@ -431,7 +555,7 @@ AI刚刚的问题：{recent_question}
         
         # 🔥 全局预约意图检测 - 用户在任何阶段主动提出预约，立即设置标志并跳转
         if not self.needs_appointment:
-            appointment_keywords = ["预约", "挂号", "看医生", "就诊", "看病"]
+            appointment_keywords = ["预约", "挂号", "看医生", "就诊", "看病", "约医生", "约诊", "找医生", "看大夫", "约个", "想约"]
             if any(keyword in user_lower for keyword in appointment_keywords):
                 print(f"[调试] 检测到用户预约意图，当前阶段: {self.stage}")
                 self.needs_appointment = True
@@ -521,6 +645,11 @@ AI刚刚的问题：{recent_question}
         print(f"[调试] 需要预约: {self.needs_appointment}")
         print(f"[调试] 用户输入: {user_input[:50]}...")
         
+        # 在第一次对话时加载用户历史信息
+        if not self.history_loaded and len(self.conversation_history) == 0:
+            print(f"[调试] 首次对话，尝试加载用户历史信息...")
+            self._load_user_history()
+        
         # 记录对话历史
         self.conversation_history.append({
             "role": "user",
@@ -549,6 +678,7 @@ AI刚刚的问题：{recent_question}
         # 调用LLMChain
         response = self.conversation_chain.run(
             stage=stage_desc,
+            user_history=self.user_history_text,
             collected_fields=collected,
             missing_fields=missing_desc,
             history=history_text,

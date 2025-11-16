@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from agents.agent_manager import AgentManager
-from database.appointment_service import AppointmentService
+from database.appointment_service_v2 import AppointmentServiceV2
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -28,8 +28,8 @@ templates = Jinja2Templates(directory="templates")
 # 全局智能体管理器
 agent_manager = AgentManager()
 
-# 全局数据库服务
-appointment_service = AppointmentService()
+# 全局数据库服务（使用V2版本以匹配数据库架构）
+appointment_service = AppointmentServiceV2()
 
 # 会话存储（生产环境应使用Redis等）
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -39,6 +39,8 @@ class ChatMessage(BaseModel):
     """聊天消息模型"""
     message: str
     session_id: Optional[str] = None
+    user_id: Optional[int] = None  # 用于模拟不同用户（Patient_ID）
+    phone_number: Optional[str] = None  # 用户手机号（推荐使用，可获取完整历史信息）
 
 
 class ChatResponse(BaseModel):
@@ -64,6 +66,12 @@ async def chat(message: ChatMessage):
         # 生成或获取会话ID
         session_id = message.session_id or str(uuid.uuid4())
         
+        print(f"\n[主程序调试] 收到聊天请求:")
+        print(f"  - session_id: {session_id}")
+        print(f"  - user_id: {message.user_id}")
+        print(f"  - phone_number: {message.phone_number}")
+        print(f"  - message: {message.message[:50]}...")
+        
         # 初始化会话
         if session_id not in sessions:
             sessions[session_id] = {
@@ -71,8 +79,15 @@ async def chat(message: ChatMessage):
                 "created_at": None
             }
         
-        # 获取或创建智能体
-        agent = agent_manager.get_or_create_agent(session_id, "health")
+        # 获取或创建智能体（传递user_id和phone_number以支持加载历史信息）
+        print(f"[主程序调试] 调用 agent_manager.get_or_create_agent()")
+        agent = agent_manager.get_or_create_agent(
+            session_id, 
+            "health", 
+            user_id=message.user_id,
+            phone_number=message.phone_number
+        )
+        print(f"[主程序调试] Agent已创建/获取，agent.user_id={agent.user_id}, agent.phone_number={agent.phone_number}")
         
         # 处理消息
         response = agent.chat(message.message)
@@ -265,6 +280,32 @@ async def get_patients():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询患者记录失败: {str(e)}")
+
+
+@app.get("/api/users")
+async def get_users():
+    """
+    获取可用的用户列表（用于前端模拟不同用户）
+    """
+    try:
+        query = """
+            SELECT DISTINCT
+                Patient_ID,
+                Name,
+                Phone_Number,
+                Gender,
+                Age
+            FROM patient
+            ORDER BY Patient_ID DESC
+            LIMIT 20
+        """
+        users = appointment_service.db.execute_query(query)
+        return {
+            "success": True,
+            "users": users
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询用户列表失败: {str(e)}")
 
 
 @app.on_event("startup")

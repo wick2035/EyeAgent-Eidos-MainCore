@@ -2,6 +2,8 @@
 let sessionId = null;
 let currentStage = 'greeting';
 let isProcessing = false;
+let selectedUserId = null; // 选中的用户ID
+let selectedUserPhone = null; // 选中的用户手机号
 
 // DOM元素
 const chatMessages = document.getElementById('chatMessages');
@@ -14,6 +16,7 @@ const sessionIdDisplay = document.getElementById('sessionId');
 const currentStageDisplay = document.getElementById('currentStage');
 const jsonModal = document.getElementById('jsonModal');
 const jsonContent = document.getElementById('jsonContent');
+const userSelect = document.getElementById('userSelect');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -32,6 +35,31 @@ document.addEventListener('DOMContentLoaded', () => {
     exportBtn.addEventListener('click', exportPatientData);
     resetBtn.addEventListener('click', resetSession);
     
+    // 用户选择事件 - 切换用户时自动重置会话
+    userSelect.addEventListener('change', async (e) => {
+        const selectedOption = e.target.selectedOptions[0];
+        const newUserId = e.target.value ? parseInt(e.target.value) : null;
+        const newUserPhone = selectedOption ? selectedOption.getAttribute('data-phone') : null;
+        
+        // 如果用户选择发生变化，重置会话
+        if (newUserId !== selectedUserId || newUserPhone !== selectedUserPhone) {
+            selectedUserId = newUserId;
+            selectedUserPhone = newUserPhone;
+            console.log('选择的用户ID:', selectedUserId, '手机号:', selectedUserPhone);
+            
+            // 自动重置会话以加载新用户的历史信息
+            if (sessionId || chatMessages.children.length > 1) {
+                await resetSessionWithoutConfirm();
+                
+                // 如果选择了老用户，显示提示信息
+                if (selectedUserId) {
+                    const userName = selectedOption.textContent.split('(')[0].trim();
+                    addSystemMessage(`💡 已切换到用户：${userName}，系统将自动加载该用户的历史信息`);
+                }
+            }
+        }
+    });
+    
     // 自动调整textarea高度
     userInput.addEventListener('input', () => {
         userInput.style.height = 'auto';
@@ -40,6 +68,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 生成会话ID显示
     generateSessionId();
+    
+    // 加载用户列表
+    loadUserList();
 });
 
 // 生成或获取会话ID
@@ -68,6 +99,38 @@ function getCurrentTime() {
     });
 }
 
+// 加载用户列表
+async function loadUserList() {
+    try {
+        const response = await fetch('/api/users');
+        if (!response.ok) {
+            console.error('加载用户列表失败');
+            return;
+        }
+        
+        const data = await response.json();
+        if (data.success && data.users && data.users.length > 0) {
+            // 清空现有选项（除了默认的"新用户"选项）
+            userSelect.innerHTML = '<option value="">新用户（无历史记录）</option>';
+            
+            // 添加用户选项
+            data.users.forEach(user => {
+                const option = document.createElement('option');
+                option.value = user.Patient_ID;
+                option.setAttribute('data-phone', user.Phone_Number || '');
+                const gender = user.Gender || '未知';
+                const age = user.Age || '未知';
+                option.textContent = `${user.Name} (ID:${user.Patient_ID}, ${gender}, ${age}岁, ${user.Phone_Number || '无电话'})`;
+                userSelect.appendChild(option);
+            });
+            
+            console.log(`已加载 ${data.users.length} 个用户`);
+        }
+    } catch (error) {
+        console.error('加载用户列表时出错:', error);
+    }
+}
+
 // 发送消息
 async function sendMessage() {
     const message = userInput.value.trim();
@@ -90,15 +153,25 @@ async function sendMessage() {
     
     try {
         // 发送请求到后端
+        const requestBody = {
+            message: message,
+            session_id: sessionId
+        };
+        
+        // 如果选择了用户，添加 user_id 和 phone_number
+        if (selectedUserId) {
+            requestBody.user_id = selectedUserId;
+        }
+        if (selectedUserPhone) {
+            requestBody.phone_number = selectedUserPhone;
+        }
+        
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-                message: message,
-                session_id: sessionId
-            })
+            body: JSON.stringify(requestBody)
         });
         
         if (!response.ok) {
@@ -284,12 +357,8 @@ function downloadJson() {
     URL.revokeObjectURL(url);
 }
 
-// 重置会话
-async function resetSession() {
-    if (!confirm('确定要重新开始吗？当前对话记录将被清除。')) {
-        return;
-    }
-    
+// 重置会话（不需要确认，供内部调用）
+async function resetSessionWithoutConfirm() {
     showLoading();
     
     try {
@@ -322,6 +391,15 @@ async function resetSession() {
     } finally {
         hideLoading();
     }
+}
+
+// 重置会话（需要用户确认）
+async function resetSession() {
+    if (!confirm('确定要重新开始吗？当前对话记录将被清除。')) {
+        return;
+    }
+    
+    await resetSessionWithoutConfirm();
 }
 
 // 点击模态框外部关闭
