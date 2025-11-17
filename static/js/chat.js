@@ -1,9 +1,11 @@
 // 全局变量
 let sessionId = null;
 let currentStage = 'greeting';
+let currentAgent = null; // 当前使用的agent
 let isProcessing = false;
 let selectedUserId = null; // 选中的用户ID
 let selectedUserPhone = null; // 选中的用户手机号
+let currentRole = 'patient'; // 当前身份：patient 或 doctor
 
 // DOM元素
 const chatMessages = document.getElementById('chatMessages');
@@ -14,9 +16,13 @@ const resetBtn = document.getElementById('resetBtn');
 const loadingIndicator = document.getElementById('loadingIndicator');
 const sessionIdDisplay = document.getElementById('sessionId');
 const currentStageDisplay = document.getElementById('currentStage');
+const currentAgentDisplay = document.getElementById('currentAgent');
+const currentRoleDisplay = document.getElementById('currentRole');
 const jsonModal = document.getElementById('jsonModal');
 const jsonContent = document.getElementById('jsonContent');
 const userSelect = document.getElementById('userSelect');
+const roleSelect = document.getElementById('roleSelect');
+const userSelectLabel = document.getElementById('userSelectLabel');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -34,6 +40,22 @@ document.addEventListener('DOMContentLoaded', () => {
     
     exportBtn.addEventListener('click', exportPatientData);
     resetBtn.addEventListener('click', resetSession);
+    
+    // 身份选择事件 - 切换身份时自动重置会话并更新UI
+    roleSelect.addEventListener('change', async (e) => {
+        const newRole = e.target.value;
+        if (newRole !== currentRole) {
+            currentRole = newRole;
+            updateRoleUI();
+            
+            // 自动重置会话
+            if (sessionId || chatMessages.children.length > 1) {
+                await resetSessionWithoutConfirm();
+                const roleText = currentRole === 'doctor' ? '医生' : '患者';
+                addSystemMessage(`🎭 已切换到${roleText}身份，系统已重置会话`);
+            }
+        }
+    });
     
     // 用户选择事件 - 切换用户时自动重置会话
     userSelect.addEventListener('change', async (e) => {
@@ -71,7 +93,28 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 加载用户列表
     loadUserList();
+    
+    // 初始化身份UI
+    updateRoleUI();
 });
+
+// 更新身份UI
+function updateRoleUI() {
+    const roleText = currentRole === 'doctor' ? '医生' : '患者';
+    currentRoleDisplay.textContent = roleText;
+    
+    if (currentRole === 'patient') {
+        // 患者身份：只能选择自己，隐藏用户选择器或设为只读
+        userSelectLabel.textContent = '👤 我的身份：';
+        userSelect.style.display = 'inline-block';
+        addSystemMessage('💡 患者模式：您只能查看和操作自己的信息。系统会自动调用相应功能，但不能生成新报告。');
+    } else {
+        // 医生身份：可以选择任何患者
+        userSelectLabel.textContent = '👤 选择患者：';
+        userSelect.style.display = 'inline-block';
+        addSystemMessage('💡 医生模式：您可以选择任何患者，系统会根据您的对话自动选择合适的功能（咨询/报告）。');
+    }
+}
 
 // 生成或获取会话ID
 function generateSessionId() {
@@ -155,7 +198,8 @@ async function sendMessage() {
         // 发送请求到后端
         const requestBody = {
             message: message,
-            session_id: sessionId
+            session_id: sessionId,
+            role: currentRole  // 添加身份参数
         };
         
         // 如果选择了用户，添加 user_id 和 phone_number
@@ -189,6 +233,12 @@ async function sendMessage() {
         // 更新当前阶段
         currentStage = data.stage;
         updateStageDisplay(data.stage);
+        
+        // 更新当前Agent
+        if (data.agent_type) {
+            currentAgent = data.agent_type;
+            updateAgentDisplay(data.agent_type);
+        }
         
         // 添加AI响应到界面
         addMessage(data.response, 'assistant');
@@ -302,10 +352,25 @@ function updateStageDisplay(stage) {
         'ophthalmology_triage': '眼科分诊',
         'medical_history': '病史采集',
         'appointment_booking': '预约确认',
+        'select_action': '选择操作',
+        'generate_report': '生成报告',
+        'analyze_history': '分析历史',
+        'answer_question': '回答问题',
+        'compare_records': '对比记录',
         'completed': '✅ 已完成'
     };
     
     currentStageDisplay.textContent = stageNames[stage] || stage;
+}
+
+// 更新Agent显示
+function updateAgentDisplay(agentType) {
+    const agentNames = {
+        'health': '健康咨询Agent',
+        'report': '报告分析Agent'
+    };
+    
+    currentAgentDisplay.textContent = agentNames[agentType] || agentType;
 }
 
 // 导出患者数据
