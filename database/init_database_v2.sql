@@ -43,7 +43,9 @@ CREATE TABLE medical_record (
     Medical_Record_ID INT PRIMARY KEY AUTO_INCREMENT COMMENT '病例ID（唯一标识一次就诊）',
     Patient_ID INT NOT NULL COMMENT '用户ID（外键）',
     Visit_Card_Number VARCHAR(50) UNIQUE NOT NULL COMMENT '就诊卡号',
+    Report_ID VARCHAR(50) DEFAULT NULL COMMENT '报告编号',
     Visit_Date DATE NOT NULL COMMENT '就诊日期',
+    Visit_Time DATETIME DEFAULT NULL COMMENT '就诊时间（精确到时分）',
     Department VARCHAR(50) COMMENT '就诊科室',
     Chief_Complaint TEXT COMMENT '主诉',
     Present_Illness TEXT COMMENT '现病史',
@@ -53,19 +55,25 @@ CREATE TABLE medical_record (
     Medication_History TEXT COMMENT '用药史',
     Physical_Examination TEXT COMMENT '体格检查',
     Eye_Exam_Results TEXT COMMENT '眼部检查结果',
+    Special_Exams TEXT DEFAULT NULL COMMENT '专项检查项目',
+    Auxiliary_Exams TEXT DEFAULT NULL COMMENT '辅助检查项目',
     Diagnosis TEXT COMMENT '诊断',
+    AI_Diagnosis TEXT DEFAULT NULL COMMENT 'AI自动诊断结果',
     Treatment_Plan TEXT COMMENT '治疗方案',
     Medication TEXT COMMENT '处方药物',
     Surgical_History TEXT COMMENT '手术历史',
     Hospitalization_Info TEXT COMMENT '住院信息',
     Follow_Up_Date DATE COMMENT '复诊日期',
     Physician_Name VARCHAR(50) COMMENT '主治医生姓名',
+    Doctor_Signature VARCHAR(100) DEFAULT NULL COMMENT '主诊医生签名',
+    Print_Time TIMESTAMP NULL DEFAULT NULL COMMENT '病例单打印时间',
     Created_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     Updated_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     FOREIGN KEY (Patient_ID) REFERENCES patient(Patient_ID) ON DELETE CASCADE,
     INDEX idx_patient (Patient_ID),
     INDEX idx_visit_date (Visit_Date),
-    INDEX idx_visit_card (Visit_Card_Number)
+    INDEX idx_visit_card (Visit_Card_Number),
+    INDEX idx_report_id (Report_ID)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='病例记录表（一条记录代表一次就诊）';
 
 -- 3. 医生表 (doctor) - 保持不变
