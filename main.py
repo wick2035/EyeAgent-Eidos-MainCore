@@ -11,6 +11,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from agents.agent_manager import AgentManager
 from database.appointment_service_v2 import AppointmentServiceV2
+from database.report_service import ReportService
+from utils.report_generator import ReportGenerator
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -31,6 +33,10 @@ agent_manager = AgentManager()
 # 全局数据库服务（使用V2版本以匹配数据库架构）
 appointment_service = AppointmentServiceV2()
 
+# 报告服务
+report_service = ReportService()
+report_generator = ReportGenerator()
+
 # 会话存储（生产环境应使用Redis等）
 sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -41,6 +47,7 @@ class ChatMessage(BaseModel):
     session_id: Optional[str] = None
     user_id: Optional[int] = None  # 用于模拟不同用户（Patient_ID）
     phone_number: Optional[str] = None  # 用户手机号（推荐使用，可获取完整历史信息）
+    role: Optional[str] = "patient"  # 用户角色：patient（患者）或 doctor（医生）
 
 
 class ChatResponse(BaseModel):
@@ -49,6 +56,22 @@ class ChatResponse(BaseModel):
     session_id: str
     is_completed: bool
     stage: str
+    agent_type: Optional[str] = None  # 当前使用的agent类型
+
+
+class ReportRequest(BaseModel):
+    """报告请求模型"""
+    patient_id: Optional[int] = None
+    phone_number: Optional[str] = None
+    medical_record_id: Optional[int] = None
+
+
+class AnalysisRequest(BaseModel):
+    """分析请求模型"""
+    patient_id: Optional[int] = None
+    phone_number: Optional[str] = None
+    analysis_type: str = "trends"  # trends, compare, anomalies
+    record_ids: Optional[list] = None  # 用于对比的记录ID列表
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -60,14 +83,19 @@ async def index(request: Request):
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
     """
-    处理聊天消息
+    处理聊天消息 - 智能路由版本
+    根据用户角色和消息内容自动选择合适的Agent
     """
     try:
+        from utils.intent_detector import get_intent_detector
+        
         # 生成或获取会话ID
         session_id = message.session_id or str(uuid.uuid4())
+        role = message.role or "patient"
         
-        print(f"\n[主程序调试] 收到聊天请求:")
+        print(f"\n[主程序] 收到聊天请求:")
         print(f"  - session_id: {session_id}")
+        print(f"  - role: {role}")
         print(f"  - user_id: {message.user_id}")
         print(f"  - phone_number: {message.phone_number}")
         print(f"  - message: {message.message[:50]}...")
@@ -76,21 +104,81 @@ async def chat(message: ChatMessage):
         if session_id not in sessions:
             sessions[session_id] = {
                 "messages": [],
-                "created_at": None
+                "created_at": None,
+                "role": role,
+                "current_agent": None
             }
         
-        # 获取或创建智能体（传递user_id和phone_number以支持加载历史信息）
-        print(f"[主程序调试] 调用 agent_manager.get_or_create_agent()")
+        # 获取对话历史（用于意图识别）
+        conversation_history = sessions[session_id].get("messages", [])
+        
+        # 1. 意图识别 - 判断使用哪个Agent
+        intent_detector = get_intent_detector()
+        intent_result = intent_detector.detect_intent(
+            message.message,
+            role=role,
+            conversation_history=conversation_history
+        )
+        
+        print(f"[意图识别] Agent类型: {intent_result['agent_type']}, "
+              f"置信度: {intent_result['confidence']:.2f}, "
+              f"原因: {intent_result['reason']}")
+        
+        # 检查是否被阻止（患者尝试生成报告等）
+        if intent_result.get('blocked'):
+            print(f"[权限控制] 操作被阻止: {intent_result['reason']}")
+            response = f"抱歉，{intent_result['reason']}。您可以查看和分析现有的报告，但无法生成新报告。"
+            
+            # 保存消息到会话
+            sessions[session_id]["messages"].append({
+                "role": "user",
+                "content": message.message
+            })
+            sessions[session_id]["messages"].append({
+                "role": "assistant",
+                "content": response
+            })
+            
+            return ChatResponse(
+                response=response,
+                session_id=session_id,
+                is_completed=False,
+                stage="blocked",
+                agent_type=None
+            )
+        
+        # 2. 获取或创建对应的Agent
+        agent_type = intent_result['agent_type']
+        current_agent = sessions[session_id].get("current_agent")
+        
+        # 判断是否需要切换Agent
+        if current_agent and current_agent != agent_type:
+            print(f"[Agent切换] {current_agent} -> {agent_type}")
+            # 重置agent以切换
+            agent_manager.reset_agent(session_id)
+        
+        # 创建或获取Agent
         agent = agent_manager.get_or_create_agent(
             session_id, 
-            "health", 
+            agent_type,
             user_id=message.user_id,
-            phone_number=message.phone_number
+            phone_number=message.phone_number,
+            role=role  # 传递角色参数
         )
-        print(f"[主程序调试] Agent已创建/获取，agent.user_id={agent.user_id}, agent.phone_number={agent.phone_number}")
+        
+        # 更新当前使用的Agent
+        sessions[session_id]["current_agent"] = agent_type
+        
+        print(f"[主程序] 使用Agent: {agent_type}")
         
         # 处理消息
-        response = agent.chat(message.message)
+        if agent_type == "health":
+            response = agent.chat(message.message)
+            is_completed = agent.is_completed()
+            stage = agent.stage.value
+        else:  # report agent
+            response, is_completed = agent.chat(message.message)
+            stage = agent.stage.value
         
         # 保存消息到会话
         sessions[session_id]["messages"].append({
@@ -102,12 +190,10 @@ async def chat(message: ChatMessage):
             "content": response
         })
         
-        # 检查是否完成对话，如果完成则保存到数据库
-        is_completed = agent.is_completed()
+        print(f"[主程序] 对话完成状态: {is_completed}")
         
-        print(f"[调试] 对话完成状态: {is_completed}, 需要预约: {agent.needs_appointment}")
-        
-        if is_completed and agent.needs_appointment:
+        # 3. 对于health agent，检查是否需要保存预约
+        if agent_type == "health" and is_completed and hasattr(agent, 'needs_appointment') and agent.needs_appointment:
             try:
                 print("[调试] 开始获取患者数据并保存到数据库...")
                 
@@ -144,10 +230,13 @@ async def chat(message: ChatMessage):
             response=response,
             session_id=session_id,
             is_completed=is_completed,
-            stage=agent.stage.value
+            stage=stage,
+            agent_type=agent_type
         )
     
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"处理消息时出错: {str(e)}")
 
 
@@ -308,6 +397,210 @@ async def get_users():
         raise HTTPException(status_code=500, detail=f"查询用户列表失败: {str(e)}")
 
 
+# ==================== 报告相关API ====================
+
+@app.post("/api/report/generate")
+async def generate_report(request: ReportRequest):
+    """
+    生成病例报告PDF
+    
+    Args:
+        request: 包含patient_id或phone_number，以及可选的medical_record_id
+        
+    Returns:
+        生成结果和文件路径
+    """
+    try:
+        # 获取用户ID
+        patient_id = request.patient_id
+        if not patient_id and request.phone_number:
+            user_info = report_service.db.execute_one(
+                "SELECT Patient_ID FROM patient WHERE Phone_Number = %s",
+                (request.phone_number,)
+            )
+            if user_info:
+                patient_id = user_info['Patient_ID']
+        
+        if not patient_id:
+            raise HTTPException(status_code=400, detail="未提供有效的患者信息")
+        
+        # 如果指定了病例ID，生成单个报告
+        if request.medical_record_id:
+            pdf_path = report_generator.generate_report_from_db(request.medical_record_id)
+            if pdf_path:
+                return {
+                    "success": True,
+                    "message": "报告生成成功",
+                    "file_path": pdf_path,
+                    "medical_record_id": request.medical_record_id
+                }
+            else:
+                raise HTTPException(status_code=500, detail="报告生成失败")
+        
+        # 否则生成最新的报告
+        reports = report_service.get_all_reports_by_patient(patient_id, limit=1)
+        if not reports:
+            raise HTTPException(status_code=404, detail="未找到病例记录")
+        
+        latest_record_id = reports[0]['Medical_Record_ID']
+        pdf_path = report_generator.generate_report_from_db(latest_record_id)
+        
+        if pdf_path:
+            return {
+                "success": True,
+                "message": "报告生成成功",
+                "file_path": pdf_path,
+                "medical_record_id": latest_record_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="报告生成失败")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"生成报告时出错: {str(e)}")
+
+
+@app.get("/api/report/history/{patient_id}")
+async def get_report_history(patient_id: int):
+    """
+    获取用户的历史报告列表
+    
+    Args:
+        patient_id: 用户ID
+        
+    Returns:
+        报告列表
+    """
+    try:
+        reports = report_service.get_all_reports_by_patient(patient_id)
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "count": len(reports),
+            "reports": reports
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询报告历史失败: {str(e)}")
+
+
+@app.post("/api/report/analyze")
+async def analyze_reports(request: AnalysisRequest):
+    """
+    分析历史报告
+    
+    Args:
+        request: 包含patient_id或phone_number，以及analysis_type
+        
+    Returns:
+        分析结果
+    """
+    try:
+        # 获取用户ID
+        patient_id = request.patient_id
+        if not patient_id and request.phone_number:
+            user_info = report_service.db.execute_one(
+                "SELECT Patient_ID FROM patient WHERE Phone_Number = %s",
+                (request.phone_number,)
+            )
+            if user_info:
+                patient_id = user_info['Patient_ID']
+        
+        if not patient_id:
+            raise HTTPException(status_code=400, detail="未提供有效的患者信息")
+        
+        # 创建临时的 ReportAgent 进行分析
+        from agents.agent_2 import ReportAgent
+        agent = ReportAgent(patient_id=patient_id)
+        
+        # 根据分析类型执行不同的分析
+        if request.analysis_type == "trends":
+            result = agent.analyze_history_trends(patient_id)
+        elif request.analysis_type == "anomalies":
+            result = agent.detect_anomalies(patient_id)
+        elif request.analysis_type == "compare":
+            if not request.record_ids or len(request.record_ids) < 2:
+                raise HTTPException(status_code=400, detail="对比分析需要至少两个病例ID")
+            result = agent.compare_records(request.record_ids)
+        else:
+            raise HTTPException(status_code=400, detail=f"未知的分析类型: {request.analysis_type}")
+        
+        return {
+            "success": True,
+            "analysis_type": request.analysis_type,
+            "result": result
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"分析报告时出错: {str(e)}")
+
+
+@app.post("/api/chat/report", response_model=ChatResponse)
+async def chat_report(message: ChatMessage):
+    """
+    报告智能体对话接口
+    
+    与 /api/chat 类似，但使用 ReportAgent
+    """
+    try:
+        # 生成或获取会话ID
+        session_id = message.session_id or str(uuid.uuid4())
+        
+        print(f"\n[报告Agent] 收到对话请求:")
+        print(f"  - session_id: {session_id}")
+        print(f"  - user_id: {message.user_id}")
+        print(f"  - phone_number: {message.phone_number}")
+        print(f"  - message: {message.message[:50]}...")
+        
+        # 初始化会话
+        if session_id not in sessions:
+            sessions[session_id] = {
+                "messages": [],
+                "agent_type": "report",
+                "created_at": None
+            }
+        
+        # 获取或创建报告智能体
+        agent = agent_manager.get_or_create_agent(
+            session_id, 
+            "report", 
+            user_id=message.user_id,
+            phone_number=message.phone_number
+        )
+        
+        # 处理消息
+        response, is_completed = agent.chat(message.message)
+        
+        # 保存消息到会话
+        sessions[session_id]["messages"].append({
+            "role": "user",
+            "content": message.message
+        })
+        sessions[session_id]["messages"].append({
+            "role": "assistant",
+            "content": response
+        })
+        
+        # 返回响应
+        return ChatResponse(
+            response=response,
+            session_id=session_id,
+            is_completed=is_completed,
+            stage=agent.stage.value
+        )
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"处理报告对话时出错: {str(e)}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
@@ -323,6 +616,7 @@ async def shutdown_event():
     print("系统正在关闭...")
     # 关闭数据库连接
     appointment_service.close()
+    report_service.close()
     print("数据库连接已关闭")
 
 

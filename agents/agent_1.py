@@ -27,13 +27,14 @@ class ConversationStage(Enum):
 class HealthAgent:
     """1号健康咨询智能体"""
     
-    def __init__(self, user_id: int = None, phone_number: str = None):
+    def __init__(self, user_id: int = None, phone_number: str = None, role: str = "patient"):
         """
         初始化健康智能体
         
         Args:
             user_id: 用户ID（Patient_ID，仅查询单个病例，不推荐）
             phone_number: 手机号（推荐使用，可查询该用户的所有历史病例）
+            role: 用户角色（patient/doctor）
         """
         self.llm = get_llm()
         self.data_handler = PatientDataHandler()
@@ -41,6 +42,9 @@ class HealthAgent:
         self.conversation_history = []
         self.collected_fields = set()  # 已收集的字段
         self.needs_appointment = False  # 是否需要预约
+        
+        # 用户角色
+        self.role = role  # patient 或 doctor
         
         # 用户历史信息相关
         self.user_id = user_id  # 用户ID（Patient_ID）
