@@ -12,7 +12,10 @@ from pydantic import BaseModel
 from agents.agent_manager import AgentManager
 from database.appointment_service_v2 import AppointmentServiceV2
 from database.report_service import ReportService
+from database.prescription_service import PrescriptionService
+from database.reminder_service import ReminderService
 from utils.report_generator import ReportGenerator
+from utils.prescription_generator import PrescriptionGenerator
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -36,6 +39,13 @@ appointment_service = AppointmentServiceV2()
 # 报告服务
 report_service = ReportService()
 report_generator = ReportGenerator()
+
+# 处方服务
+prescription_service = PrescriptionService()
+prescription_generator = PrescriptionGenerator()
+
+# 提醒服务
+reminder_service = ReminderService()
 
 # 会话存储（生产环境应使用Redis等）
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -601,6 +611,402 @@ async def chat_report(message: ChatMessage):
         raise HTTPException(status_code=500, detail=f"处理报告对话时出错: {str(e)}")
 
 
+# ==================== 处方相关API ====================
+
+class PrescriptionRequest(BaseModel):
+    """处方请求模型"""
+    prescription_id: int
+    patient_id: Optional[int] = None
+    phone_number: Optional[str] = None
+
+
+@app.post("/api/prescription/generate")
+async def generate_prescription(request: PrescriptionRequest):
+    """
+    生成处方单PDF
+    
+    Args:
+        request: 包含prescription_id（必填），以及可选的patient_id/phone_number用于验证
+        
+    Returns:
+        生成结果和文件路径
+    """
+    try:
+        print(f"[处方API] 收到生成处方单请求: Prescription_ID={request.prescription_id}")
+        
+        # 可选：验证处方是否属于指定患者
+        if request.patient_id or request.phone_number:
+            prescription_data = prescription_service.get_prescription_full(request.prescription_id)
+            if not prescription_data:
+                raise HTTPException(status_code=404, detail="未找到处方记录")
+            
+            # 验证患者ID
+            if request.patient_id:
+                if prescription_data['patient_info']['patient_id'] != request.patient_id:
+                    raise HTTPException(status_code=403, detail="无权访问此处方")
+            
+            # 验证手机号
+            if request.phone_number:
+                if prescription_data['patient_info']['phone'] != request.phone_number:
+                    raise HTTPException(status_code=403, detail="无权访问此处方")
+        
+        # 生成处方单
+        pdf_path = prescription_generator.generate_prescription_from_db(request.prescription_id)
+        
+        if pdf_path:
+            return {
+                "success": True,
+                "message": "处方单生成成功",
+                "file_path": pdf_path,
+                "prescription_id": request.prescription_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="处方单生成失败")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"生成处方单时出错: {str(e)}")
+
+
+@app.get("/api/prescription/list/{patient_id}")
+async def get_prescription_list(patient_id: int, limit: int = 50):
+    """
+    获取患者的处方列表
+    
+    Args:
+        patient_id: 患者ID
+        limit: 返回记录数限制（默认50）
+        
+    Returns:
+        处方摘要列表
+    """
+    try:
+        print(f"[处方API] 查询患者处方列表: Patient_ID={patient_id}")
+        
+        prescriptions = prescription_service.get_prescriptions_by_patient(patient_id, limit)
+        
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "count": len(prescriptions),
+            "prescriptions": prescriptions
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询处方列表失败: {str(e)}")
+
+
+@app.get("/api/prescription/list/phone/{phone_number}")
+async def get_prescription_list_by_phone(phone_number: str, limit: int = 50):
+    """
+    通过手机号获取患者的处方列表
+    
+    Args:
+        phone_number: 患者手机号
+        limit: 返回记录数限制（默认50）
+        
+    Returns:
+        处方摘要列表
+    """
+    try:
+        print(f"[处方API] 通过手机号查询处方列表: Phone={phone_number}")
+        
+        prescriptions = prescription_service.get_prescriptions_by_phone(phone_number, limit)
+        
+        return {
+            "success": True,
+            "phone_number": phone_number,
+            "count": len(prescriptions),
+            "prescriptions": prescriptions
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询处方列表失败: {str(e)}")
+
+
+@app.get("/api/prescription/detail/{prescription_id}")
+async def get_prescription_detail(prescription_id: int):
+    """
+    获取单个处方的完整详情
+    
+    Args:
+        prescription_id: 处方ID
+        
+    Returns:
+        完整处方信息（包含药物明细）
+    """
+    try:
+        print(f"[处方API] 查询处方详情: Prescription_ID={prescription_id}")
+        
+        prescription_data = prescription_service.get_prescription_full(prescription_id)
+        
+        if not prescription_data:
+            raise HTTPException(status_code=404, detail="未找到处方记录")
+        
+        return {
+            "success": True,
+            "prescription": prescription_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询处方详情失败: {str(e)}")
+
+
+# ==================== 提醒相关API ====================
+
+class ReminderRequest(BaseModel):
+    """提醒请求模型"""
+    patient_id: Optional[int] = None
+    phone_number: Optional[str] = None
+    reminder_id: Optional[int] = None
+    status: Optional[str] = None
+    reminder_type: Optional[str] = None
+
+
+@app.get("/api/reminder/list/{patient_id}")
+async def get_reminder_list(patient_id: int, status: Optional[str] = None, limit: int = 50):
+    """
+    获取患者的提醒列表
+
+    Args:
+        patient_id: 患者ID
+        status: 状态过滤 (pending/sent/completed/cancelled/expired)
+        limit: 返回记录数限制（默认50）
+
+    Returns:
+        提醒列表
+    """
+    try:
+        print(f"[提醒API] 查询患者提醒列表: Patient_ID={patient_id}, Status={status}")
+
+        reminders = reminder_service.get_reminders_by_patient(patient_id, status=status, limit=limit)
+
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "count": len(reminders),
+            "reminders": reminders
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询提醒列表失败: {str(e)}")
+
+
+@app.get("/api/reminder/list/phone/{phone_number}")
+async def get_reminder_list_by_phone(phone_number: str, status: Optional[str] = None, limit: int = 50):
+    """
+    通过手机号获取患者的提醒列表
+
+    Args:
+        phone_number: 患者手机号
+        status: 状态过滤
+        limit: 返回记录数限制
+
+    Returns:
+        提醒列表
+    """
+    try:
+        print(f"[提醒API] 通过手机号查询提醒列表: Phone={phone_number}, Status={status}")
+
+        reminders = reminder_service.get_reminders_by_phone(phone_number, status=status, limit=limit)
+
+        return {
+            "success": True,
+            "phone_number": phone_number,
+            "count": len(reminders),
+            "reminders": reminders
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询提醒列表失败: {str(e)}")
+
+
+@app.get("/api/reminder/pending")
+async def get_pending_reminders(limit: int = 100):
+    """
+    获取待发送的提醒（用于定时任务）
+
+    Args:
+        limit: 返回记录数限制（默认100）
+
+    Returns:
+        待发送提醒列表
+    """
+    try:
+        print(f"[提醒API] 查询待发送提醒")
+
+        reminders = reminder_service.get_pending_reminders(limit=limit)
+
+        return {
+            "success": True,
+            "count": len(reminders),
+            "reminders": reminders
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询待发送提醒失败: {str(e)}")
+
+
+@app.post("/api/reminder/create")
+async def create_reminder(request: Dict[str, Any]):
+    """
+    创建新提醒
+
+    Args:
+        request: 提醒数据（包含patient_id, reminder_type, reminder_title等）
+
+    Returns:
+        创建结果
+    """
+    try:
+        print(f"[提醒API] 创建提醒: {request}")
+
+        from datetime import datetime
+
+        # 解析时间字符串
+        scheduled_time_str = request.get('scheduled_time')
+        if isinstance(scheduled_time_str, str):
+            scheduled_time = datetime.fromisoformat(scheduled_time_str.replace('Z', '+00:00'))
+        else:
+            scheduled_time = scheduled_time_str
+
+        result = reminder_service.create_reminder(
+            patient_id=request['patient_id'],
+            reminder_type=request['reminder_type'],
+            reminder_title=request['reminder_title'],
+            reminder_content=request['reminder_content'],
+            scheduled_time=scheduled_time,
+            advance_days=request.get('advance_days', 1),
+            priority=request.get('priority', 'normal'),
+            medical_record_id=request.get('medical_record_id'),
+            appointment_id=request.get('appointment_id'),
+            prescription_id=request.get('prescription_id'),
+            repeat_type=request.get('repeat_type', 'once'),
+            max_repeat_count=request.get('max_repeat_count', 1),
+            created_by=request.get('created_by', 'system'),
+            notes=request.get('notes')
+        )
+
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"创建提醒失败: {str(e)}")
+
+
+@app.post("/api/reminder/update")
+async def update_reminder(request: ReminderRequest):
+    """
+    更新提醒状态
+
+    Args:
+        request: 包含reminder_id和status
+
+    Returns:
+        更新结果
+    """
+    try:
+        print(f"[提醒API] 更新提醒状态: ID={request.reminder_id}, Status={request.status}")
+
+        if not request.reminder_id or not request.status:
+            raise HTTPException(status_code=400, detail="缺少必需参数: reminder_id和status")
+
+        result = reminder_service.update_reminder_status(
+            reminder_id=request.reminder_id,
+            status=request.status,
+            action_by='api'
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"更新提醒失败: {str(e)}")
+
+
+@app.post("/api/chat/reminder", response_model=ChatResponse)
+async def chat_reminder(message: ChatMessage):
+    """
+    提醒智能体对话接口
+
+    与 /api/chat 类似，但使用 ReminderAgent
+    """
+    try:
+        # 生成或获取会话ID
+        session_id = message.session_id or str(uuid.uuid4())
+
+        print(f"\n[提醒Agent] 收到对话请求:")
+        print(f"  - session_id: {session_id}")
+        print(f"  - user_id: {message.user_id}")
+        print(f"  - phone_number: {message.phone_number}")
+        print(f"  - message: {message.message[:50]}...")
+
+        # 初始化会话
+        if session_id not in sessions:
+            sessions[session_id] = {
+                "messages": [],
+                "agent_type": "reminder",
+                "created_at": None
+            }
+
+        # 获取或创建提醒智能体
+        agent = agent_manager.get_or_create_agent(
+            session_id,
+            "reminder",
+            user_id=message.user_id,
+            phone_number=message.phone_number,
+            role=message.role or "patient"
+        )
+
+        # 处理消息
+        response, is_completed = agent.chat(message.message)
+
+        # 保存消息到会话
+        sessions[session_id]["messages"].append({
+            "role": "user",
+            "content": message.message
+        })
+        sessions[session_id]["messages"].append({
+            "role": "assistant",
+            "content": response
+        })
+
+        # 返回响应
+        return ChatResponse(
+            response=response,
+            session_id=session_id,
+            is_completed=is_completed,
+            stage=agent.stage.value,
+            agent_type="reminder"
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"处理提醒对话时出错: {str(e)}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
@@ -617,6 +1023,8 @@ async def shutdown_event():
     # 关闭数据库连接
     appointment_service.close()
     report_service.close()
+    prescription_service.close()
+    reminder_service.close()
     print("数据库连接已关闭")
 
 

@@ -25,6 +25,15 @@ class IntentDetector:
         '查看', '查询', '查找', '检索',
         '生成', '导出', '下载'
     ]
+
+    # Agent3相关关键词（提醒、复诊、用药）
+    REMINDER_KEYWORDS = [
+        '提醒', '复诊', '随访', '复查', '定期',
+        '用药', '吃药', '服药', '按时', '定时',
+        '提示', '通知', '闹钟', '备忘',
+        '到期', '过期', '应该', '该去',
+        '配置', '设置', '偏好', '免打扰'
+    ]
     
     def __init__(self):
         self.llm = get_llm()
@@ -45,7 +54,7 @@ class IntentDetector:
             
         Returns:
             {
-                'agent_type': 'health' 或 'report',
+                'agent_type': 'health' 或 'report' 或 'reminder',
                 'confidence': 置信度 (0-1),
                 'reason': 判断原因
             }
@@ -53,6 +62,7 @@ class IntentDetector:
         # 1. 基于关键词的快速判断
         health_score = self._calculate_keyword_score(message, self.HEALTH_KEYWORDS)
         report_score = self._calculate_keyword_score(message, self.REPORT_KEYWORDS)
+        reminder_score = self._calculate_keyword_score(message, self.REMINDER_KEYWORDS)
         
         # 2. 特殊规则判断
         
@@ -65,7 +75,16 @@ class IntentDetector:
                 'blocked': True
             }
         
-        # 规则2：明确的报告相关查询
+        # 规则2：明确的提醒相关查询（优先级最高）
+        reminder_triggers = ['查看提醒', '我的提醒', '提醒列表', '创建提醒', '添加提醒', '取消提醒', '完成提醒', '复诊提醒', '用药提醒']
+        if any(trigger in message for trigger in reminder_triggers):
+            return {
+                'agent_type': 'reminder',
+                'confidence': 0.95,
+                'reason': f'匹配提醒触发词: {message[:20]}...'
+            }
+
+        # 规则3：明确的报告相关查询
         report_triggers = ['查看报告', '历史报告', '历史记录', '病例报告', '分析病情', '对比']
         if any(trigger in message for trigger in report_triggers):
             return {
@@ -73,8 +92,8 @@ class IntentDetector:
                 'confidence': 0.9,
                 'reason': f'匹配报告触发词: {message[:20]}...'
             }
-        
-        # 规则3：明确的健康咨询
+
+        # 规则4：明确的健康咨询
         health_triggers = ['不舒服', '预约', '挂号', '症状', '疼', '痛']
         if any(trigger in message for trigger in health_triggers):
             return {
@@ -83,18 +102,27 @@ class IntentDetector:
                 'reason': f'匹配健康咨询触发词: {message[:20]}...'
             }
         
-        # 3. 基于评分判断
-        if report_score > health_score * 1.5:  # 报告分数明显更高
+        # 3. 基于评分判断（三方比较）
+        max_score = max(health_score, report_score, reminder_score)
+        total_score = health_score + report_score + reminder_score + 0.1
+
+        if max_score == reminder_score and reminder_score > 0:
+            return {
+                'agent_type': 'reminder',
+                'confidence': min(reminder_score / total_score, 0.95),
+                'reason': f'关键词分析: 提醒={reminder_score:.2f}, 报告={report_score:.2f}, 健康={health_score:.2f}'
+            }
+        elif max_score == report_score and report_score > health_score * 1.5:
             return {
                 'agent_type': 'report',
-                'confidence': min(report_score / (health_score + report_score + 0.1), 0.95),
-                'reason': f'关键词分析: 报告={report_score:.2f}, 健康={health_score:.2f}'
+                'confidence': min(report_score / total_score, 0.95),
+                'reason': f'关键词分析: 报告={report_score:.2f}, 健康={health_score:.2f}, 提醒={reminder_score:.2f}'
             }
-        elif health_score > report_score * 1.5:  # 健康咨询分数明显更高
+        elif max_score == health_score and health_score > report_score * 1.5:
             return {
                 'agent_type': 'health',
-                'confidence': min(health_score / (health_score + report_score + 0.1), 0.95),
-                'reason': f'关键词分析: 健康={health_score:.2f}, 报告={report_score:.2f}'
+                'confidence': min(health_score / total_score, 0.95),
+                'reason': f'关键词分析: 健康={health_score:.2f}, 报告={report_score:.2f}, 提醒={reminder_score:.2f}'
             }
         
         # 4. 使用LLM进行更精确的判断（仅在关键词判断不明确时）
@@ -152,9 +180,10 @@ class IntentDetector:
         
         prompt = f"""你是一个智能医疗系统的意图识别助手。请判断用户的消息应该由哪个Agent处理。
 
-系统有两个Agent：
+系统有三个Agent：
 1. **健康咨询Agent**：处理健康咨询、症状评估、医生预约等
 2. **报告分析Agent**：处理病例报告查看、历史分析、记录对比等
+3. **提醒管理Agent**：处理复诊提醒、预约提醒、用药提醒的查看、创建和管理
 
 用户角色：{role}（doctor=医生，patient=患者）
 注意：患者不能生成新报告，只能查看和分析现有报告。
@@ -168,7 +197,7 @@ class IntentDetector:
 
 请以JSON格式回复（只输出JSON，不要其他文字）：
 {{
-    "agent_type": "health" 或 "report",
+    "agent_type": "health" 或 "report" 或 "reminder",
     "confidence": 0.0-1.0之间的置信度,
     "reason": "判断原因"
 }}
@@ -187,7 +216,7 @@ class IntentDetector:
                 result = json.loads(json_str)
                 
                 # 验证结果
-                if result.get('agent_type') in ['health', 'report']:
+                if result.get('agent_type') in ['health', 'report', 'reminder']:
                     return result
             
             # 如果解析失败，使用默认值
