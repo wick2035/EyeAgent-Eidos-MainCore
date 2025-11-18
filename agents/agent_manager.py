@@ -4,6 +4,7 @@
 from typing import Dict, Any
 from agents.agent_1 import HealthAgent
 from agents.agent_2 import ReportAgent
+from agents.agent_3 import ReminderAgent
 
 
 class AgentManager:
@@ -21,6 +22,8 @@ class AgentManager:
             self.agents[agent_id] = HealthAgent(user_id=user_id, phone_number=phone_number, role=role)
         elif agent_type == "report":
             self.agents[agent_id] = ReportAgent(patient_id=user_id, phone_number=phone_number, role=role)
+        elif agent_type == "reminder":
+            self.agents[agent_id] = ReminderAgent(patient_id=user_id, phone_number=phone_number, role=role)
         else:
             raise ValueError(f"未知的智能体类型: {agent_type}")
         

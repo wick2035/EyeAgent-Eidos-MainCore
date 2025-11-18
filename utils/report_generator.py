@@ -234,18 +234,41 @@ class ReportGenerator:
     
     def _replace_placeholders_in_paragraph(self, paragraph, placeholders: Dict[str, str]):
         """
-        在段落中替换占位符
+        在段落中替换占位符（处理跨run的情况）
         
         Args:
             paragraph: 段落对象
             placeholders: 占位符映射
         """
+        # 获取完整的段落文本
+        full_text = paragraph.text
+        
+        # 检查是否需要替换
+        need_replace = False
+        for placeholder in placeholders.keys():
+            if placeholder in full_text:
+                need_replace = True
+                break
+        
+        if not need_replace:
+            return
+        
+        # 执行替换
         for placeholder, value in placeholders.items():
-            if placeholder in paragraph.text:
-                # 保留原有格式
-                for run in paragraph.runs:
-                    if placeholder in run.text:
-                        run.text = run.text.replace(placeholder, value)
+            full_text = full_text.replace(placeholder, str(value))
+        
+        # 清空段落的所有runs，保留第一个run来写入新文本
+        # 保存第一个run的格式
+        if paragraph.runs:
+            first_run = paragraph.runs[0]
+            # 清空所有runs
+            for run in paragraph.runs:
+                run.text = ''
+            # 在第一个run中写入替换后的完整文本
+            first_run.text = full_text
+        else:
+            # 如果没有runs，创建一个新的
+            paragraph.add_run(full_text)
     
     def _create_new_document(self, data: Dict[str, Any]) -> Document:
         """
