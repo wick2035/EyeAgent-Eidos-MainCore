@@ -39,19 +39,23 @@ class IntentDetector:
         self.llm = get_llm()
     
     def detect_intent(
-        self, 
-        message: str, 
+        self,
+        message: str,
         role: str = 'patient',
-        conversation_history: list = None
+        conversation_history: list = None,
+        current_agent: str = None,
+        current_stage: str = None
     ) -> Dict[str, Any]:
         """
         检测用户意图
-        
+
         Args:
             message: 用户消息
             role: 用户角色（doctor/patient）
             conversation_history: 对话历史
-            
+            current_agent: 当前使用的agent类型
+            current_stage: 当前agent的对话阶段
+
         Returns:
             {
                 'agent_type': 'health' 或 'report' 或 'reminder',
@@ -59,6 +63,36 @@ class IntentDetector:
                 'reason': 判断原因
             }
         """
+        # 0. 检查对话状态 - 如果agent正在执行关键流程，优先保持当前agent
+        if current_agent and current_stage:
+            # 定义需要保持的关键阶段（不应切换agent）
+            critical_stages = [
+                'symptom_assessment',  # 症状评估中
+                'appointment_inquiry',  # 预约询问中
+                'patient_info_collection',  # 收集患者信息中
+                'ophthalmology_triage',  # 眼科分诊中
+                'medical_history',  # 病史采集中
+                'appointment_booking'  # 预约中
+            ]
+
+            # 如果在关键阶段，除非用户明确要求切换，否则保持当前agent
+            if current_stage in critical_stages:
+                # 检查是否有明确的切换意图
+                explicit_switch_keywords = [
+                    '查看报告', '看一下报告', '我的报告', '历史报告', '病例报告',
+                    '查看提醒', '我的提醒', '提醒列表', '创建提醒'
+                ]
+
+                has_explicit_switch = any(kw in message for kw in explicit_switch_keywords)
+
+                if not has_explicit_switch:
+                    print(f"[IntentDetector] 当前处于关键阶段 {current_stage}，保持 {current_agent} agent")
+                    return {
+                        'agent_type': current_agent,
+                        'confidence': 0.95,
+                        'reason': f'正在进行{current_stage}，保持当前agent'
+                    }
+
         # 1. 基于关键词的快速判断
         health_score = self._calculate_keyword_score(message, self.HEALTH_KEYWORDS)
         report_score = self._calculate_keyword_score(message, self.REPORT_KEYWORDS)
@@ -85,16 +119,34 @@ class IntentDetector:
             }
 
         # 规则3：明确的报告相关查询
-        report_triggers = ['查看报告', '历史报告', '历史记录', '病例报告', '分析病情', '对比']
-        if any(trigger in message for trigger in report_triggers):
+        # 注意：排除那些只是在回答问题时提到"记录"的情况
+        report_triggers = ['查看报告', '历史报告', '病例报告', '分析病情', '对比病情', '生成报告']
+
+        # 检查是否是简单的回答（比如"可以参考"、"有"、"没有"等）
+        is_simple_answer = any(pattern in message for pattern in [
+            '可以', '好的', '是的', '对', '没有', '有', '无',
+            '参考', '就', '只是', '仅'
+        ]) and len(message) < 20  # 简短回答
+
+        if any(trigger in message for trigger in report_triggers) and not is_simple_answer:
             return {
                 'agent_type': 'report',
                 'confidence': 0.9,
                 'reason': f'匹配报告触发词: {message[:20]}...'
             }
 
-        # 规则4：明确的健康咨询
-        health_triggers = ['不舒服', '预约', '挂号', '症状', '疼', '痛']
+        # 规则4：明确的健康咨询和预约
+        # 超强预约意图（优先级最高）
+        strong_appointment_triggers = ['我要约', '我想约', '帮我约', '约医生', '约个医生', '预约医生', '挂号']
+        if any(trigger in message for trigger in strong_appointment_triggers):
+            return {
+                'agent_type': 'health',
+                'confidence': 0.98,
+                'reason': f'强预约意图: {message[:20]}...'
+            }
+
+        # 普通健康咨询触发
+        health_triggers = ['不舒服', '预约', '症状', '疼', '痛', '眼睛', '视力', '模糊']
         if any(trigger in message for trigger in health_triggers):
             return {
                 'agent_type': 'health',

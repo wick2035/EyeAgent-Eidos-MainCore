@@ -361,7 +361,7 @@ class UserHistoryServiceV2:
             "medical_records": medical_records,
             "historical_appointments": historical_appointments,
             "current_future_appointments": current_future_appointments,
-            "has_history": bool(medical_records or historical_appointments)
+            "has_history": bool(basic_info)  # 修复：基于patient表是否有记录判断，而非就诊记录
         }
         
         logger.info(f"用户完整信息查询完成: Patient_ID={patient_id}, "
@@ -459,11 +459,12 @@ class UserHistoryServiceV2:
             格式化的用户历史信息文本
         """
         complete_info = self.get_user_complete_info_by_phone(phone_number)
-        
+
+        # 修复：区分"无patient记录"vs"无就诊记录"
         if not complete_info["has_history"]:
-            return "该用户为新用户，暂无历史就诊记录。"
-        
-        # 使用Patient_ID调用标准格式化方法
+            return "该用户为新用户，数据库中无patient记录。"
+
+        # 使用Patient_ID调用标准格式化方法（会显示基础信息，即使无就诊记录）
         return self.format_user_history_text(complete_info["patient_id"])
     
     def close(self):

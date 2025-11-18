@@ -109,10 +109,10 @@ class HealthAgent:
             
             print(f"[调试] 格式化的历史信息文本:\n{self.user_history_text}")
             
-            # 如果用户有历史信息，预填充基本信息到 data_handler
-            if self.user_history and self.user_history.get("has_history"):
+            # 修复：如果patient表有基本信息，预填充到data_handler（无需就诊记录）
+            if self.user_history and self.user_history.get("basic_info"):
                 basic_info = self.user_history.get("basic_info")
-                if basic_info:
+                if basic_info:  # 双重检查以确保basic_info不为空
                     # 预填充基本信息
                     if basic_info.get('Name'):
                         self.data_handler.update_patient_info('name', basic_info.get('Name'))
@@ -170,24 +170,25 @@ class HealthAgent:
 5. 帮助患者完成医生预约
 
 【重要提示】
-- 如果患者是老用户（有历史就诊记录），请在首次问候时主动称呼用户的姓名，让用户感受到被认识和重视
-- 对于老用户，基本信息（姓名、性别、年龄、联系方式）和病史信息已经在系统中，无需重复询问，除非患者信息有变化
-- 老用户的既往病史、过敏史、家族史可以直接引用，重点关注本次的新症状和主诉
-- 对于新用户，需要按照正常流程收集所有信息
+- 如果患者在系统中已有基本信息（姓名存在），请在首次问候时主动称呼用户的姓名，让用户感受到被认识和重视
+- 对于已有patient记录的用户，基本信息（姓名、性别、年龄、联系方式）和病史信息已经在系统中，无需重复询问，除非患者信息有变化
+- 已有patient记录的用户，其既往病史、过敏史、家族史可以直接引用，重点关注本次的新症状和主诉
+- 对于首次使用系统的新用户（patient表无记录），需要按照正常流程收集所有基本信息
+- 注意：有些用户可能patient表已有基本信息，但从未就诊过（无medical_record），这类用户也属于老用户，请直接使用已有信息
 - 【多次预约支持】患者可以预约多个医生，每次对话可以创建新的预约
 - 历史信息中的"历史预约记录"仅包含今天之前的预约，今天及以后的预约不会显示在历史信息中
 - 如果患者已有今天之后的预约，但想预约不同的医生或时间，可以创建新的预约记录
 
 【需要收集的信息】
 一旦确定患者需要预约，确保收集以下信息：
-- 患者基本信息：姓名、年龄、性别、联系方式、身份证号（老用户已有的信息可以跳过）
+- 患者基本信息：姓名、年龄、性别、联系方式、身份证号（已有patient记录的用户可跳过已有信息）
 - 主诉症状：患者的主要不适
 - 现病史：症状出现的时间、性质、程度、诱因、缓解因素等
 - 详细症状：视力变化、眼痛、眼红、分泌物、其他症状
-- 既往病史：过往的眼科疾病或其他疾病（老用户可参考历史记录）
+- 既往病史：过往的眼科疾病或其他疾病（已有patient记录的用户可参考历史）
 - 用药史：正在使用或曾经使用的眼药或其他药物
-- 过敏史：药物过敏、食物过敏等（老用户可参考历史记录）
-- 家族史：家族中是否有眼科疾病或遗传病（老用户可参考历史记录）
+- 过敏史：药物过敏、食物过敏等（已有patient记录的用户可参考历史）
+- 家族史：家族中是否有眼科疾病或遗传病（已有patient记录的用户可参考历史）
 - 预约信息：期望就诊时间、医生偏好、紧急程度
 
 对话指南：
@@ -196,7 +197,7 @@ class HealthAgent:
 - 根据症状判断严重程度，如果需要就医，主动建议预约
 - 在收集信息时要有针对性，结合患者回答追问细节
 - 对于缺失的重要信息，要主动询问
-- 老用户的对话应该更加自然和个性化，可以提及历史就诊情况
+- 已有patient记录的用户对话应该更加自然和个性化，可以提及历史就诊情况（如有）
 - 确保收集完整的信息后再完成预约
 
 已收集的信息字段：{collected_fields}
@@ -552,6 +553,27 @@ AI刚刚的问题：{recent_question}
             # 如果提取失败，静默处理
             pass
     
+    def _detect_farewell_intent(self, user_message: str) -> bool:
+        """
+        检测用户是否表达了告别/确认完成的意图
+
+        Returns:
+            True 如果检测到告别意图且不是继续对话
+        """
+        farewell_keywords = ['好的', '好', '谢谢', '感谢', '明白了', '知道了', '再见', '拜拜', '没问题', '行', '可以']
+        continue_keywords = ['还有', '另外', '还想', '再', '还需要', '继续', '但是', '不过']
+
+        user_lower = user_message.lower().strip()
+
+        # 检测是否包含告别词且不包含继续词
+        has_farewell = any(kw in user_lower for kw in farewell_keywords)
+        has_continue = any(kw in user_lower for kw in continue_keywords)
+
+        # 简短回复（≤10字）更可能是确认
+        is_short = len(user_message.strip()) <= 10
+
+        return has_farewell and not has_continue and is_short
+
     def _update_stage(self, user_input: str, ai_response: str):
         """根据对话内容更新阶段"""
         user_lower = user_input.lower()
@@ -629,17 +651,23 @@ AI刚刚的问题：{recent_question}
             # 预约信息收集完成，检查关键信息是否齐全
             appointment_related = {"期望时间", "紧急程度"}
             critical_missing = self._get_missing_critical_fields()
-            
+
             print(f"[调试] 预约阶段 - 已收集预约信息: {appointment_related & self.collected_fields}")
             print(f"[调试] 预约阶段 - 缺失关键字段: {critical_missing}")
-            
+
             # 放宽条件：只要收集了期望时间或者对话已进行多轮，且关键信息基本齐全即可完成
             has_time_info = "期望时间" in self.collected_fields
             has_basic_info = len(critical_missing) <= 3  # 最多缺3个字段
             enough_conversation = len(self.conversation_history) >= 10  # 至少5轮对话(用户+助手各5条)
-            
+
             if (has_time_info and has_basic_info) or (enough_conversation and has_basic_info):
                 print("[调试] 满足完成条件，转入完成阶段")
+                self.stage = ConversationStage.COMPLETED
+
+        # 🔥 全局告别/确认意图检测 - 在关键阶段检测到用户确认完成的意图
+        if self.stage in [ConversationStage.APPOINTMENT_BOOKING, ConversationStage.COMPLETED]:
+            if self._detect_farewell_intent(user_input):
+                print(f"[调试] 检测到用户告别/确认意图，对话完成")
                 self.stage = ConversationStage.COMPLETED
     
     def chat(self, user_input: str) -> str:
@@ -648,18 +676,23 @@ AI刚刚的问题：{recent_question}
         print(f"[调试] 当前阶段: {self.stage}")
         print(f"[调试] 需要预约: {self.needs_appointment}")
         print(f"[调试] 用户输入: {user_input[:50]}...")
-        
+
         # 在第一次对话时加载用户历史信息
         if not self.history_loaded and len(self.conversation_history) == 0:
             print(f"[调试] 首次对话，尝试加载用户历史信息...")
             self._load_user_history()
-        
+
+        # 🔥 如果已经在 COMPLETED 阶段且检测到告别意图，直接返回简短结束语
+        if self.stage == ConversationStage.COMPLETED and self._detect_farewell_intent(user_input):
+            print(f"[调试] 已完成且检测到告别意图，返回简短结束语")
+            return "好的，预祝您早日康复！如有其他需求，随时联系我们。"
+
         # 记录对话历史
         self.conversation_history.append({
             "role": "user",
             "content": user_input
         })
-        
+
         # 提取信息
         print(f"[调试] 开始提取信息...")
         self._extract_info_from_response(user_input)
