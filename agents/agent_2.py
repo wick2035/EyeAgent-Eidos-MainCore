@@ -8,8 +8,10 @@ from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from utils.llm_config import get_llm
 from utils.report_generator import ReportGenerator
+from utils.prescription_generator import PrescriptionGenerator
 from database.report_service import ReportService
 from database.user_history_service_v2 import UserHistoryServiceV2
+from database.prescription_service import PrescriptionService
 
 
 class ReportStage(Enum):
@@ -49,7 +51,9 @@ class ReportAgent:
         # 服务实例
         self.report_service = ReportService()
         self.history_service = UserHistoryServiceV2()
+        self.prescription_service = PrescriptionService()
         self.report_generator = ReportGenerator()
+        self.prescription_generator = PrescriptionGenerator()
         
         # 用户历史信息
         self.user_reports = []
@@ -100,9 +104,10 @@ class ReportAgent:
 
 你的能力：
 1. 【医生专用】生成病例报告PDF - 根据病例记录生成专业的病例报告文档
-2. 分析病情趋势 - 分析用户历史病例，总结病情发展趋势
-3. 对比就诊记录 - 对比多次就诊记录，发现变化和异常
-4. 回答历史问题 - 回答用户关于历史病例的各种问题
+2. 【医生专用】生成处方单PDF - 根据处方记录生成正式的处方单文档
+3. 分析病情趋势 - 分析用户历史病例，总结病情发展趋势
+4. 对比就诊记录 - 对比多次就诊记录，发现变化和异常
+5. 回答历史问题 - 回答用户关于历史病例的各种问题
 
 【当前用户的病例报告】
 {user_reports}
@@ -190,47 +195,119 @@ class ReportAgent:
         """检测用户意图"""
         user_input_lower = user_input.lower()
         
-        # 生成报告相关关键词
-        generate_keywords = ['生成报告', '打印报告', '导出报告', '生成病例', 'generate', 'report']
-        action_keywords = ['生成', '打印', '导出', '制作', '生成下', '生成一', '生成他']
-        if (
-            any(keyword in user_input_lower for keyword in generate_keywords)
-            or ('报告' in user_input_lower and any(action in user_input_lower for action in action_keywords))
-        ):
-            if self.stage == ReportStage.GREETING:
-                self.stage = ReportStage.GENERATE_REPORT
+        # 只在问候阶段检测意图，其他阶段保持当前状态
+        if self.stage != ReportStage.GREETING:
+            return
         
-        # 分析历史相关关键词
-        elif any(keyword in user_input_lower for keyword in ['分析', '趋势', '变化', '发展', 'analyze', 'trend']):
-            if self.stage == ReportStage.GREETING:
-                self.stage = ReportStage.ANALYZE_HISTORY
-                self.analysis_type = 'trends'
+        # 优先级1: 明确的处方单关键词
+        strong_prescription_keywords = ['处方单', '处方笺', '生成处方', '打印处方', '导出处方']
+        if any(keyword in user_input_lower for keyword in strong_prescription_keywords):
+            self.stage = ReportStage.GENERATE_REPORT
+            return
         
-        # 对比相关关键词
-        elif any(keyword in user_input_lower for keyword in ['对比', '比较', 'compare']):
-            if self.stage == ReportStage.GREETING:
-                self.stage = ReportStage.COMPARE_RECORDS
+        # 优先级2: 明确的病历报告关键词
+        strong_report_keywords = ['病例报告', '病历报告', '诊断报告', '生成报告', '打印报告', '导出报告', '生成病例', '生成病历']
+        if any(keyword in user_input_lower for keyword in strong_report_keywords):
+            self.stage = ReportStage.GENERATE_REPORT
+            return
         
-        # 问答相关
-        elif any(keyword in user_input_lower for keyword in ['什么', '为什么', '怎么', '多少', '哪个', 'what', 'why', 'how']):
-            if self.stage == ReportStage.GREETING:
-                self.stage = ReportStage.ANSWER_QUESTION
+        # 优先级3: 带动作的生成类关键词
+        action_keywords = ['生成', '打印', '导出', '制作']
+        doc_keywords = ['报告', '病例', '病历', '处方']
+        if (any(action in user_input_lower for action in action_keywords) and 
+            any(doc in user_input_lower for doc in doc_keywords)):
+            self.stage = ReportStage.GENERATE_REPORT
+            return
+        
+        # 优先级4: 分析历史相关关键词
+        if any(keyword in user_input_lower for keyword in ['分析', '趋势', '变化', '发展', 'analyze', 'trend']):
+            self.stage = ReportStage.ANALYZE_HISTORY
+            self.analysis_type = 'trends'
+            return
+        
+        # 优先级5: 对比相关关键词
+        if any(keyword in user_input_lower for keyword in ['对比', '比较', 'compare']):
+            self.stage = ReportStage.COMPARE_RECORDS
+            return
+        
+        # 优先级6: 问答相关
+        if any(keyword in user_input_lower for keyword in ['什么', '为什么', '怎么', '多少', '哪个', 'what', 'why', 'how']):
+            self.stage = ReportStage.ANSWER_QUESTION
+            return
     
     def _handle_special_commands(self, user_input: str) -> Optional[str]:
         """
-        处理特殊命令（实际生成报告、分析等操作）
+        处理特殊命令（实际生成报告、处方、分析等操作）
         
         Returns:
             处理结果文本，如果不是特殊命令返回None
         """
         user_input_lower = user_input.lower()
         
-        # 确认生成报告
+        # 确认生成处方单或病例报告
         if self.stage == ReportStage.GENERATE_REPORT:
-            # 尝试提取病例ID或序号
-            report_id = self._extract_report_id(user_input)
-            if report_id:
-                return self.generate_report(report_id)
+            # 明确的处方单关键词（优先级最高）
+            strong_prescription_keywords = ['处方单', '处方笺', 'prescription']
+            # 明确的病历报告关键词
+            strong_report_keywords = ['病例报告', '病历报告', '诊断报告', 'medical report', 'report']
+            
+            # 检测是否是明确的处方单请求
+            is_strong_prescription = any(keyword in user_input_lower for keyword in strong_prescription_keywords)
+            # 检测是否是明确的病历报告请求
+            is_strong_report = any(keyword in user_input_lower for keyword in strong_report_keywords)
+            
+            # 弱关键词（需要结合上下文判断）
+            has_prescription_keyword = '处方' in user_input_lower
+            has_report_keyword = any(keyword in user_input_lower for keyword in ['报告', '病例', '病历'])
+            
+            # 优先判断：明确的关键词
+            if is_strong_prescription and not is_strong_report:
+                # 明确要求生成处方单
+                prescription_id = self._extract_prescription_id(user_input)
+                if prescription_id:
+                    return self.generate_prescription(prescription_id)
+                else:
+                    return "❓ 请提供处方ID，例如：'生成处方单 ID:1' 或 '生成最新的处方单'"
+                    
+            elif is_strong_report and not is_strong_prescription:
+                # 明确要求生成病历报告
+                report_id = self._extract_report_id(user_input)
+                if report_id:
+                    return self.generate_report(report_id)
+                else:
+                    return "❓ 请提供病例ID，例如：'生成病例报告 ID:1' 或 '生成最新的报告'"
+                    
+            elif has_prescription_keyword and not has_report_keyword:
+                # 只提到处方（没有"单"），但没有提到报告
+                prescription_id = self._extract_prescription_id(user_input)
+                if prescription_id:
+                    return self.generate_prescription(prescription_id)
+                else:
+                    return "❓ 您是想生成处方单吗？请提供处方ID，例如：'处方ID:1'"
+                    
+            elif has_report_keyword and not has_prescription_keyword:
+                # 只提到报告/病例，没有提到处方
+                report_id = self._extract_report_id(user_input)
+                if report_id:
+                    return self.generate_report(report_id)
+                else:
+                    return "❓ 您是想生成病历报告吗？请提供病例ID，例如：'病例ID:1'"
+                    
+            else:
+                # 模糊情况：同时提到了处方和报告，或者都没提到
+                # 尝试从ID类型判断
+                prescription_id = self._extract_prescription_id(user_input)
+                report_id = self._extract_report_id(user_input)
+                
+                if prescription_id and not report_id:
+                    # 能提取到处方ID，生成处方单
+                    return self.generate_prescription(prescription_id)
+                elif report_id and not prescription_id:
+                    # 能提取到病例ID，生成病历报告
+                    return self.generate_report(report_id)
+                else:
+                    # 无法确定，请用户明确
+                    return "❓ 抱歉，我无法确定您想生成的是处方单还是病历报告。\n\n请明确说明：\n- 生成【处方单】，请说：'生成处方单 ID:X'\n- 生成【病历报告】，请说：'生成病历报告 ID:X'"
         
         # 执行趋势分析
         if '执行趋势分析' in user_input or '开始分析' in user_input:
@@ -255,10 +332,16 @@ class ReportAgent:
         """从文本中提取病例ID"""
         import re
         
-        # 优先检测明确的ID表达：ID:1, ID=1, Medical_Record_ID=1, 病例ID:1 等
+        # 排除处方相关的请求（避免混淆）
+        if any(keyword in text.lower() for keyword in ['处方', 'prescription']):
+            print(f"[ReportAgent] 检测到处方关键词，跳过病例ID提取")
+            return None
+        
+        # 优先检测明确的病例ID表达
         id_patterns = [
-            r'(?:medical_record_)?id[:\s=]+(\d+)',  # ID:1, ID=1, Medical_Record_ID=1
-            r'病例id[:\s=]+(\d+)',  # 病例ID:1
+            r'medical[_\s]*record[_\s]*id[:\s=]+(\d+)',  # Medical_Record_ID:1
+            r'病[例历][报告]?id[:\s=]+(\d+)',  # 病例ID:1, 病历ID:1
+            r'报告id[:\s=]+(\d+)',  # 报告ID:1
             r'record[:\s=]+(\d+)',  # Record:1
         ]
         
@@ -270,7 +353,7 @@ class ReportAgent:
                 return medical_record_id
         
         # 检测"第X份"或"第X个"
-        match = re.search(r'第\s*(\d+)\s*[份个]', text)
+        match = re.search(r'第\s*(\d+)\s*[份个条]', text)
         if match:
             num = int(match.group(1))
             if 1 <= num <= len(self.user_reports):
@@ -279,26 +362,70 @@ class ReportAgent:
                 return medical_record_id
         
         # 尝试从"最新"、"最近"等关键词
-        if '最新' in text or '最近' in text or '最后' in text:
+        if any(keyword in text for keyword in ['最新', '最近', '最后', '当前']):
             if self.user_reports:
                 medical_record_id = self.user_reports[0]['Medical_Record_ID']
                 print(f"[ReportAgent] 提取到最新报告，Medical_Record_ID: {medical_record_id}")
                 return medical_record_id
         
-        # 最后尝试提取数字（作为序号）
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            num = int(numbers[0])
-            if num <= len(self.user_reports):
-                medical_record_id = self.user_reports[num - 1]['Medical_Record_ID']
-                print(f"[ReportAgent] 提取到序号 {num}，对应 Medical_Record_ID: {medical_record_id}")
-                return medical_record_id
-            else:
-                # 可能直接是 Medical_Record_ID（数字很大）
-                print(f"[ReportAgent] 将数字 {num} 作为 Medical_Record_ID")
-                return num
+        # 如果明确包含"报告"、"病例"、"病历"等关键词，尝试提取数字
+        if any(keyword in text for keyword in ['报告', '病例', '病历', 'report']):
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                num = int(numbers[0])
+                # 如果数字较小且在报告列表范围内，视为序号
+                if 1 <= num <= len(self.user_reports):
+                    medical_record_id = self.user_reports[num - 1]['Medical_Record_ID']
+                    print(f"[ReportAgent] 从报告请求中提取到序号 {num}，对应 Medical_Record_ID: {medical_record_id}")
+                    return medical_record_id
+                else:
+                    # 否则视为直接的病例ID
+                    print(f"[ReportAgent] 从报告请求中提取到数字，作为 Medical_Record_ID: {num}")
+                    return num
         
         print(f"[ReportAgent] 无法从文本中提取报告ID: {text}")
+        return None
+    
+    def _extract_prescription_id(self, text: str) -> Optional[int]:
+        """从文本中提取处方ID"""
+        import re
+        
+        # 优先检测明确的处方ID表达：Prescription_ID:1, 处方ID:1 等
+        id_patterns = [
+            r'prescription[_\s]*id[:\s=]+(\d+)',  # Prescription_ID:1
+            r'处方[单笺]?id[:\s=]+(\d+)',  # 处方ID:1, 处方单ID:1
+            r'处方[单笺]?\s*[编号号码]+[:\s=]*(\d+)',  # 处方单编号:1
+        ]
+        
+        for pattern in id_patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                prescription_id = int(match.group(1))
+                print(f"[ReportAgent] 提取到明确的 Prescription_ID: {prescription_id}")
+                return prescription_id
+        
+        # 尝试从"最新"、"最近"等关键词
+        if any(keyword in text for keyword in ['最新', '最近', '最后', '当前']):
+            # 获取患者的处方列表
+            if self.patient_id:
+                try:
+                    prescriptions = self.prescription_service.get_prescriptions_by_patient(self.patient_id, limit=1)
+                    if prescriptions:
+                        prescription_id = prescriptions[0]['prescription_id']
+                        print(f"[ReportAgent] 提取到最新处方，Prescription_ID: {prescription_id}")
+                        return prescription_id
+                except Exception as e:
+                    print(f"[ReportAgent] 获取最新处方失败: {e}")
+        
+        # 如果明确包含"处方"关键词，尝试提取数字作为处方ID
+        if any(keyword in text for keyword in ['处方', 'prescription']):
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                prescription_id = int(numbers[0])
+                print(f"[ReportAgent] 从处方请求中提取到数字，作为 Prescription_ID: {prescription_id}")
+                return prescription_id
+        
+        print(f"[ReportAgent] 无法从文本中提取处方ID: {text}")
         return None
     
     def _extract_multiple_ids(self, text: str) -> List[int]:
@@ -390,6 +517,38 @@ class ReportAgent:
             import traceback
             traceback.print_exc()
             return f"❌ 生成报告时出现错误：{str(e)}"
+    
+    def generate_prescription(self, prescription_id: int) -> str:
+        """
+        生成处方单
+        
+        Args:
+            prescription_id: 处方ID
+            
+        Returns:
+            操作结果消息
+        """
+        # 权限检查：只有医生可以生成处方单
+        if self.role != "doctor":
+            print(f"[ReportAgent] 权限拒绝: 患者尝试生成处方单")
+            return "❌ 抱歉，只有医生才能生成处方单。患者可以查看处方信息，但无法生成处方单。如果您需要处方单，请联系您的医生。"
+        
+        try:
+            print(f"[ReportAgent] 开始生成处方单: Prescription_ID={prescription_id}")
+            
+            # 生成处方单
+            pdf_path = self.prescription_generator.generate_prescription_from_db(prescription_id)
+            
+            if pdf_path:
+                return f"✅ 处方单生成成功！\n\n文件路径：{pdf_path}\n\n您可以在该路径找到生成的处方单文件。"
+            else:
+                return "❌ 处方单生成失败，请检查处方数据是否完整。"
+                
+        except Exception as e:
+            print(f"[ReportAgent] 生成处方单失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"❌ 生成处方单时出现错误：{str(e)}"
     
     def analyze_history_trends(self, patient_id: int) -> str:
         """
@@ -645,6 +804,8 @@ class ReportAgent:
                 self.report_service.close()
             if hasattr(self, 'history_service'):
                 self.history_service.close()
+            if hasattr(self, 'prescription_service'):
+                self.prescription_service.close()
         except:
             pass
 

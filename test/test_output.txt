@@ -1,0 +1,413 @@
+﻿python : INFO:database.prescription_service:处方服务初始化完成
+所在位置 C:\Users\23377\AppData\Local\Temp\ps-script-6636a97e-1e7b-4ae7-8ae1-cb23059da755.ps1:109 字符: 29
++ cd D:\Agent\pythonProject1; python test_agent2_fix.py 2>&1 | Out-File ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INFO:database.p...rvice:处方服务初始化完成:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+INFO:utils.report_generator:报告生成器初始化完成: 模板=D:\Agent\pythonProject1\example\bingli.docx, 输出=D:\Agent\pythonProject1\exam
+ple\reports
+INFO:utils.prescription_generator:处方生成器初始化完成: 模板=D:\Agent\pythonProject1\example\prescription_template.docx, 输出=D:\Agen
+t\pythonProject1\example\prescriptions
+INFO:database.db_connection:数据库连接成功
+INFO:database.user_history_service_v2:成功查询到用户信息: 手机号=13900000001, 姓名=张三
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:查询到 4 条病例报告 (手机号: 13900000001)
+INFO:database.prescription_service:处方服务初始化完成
+INFO:database.db_connection:数据库连接成功
+INFO:database.prescription_service:成功获取处方完整信息: Prescription_ID=1, 药物数量=2
+INFO:utils.prescription_generator:生成条形码: C:\Users\23377\AppData\Local\Temp\barcode_RX20251117001.png
+INFO:utils.prescription_generator:已插入条形码到页眉右边
+INFO:utils.prescription_generator:已填充药物明细列表（文本格式）: 2 条
+INFO:utils.prescription_generator:生成docx文件: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.
+docx
+============================================================
+娴嬭瘯Agent2鐥呭巻鍜屽鏂瑰崟璇嗗埆鍔熻兘
+============================================================
+[ReportAgent] 鍔犺浇鐢ㄦ埛鏁版嵁瀹屾垚: patient_id=1, 鎶ュ憡鏁?4
+
+寮€濮嬫祴璇?..
+
+
+銆愭祴璇?1銆?
+鐢ㄦ埛杈撳叆: 鐢熸垚澶勬柟鍗?ID:1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓哄鏂瑰崟
+--------------------------------------------------
+[ReportAgent] 浠庡鏂硅姹備腑鎻愬彇鍒版暟瀛楋紝浣滀负 Prescription_ID: 1
+[ReportAgent] 寮€濮嬬敓鎴愬鏂瑰崟: Prescription_ID=1
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:01<00:00,  1.92s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.53s/it]
+INFO:utils.prescription_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX202511
+17001.pdf
+INFO:utils.prescription_generator:成功生成处方单: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.p
+df
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.prescription_service:处方服务初始化完成
+INFO:database.db_connection:数据库连接成功
+INFO:database.prescription_service:成功获取处方完整信息: Prescription_ID=1, 药物数量=2
+INFO:utils.prescription_generator:生成条形码: C:\Users\23377\AppData\Local\Temp\barcode_RX20251117001.png
+INFO:utils.prescription_generator:已插入条形码到页眉右边
+INFO:utils.prescription_generator:已填充药物明细列表（文本格式）: 2 条
+INFO:utils.prescription_generator:生成docx文件: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.
+docx
+Agent鍝嶅簲:
+鉁?澶勬柟鍗曠敓鎴愭垚鍔燂紒
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑澶勬柟鍗曟枃浠躲€?
+============================================================
+
+銆愭祴璇?2銆?
+鐢ㄦ埛杈撳叆: 鎵撳嵃澶勬柟鍗?
+棰勬湡缁撴灉: 搴旇璇嗗埆涓哄鏂瑰崟
+--------------------------------------------------
+[ReportAgent] 浠庡鏂硅姹備腑鎻愬彇鍒版暟瀛楋紝浣滀负 Prescription_ID: 1
+[ReportAgent] 寮€濮嬬敓鎴愬鏂瑰崟: Prescription_ID=1
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:01<00:00,  1.95s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.53s/it]
+INFO:utils.prescription_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX202511
+17001.pdf
+INFO:utils.prescription_generator:成功生成处方单: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.p
+df
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.prescription_service:处方服务初始化完成
+INFO:database.db_connection:数据库连接成功
+INFO:database.prescription_service:成功获取处方完整信息: Prescription_ID=1, 药物数量=2
+INFO:utils.prescription_generator:生成条形码: C:\Users\23377\AppData\Local\Temp\barcode_RX20251117001.png
+INFO:utils.prescription_generator:已插入条形码到页眉右边
+INFO:utils.prescription_generator:已填充药物明细列表（文本格式）: 2 条
+INFO:utils.prescription_generator:生成docx文件: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.
+docx
+Agent鍝嶅簲:
+鉁?澶勬柟鍗曠敓鎴愭垚鍔燂紒
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑澶勬柟鍗曟枃浠躲€?
+============================================================
+
+銆愭祴璇?3銆?
+鐢ㄦ埛杈撳叆: 鐢熸垚澶勬柟 ID:1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓哄鏂瑰崟
+--------------------------------------------------
+[ReportAgent] 浠庡鏂硅姹備腑鎻愬彇鍒版暟瀛楋紝浣滀负 Prescription_ID: 1
+[ReportAgent] 寮€濮嬬敓鎴愬鏂瑰崟: Prescription_ID=1
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:02<00:00,  2.02s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.93s/it]
+INFO:utils.prescription_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX202511
+17001.pdf
+INFO:utils.prescription_generator:成功生成处方单: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.p
+df
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.prescription_service:处方服务初始化完成
+INFO:database.db_connection:数据库连接成功
+INFO:database.prescription_service:成功获取处方完整信息: Prescription_ID=1, 药物数量=2
+INFO:utils.prescription_generator:生成条形码: C:\Users\23377\AppData\Local\Temp\barcode_RX20251117001.png
+INFO:utils.prescription_generator:已插入条形码到页眉右边
+INFO:utils.prescription_generator:已填充药物明细列表（文本格式）: 2 条
+INFO:utils.prescription_generator:生成docx文件: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.
+docx
+Agent鍝嶅簲:
+鉁?澶勬柟鍗曠敓鎴愭垚鍔燂紒
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑澶勬柟鍗曟枃浠躲€?
+============================================================
+
+銆愭祴璇?4銆?
+鐢ㄦ埛杈撳叆: 澶勬柟鍗曠紪鍙?
+棰勬湡缁撴灉: 搴旇璇嗗埆涓哄鏂瑰崟
+
+--------------------------------------------------
+[ReportAgent] 鎻愬彇鍒版槑纭殑 Prescription_ID: 1
+[ReportAgent] 寮€濮嬬敓鎴愬鏂瑰崟: Prescription_ID=1
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:01<00:00,  1.91s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.67s/it]
+INFO:utils.prescription_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX202511
+17001.pdf
+INFO:utils.prescription_generator:成功生成处方单: D:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.p
+df
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:成功查询到病例完整信息: Medical_Record_ID=5
+INFO:database.report_service:成功获取病例报告模板数据: Medical_Record_ID=5
+INFO:utils.report_generator:生成docx文件: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.docx
+Agent鍝嶅簲:
+鉁?澶勬柟鍗曠敓鎴愭垚鍔燂紒
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\prescriptions\prescription_1_RX20251117001.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑澶勬柟鍗曟枃浠躲€?
+============================================================
+
+銆愭祴璇?5銆?
+鐢ㄦ埛杈撳叆: 鐢熸垚鐥呭巻鎶ュ憡 ID:1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓虹梾鍘嗘姤鍛?
+--------------------------------------------------
+[ReportAgent] 浠庢姤鍛婅姹備腑鎻愬彇鍒板簭鍙?1锛屽搴?Medical_Record_ID: 5
+[ReportAgent] 寮€濮嬬敓鎴愭姤鍛? Medical_Record_ID=5
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:01<00:00,  1.97s/it]
+100%|██████████| 1/1 [00:05<00:00,  5.98s/it]
+INFO:utils.report_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:utils.report_generator:成功生成病例报告: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:database.db_connection:更新操作影响了 1 行
+INFO:database.report_service:成功更新病例报告字段: Medical_Record_ID=5, 字段=['print_time']
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:成功查询到病例完整信息: Medical_Record_ID=5
+INFO:database.report_service:成功获取病例报告模板数据: Medical_Record_ID=5
+INFO:utils.report_generator:生成docx文件: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.docx
+Agent鍝嶅簲:
+鉁?鎶ュ憡鐢熸垚鎴愬姛锛?
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑鎶ュ憡鏂囦欢銆?
+============================================================
+
+銆愭祴璇?6銆?
+鐢ㄦ埛杈撳叆: 鎵撳嵃鐥呬緥鎶ュ憡1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓虹梾鍘嗘姤鍛?
+--------------------------------------------------
+[ReportAgent] 浠庢姤鍛婅姹備腑鎻愬彇鍒板簭鍙?1锛屽搴?Medical_Record_ID: 5
+[ReportAgent] 寮€濮嬬敓鎴愭姤鍛? Medical_Record_ID=5
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:02<00:00,  2.14s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.88s/it]
+INFO:utils.report_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:utils.report_generator:成功生成病例报告: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:database.db_connection:更新操作影响了 1 行
+INFO:database.report_service:成功更新病例报告字段: Medical_Record_ID=5, 字段=['print_time']
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:成功查询到病例完整信息: Medical_Record_ID=5
+INFO:database.report_service:成功获取病例报告模板数据: Medical_Record_ID=5
+INFO:utils.report_generator:生成docx文件: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.docx
+Agent鍝嶅簲:
+鉁?鎶ュ憡鐢熸垚鎴愬姛锛?
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑鎶ュ憡鏂囦欢銆?
+============================================================
+
+銆愭祴璇?7銆?
+鐢ㄦ埛杈撳叆: 鐢熸垚鎶ュ憡 ID:1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓虹梾鍘嗘姤鍛?
+--------------------------------------------------
+[ReportAgent] 浠庢姤鍛婅姹備腑鎻愬彇鍒板簭鍙?1锛屽搴?Medical_Record_ID: 5
+[ReportAgent] 寮€濮嬬敓鎴愭姤鍛? Medical_Record_ID=5
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|██████████| 1/1 [00:01<00:00,  1.88s/it]
+100%|██████████| 1/1 [00:04<00:00,  4.68s/it]
+INFO:utils.report_generator:使用docx2pdf转换成功: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:utils.report_generator:成功生成病例报告: D:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+INFO:database.db_connection:更新操作影响了 1 行
+INFO:database.report_service:成功更新病例报告字段: Medical_Record_ID=5, 字段=['print_time']
+INFO:database.db_connection:数据库连接已关闭
+INFO:httpx:HTTP Request: POST https://api.siliconflow.cn/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.siliconflow.cn/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.siliconflow.cn/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.prescription_service:处方服务初始化完成
+INFO:utils.report_generator:报告生成器初始化完成: 模板=D:\Agent\pythonProject1\example\bingli.docx, 输出=D:\Agent\pythonProject1\exam
+ple\reports
+INFO:utils.prescription_generator:处方生成器初始化完成: 模板=D:\Agent\pythonProject1\example\prescription_template.docx, 输出=D:\Agen
+t\pythonProject1\example\prescriptions
+INFO:database.db_connection:数据库连接成功
+INFO:database.user_history_service_v2:成功查询到用户信息: 手机号=13900000001, 姓名=张三
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:查询到 4 条病例报告 (手机号: 13900000001)
+INFO:database.db_connection:数据库连接成功
+INFO:database.prescription_service:查询患者处方列表成功: Patient_ID=1, 数量=1
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+INFO:database.prescription_service:处方服务初始化完成
+INFO:utils.report_generator:报告生成器初始化完成: 模板=D:\Agent\pythonProject1\example\bingli.docx, 输出=D:\Agent\pythonProject1\exam
+ple\reports
+INFO:utils.prescription_generator:处方生成器初始化完成: 模板=D:\Agent\pythonProject1\example\prescription_template.docx, 输出=D:\Agen
+t\pythonProject1\example\prescriptions
+INFO:database.db_connection:数据库连接成功
+INFO:database.user_history_service_v2:成功查询到用户信息: 手机号=13900000001, 姓名=张三
+INFO:database.db_connection:数据库连接成功
+INFO:database.report_service:查询到 4 条病例报告 (手机号: 13900000001)
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.db_connection:数据库连接已关闭
+INFO:database.prescription_service:处方服务数据库连接已关闭
+Agent鍝嶅簲:
+鉁?鎶ュ憡鐢熸垚鎴愬姛锛?
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒扮敓鎴愮殑鎶ュ憡鏂囦欢銆?
+============================================================
+
+銆愭祴璇?8銆?
+鐢ㄦ埛杈撳叆: 鐥呬緥ID:1
+棰勬湡缁撴灉: 搴旇璇嗗埆涓虹梾鍘嗘姤鍛?
+--------------------------------------------------
+Agent鍝嶅簲:
+鉁?鐥呬緥鎶ュ憡鐢熸垚鎴愬姛锛?
+
+鏂囦欢璺緞锛欴:\Agent\pythonProject1\example\reports\report_5_FILE-2025-00003.pdf
+
+鎮ㄥ彲浠ュ湪璇ヨ矾寰勬壘鍒?025骞?1鏈?0鏃ワ紙ID:1锛夌殑鐥呬緥鎶ュ憡鏂囦欢锛屽唴瀹逛负锛? 
+**涓昏瘔**锛氱溂鐫涘共娑? 
+**璇婃柇**锛氬共鐪肩棁  
+**澶勭悊寤鸿**锛氫汉宸ユ唱娑蹭娇鐢ㄦ寚瀵笺€佹唱閬撳啿娲楁不鐤楁柟妗? 
+
+鏄惁闇€瑕佹煡鐪嬫姤鍛婂唴瀹规憳瑕佹垨杩涜鍏朵粬鎿嶄綔锛?
+============================================================
+
+銆愭祴璇?9銆?
+鐢ㄦ埛杈撳叆: 鐢熸垚1
+棰勬湡缁撴灉: 搴旇璇㈤棶鐢ㄦ埛鍏蜂綋瑕佺敓鎴愪粈涔?
+--------------------------------------------------
+Agent鍝嶅簲:
+鎮ㄥソ锛岃闂偍闇€瑕佺敓鎴愬摢涓€浠界梾渚嬫姤鍛婏紵鐩墠鍙€夌殑鎶ュ憡鏈夛細
+
+1. 銆怚D:1銆?025-11-10 - 鐪肩潧骞叉订 (骞茬溂鐥?  
+2. 銆怚D:2銆?025-11-15 - 瑙嗗姏妯＄硦 (寰呰瘖鏂?  
+3. 銆怚D:4銆?025-11-16 - 宸︾溂鎸佺画鍒虹棝锛屼即闅忚鍔涙ā绯?(None)  
+4. 銆怚D:5銆?025-11-17 - 瑙嗗姏妯＄硦鍔犻噸 (骞茬溂鐥?  
+
+璇烽€夋嫨鍏蜂綋鐨勭梾渚婭D鎴栨棩鏈燂紝鎴戝皢涓烘偍鐢熸垚瀵瑰簲鎶ュ憡銆?
+============================================================
+
+銆愭祴璇?10銆?
+鐢ㄦ埛杈撳叆: 鎵撳嵃鏂囨。
+棰勬湡缁撴灉: 搴旇璇㈤棶鐢ㄦ埛鍏蜂綋瑕佺敓鎴愪粈涔?
+--------------------------------------------------
+Agent鍝嶅簲:
+鎮ㄥソ锛岃闂偍闇€瑕佹墦鍗板摢涓€浠界梾渚嬫姤鍛婏紵鐩墠鍙€夌殑鎶ュ憡鏈夛細
+
+1. 銆怚D:1銆?025-11-10 - 鐪肩潧骞叉订 (骞茬溂鐥?  
+2. 銆怚D:2銆?025-11-15 - 瑙嗗姏妯＄硦 (寰呰瘖鏂?  
+3. 銆怚D:4銆?025-11-16 - 宸︾溂鎸佺画鍒虹棝锛屼即闅忚鍔涙ā绯?(None)  
+4. 銆怚D:5銆?025-11-17 - 瑙嗗姏妯＄硦鍔犻噸 (骞茬溂鐥?  
+
+璇烽€夋嫨鍏蜂綋鐨勭梾渚婭D鎴栨棩鏈燂紝鎴戝皢涓烘偍鐢熸垚瀵瑰簲鐨凱DF鏂囨。銆?
+============================================================
+
+
+
+============================================================
+娴嬭瘯ID鎻愬彇閫昏緫
+============================================================
+[ReportAgent] 鍔犺浇鐢ㄦ埛鏁版嵁瀹屾垚: patient_id=1, 鎶ュ憡鏁?4
+
+寮€濮嬫祴璇?..
+
+
+娴嬭瘯鏂囨湰: 鐢熸垚澶勬柟鍗?ID:5
+棰勬湡绫诲瀷: prescription
+--------------------------------------------------
+[ReportAgent] 浠庡鏂硅姹備腑鎻愬彇鍒版暟瀛楋紝浣滀负 Prescription_ID: 5
+鎻愬彇鍒扮殑澶勬柟ID: 5
+============================================================
+
+娴嬭瘯鏂囨湰: 鎵撳嵃鐥呭巻鎶ュ憡 ID:10
+棰勬湡绫诲瀷: report
+--------------------------------------------------
+[ReportAgent] 浠庢姤鍛婅姹備腑鎻愬彇鍒版暟瀛楋紝浣滀负 Medical_Record_ID: 10
+鎻愬彇鍒扮殑鐥呬緥ID: 10
+============================================================
+
+娴嬭瘯鏂囨湰: 澶勬柟缂栧彿123
+棰勬湡绫诲瀷: prescription
+--------------------------------------------------
+[ReportAgent] 鎻愬彇鍒版槑纭殑 Prescription_ID: 123
+鎻愬彇鍒扮殑澶勬柟ID: 123
+============================================================
+
+娴嬭瘯鏂囨湰: 鐥呬緥ID:456
+棰勬湡绫诲瀷: report
+--------------------------------------------------
+[ReportAgent] 鎻愬彇鍒版槑纭殑 Medical_Record_ID: 456
+鎻愬彇鍒扮殑鐥呬緥ID: 456
+============================================================
+
+娴嬭瘯鏂囨湰: 鐢熸垚鏈€鏂扮殑澶勬柟鍗?
+棰勬湡绫诲瀷: prescription
+--------------------------------------------------
+[ReportAgent] 鎻愬彇鍒版渶鏂板鏂癸紝Prescription_ID: 1
+鎻愬彇鍒扮殑澶勬柟ID: 1
+============================================================
+
+娴嬭瘯鏂囨湰: 鐢熸垚鏈€鏂扮殑鎶ュ憡
+棰勬湡绫诲瀷: report
+--------------------------------------------------
+[ReportAgent] 鎻愬彇鍒版渶鏂版姤鍛婏紝Medical_Record_ID: 5
+鎻愬彇鍒扮殑鐥呬緥ID: 5
+============================================================
+
+
+
+============================================================
+娴嬭瘯鎰忓浘妫€娴嬮€昏緫
+============================================================
+[ReportAgent] 鍔犺浇鐢ㄦ埛鏁版嵁瀹屾垚: patient_id=1, 鎶ュ憡鏁?4
+
+寮€濮嬫祴璇?..
+
+
+鐢ㄦ埛杈撳叆: 鐢熸垚澶勬柟鍗?
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? generate_report
+============================================================
+
+鐢ㄦ埛杈撳叆: 鐢熸垚鐥呭巻鎶ュ憡
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? generate_report
+============================================================
+
+鐢ㄦ埛杈撳叆: 鎵撳嵃鎶ュ憡
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? generate_report
+============================================================
+
+鐢ㄦ埛杈撳叆: 瀵煎嚭澶勬柟
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? generate_report
+============================================================
+
+鐢ㄦ埛杈撳叆: 鍒嗘瀽鐥呮儏瓒嬪娍
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? analyze_history
+============================================================
+
+鐢ㄦ埛杈撳叆: 瀵规瘮涓ゆ灏辫瘖
+--------------------------------------------------
+妫€娴嬪埌鐨勯樁娈? compare_records
+============================================================
+
+
+
+鉁?娴嬭瘯瀹屾垚锛?
+
+銆愭€荤粨銆?
+1. Agent2鐜板湪鑳藉鏄庣‘鍖哄垎澶勬柟鍗曞拰鐥呭巻鎶ュ憡璇锋眰
+2. ID鎻愬彇閫昏緫鏇村姞鍑嗙‘锛屼笉浼氭贩娣嗗鏂笽D鍜岀梾渚婭D
+3. 褰撹姹傛ā绯婃椂锛宎gent浼氫富鍔ㄨ闂敤鎴?
+4. 鎰忓浘妫€娴嬫洿鍔犵簿鍑嗭紝鎸夌収鍏抽敭璇嶄紭鍏堢骇杩涜鍒ゆ柇
