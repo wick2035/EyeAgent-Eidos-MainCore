@@ -1,5 +1,5 @@
 """
-3号智能体 - 提醒管理（复诊提醒、预约提醒、用药提醒）
+3号智能体 - 提醒管理（复诊提醒、预约提醒、用药提醒）+ 生物力学报告生成
 """
 import json
 from enum import Enum
@@ -10,6 +10,8 @@ from langchain.prompts import PromptTemplate
 from utils.llm_config import get_llm
 from database.reminder_service import ReminderService
 from database.user_history_service_v2 import UserHistoryServiceV2
+from database.biomechanics_service import BiomechanicsService
+from utils.biomechanics_report_generator import BiomechanicsReportGenerator
 
 
 class ReminderStage(Enum):
@@ -20,6 +22,7 @@ class ReminderStage(Enum):
     CREATE_REMINDER = "create_reminder"  # 创建提醒
     UPDATE_REMINDER = "update_reminder"  # 更新提醒
     CONFIG_SETTINGS = "config_settings"  # 配置设置
+    GENERATE_BIOMECHANICS_REPORT = "generate_biomechanics_report"  # 生成生物力学报告
     COMPLETED = "completed"  # 完成
 
 
@@ -49,6 +52,8 @@ class ReminderAgent:
         # 服务实例
         self.reminder_service = ReminderService()
         self.history_service = UserHistoryServiceV2()
+        self.biomechanics_service = BiomechanicsService()
+        self.biomechanics_generator = BiomechanicsReportGenerator()
 
         # 用户数据
         self.user_info = None
@@ -59,6 +64,7 @@ class ReminderAgent:
         # 当前操作相关
         self.selected_reminder_id = None
         self.pending_reminder_data = {}
+        self.pending_biomechanics_data = {}
 
         # 初始化对话链
         self.conversation_chain = self._create_conversation_chain()
@@ -109,12 +115,14 @@ class ReminderAgent:
 3. 更新或取消现有提醒
 4. 帮助用户配置提醒偏好设置
 5. 提供友好的提醒时间建议
+6. 生成生物力学检查报告（基础报告或详细报告）
 
 可用操作：
 - 查看提醒：显示所有待处理的提醒
 - 创建提醒：为复诊、预约或用药创建新提醒
 - 更新提醒：修改提醒时间或取消提醒
 - 配置设置：调整提醒偏好（提前天数、通知方式等）
+- 生成生物力学报告：生成眼科生物力学检查报告
 
 用户消息：{input}
 
@@ -205,6 +213,17 @@ class ReminderAgent:
         if self.stage == ReminderStage.CREATE_REMINDER:
             return self._handle_create_reminder_input(message), False
 
+        # 如果正在生成生物力学报告，处理用户输入
+        if self.stage == ReminderStage.GENERATE_BIOMECHANICS_REPORT:
+            # 从数据库获取最新的检查数据
+            scan_data = None
+            if self.phone_number:
+                scan_data = self.biomechanics_service.get_latest_scan_by_phone(self.phone_number)
+            elif self.patient_id:
+                scan_data = self.biomechanics_service.get_latest_scan_by_patient(self.patient_id)
+
+            return self.handle_biomechanics_report_input(message, scan_data)
+
         # 查看所有提醒
         if any(kw in message for kw in ['查看提醒', '我的提醒', '提醒列表', '所有提醒']):
             return self._cmd_view_reminders(), False
@@ -257,6 +276,16 @@ class ReminderAgent:
         if '配置' in message or '设置' in message or '偏好' in message:
             self.stage = ReminderStage.CONFIG_SETTINGS
             return self._cmd_show_config(), False
+
+        # 生成生物力学报告
+        if any(kw in message for kw in ['生成生物力学报告', '生物力学报告', '眼科检查报告', '生成报告']):
+            # 检查权限（仅医生可以生成报告）
+            if self.role != "doctor":
+                return "抱歉，只有医生才能生成生物力学报告。", False
+
+            self.stage = ReminderStage.GENERATE_BIOMECHANICS_REPORT
+            self.pending_biomechanics_data = {'step': 1}
+            return self._cmd_start_biomechanics_report(), False
 
         return None
 
@@ -713,10 +742,17 @@ class ReminderAgent:
         if self.stage == ReminderStage.GREETING:
             self.stage = ReminderStage.SELECT_ACTION
 
-        # 如果用户说再见或感谢
-        if any(kw in user_message for kw in ['谢谢', '感谢', '再见', '拜拜', '好的']):
-            if '还有' not in user_message and '另外' not in user_message:
-                self.stage = ReminderStage.COMPLETED
+        # 如果用户说再见或感谢（扩展关键词列表，与 Agent1 保持一致）
+        farewell_keywords = ['好的', '好', '谢谢', '感谢', '明白了', '知道了', '再见', '拜拜', '没问题', '行', '可以']
+        continue_keywords = ['还有', '另外', '还想', '再', '还需要', '继续', '但是', '不过']
+
+        user_lower = user_message.lower().strip()
+        has_farewell = any(kw in user_lower for kw in farewell_keywords)
+        has_continue = any(kw in user_lower for kw in continue_keywords)
+        is_short = len(user_message.strip()) <= 10
+
+        if has_farewell and not has_continue and is_short:
+            self.stage = ReminderStage.COMPLETED
 
     def is_completed(self) -> bool:
         """检查对话是否完成"""
@@ -734,3 +770,162 @@ class ReminderAgent:
             'conversation_turns': len(self.conversation_history),
             'stage': self.stage.value
         }
+
+    def _cmd_start_biomechanics_report(self) -> str:
+        """开始生成生物力学报告流程"""
+        return """📋 **生成生物力学报告**
+
+我可以为您生成两种类型的眼科生物力学报告：
+
+1️⃣ **基础报告** - 包含基本眼科生物测量数据
+   - 眼轴长度 (AXL)
+   - 角膜曲率 (K1, K2)
+   - 前房深度 (ACD)
+   - 晶状体厚度 (LT)
+   - 角膜厚度 (CCT)
+   - 角膜直径 (WTW)
+   - 瞳孔直径 (PD)
+
+2️⃣ **详细报告** - 包含完整的生物力学分析数据
+   - 基础测量数据
+   - 多区域角膜厚度分析
+   - 角膜屈光力分析
+   - 详细的生物力学参数
+
+请回复：
+- 「基础报告」或「1」- 生成基础报告
+- 「详细报告」或「2」- 生成详细报告"""
+
+    def generate_basic_biomechanics_report(self, scan_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        生成基础生物力学报告
+
+        Args:
+            scan_data: 检查数据字典，包含所有必需的占位符数据
+
+        Returns:
+            包含success, output_path, message的字典
+        """
+        try:
+            result = self.biomechanics_generator.generate_basic_report(scan_data)
+            return result
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                'success': False,
+                'message': f'生成基础报告失败: {str(e)}'
+            }
+
+    def generate_detailed_biomechanics_report(self, scan_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        生成详细生物力学报告
+
+        Args:
+            scan_data: 检查数据字典，包含所有必需的占位符数据
+
+        Returns:
+            包含success, output_path, message的字典
+        """
+        try:
+            result = self.biomechanics_generator.generate_detailed_report(scan_data)
+            return result
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                'success': False,
+                'message': f'生成详细报告失败: {str(e)}'
+            }
+
+    def handle_biomechanics_report_input(self, message: str, scan_data: Dict[str, Any]) -> tuple[str, bool]:
+        """
+        处理生物力学报告生成流程
+
+        Args:
+            message: 用户消息
+            scan_data: 检查数据（从数据库或外部输入）
+
+        Returns:
+            (响应消息, 是否完成)
+        """
+        step = self.pending_biomechanics_data.get('step', 1)
+
+        # 取消生成
+        if message in ['取消', '不了', '算了']:
+            self.stage = ReminderStage.SELECT_ACTION
+            self.pending_biomechanics_data = {}
+            return "好的，已取消生成报告。还有什么我可以帮您的吗？", False
+
+        if step == 1:
+            # 用户选择报告类型
+            message_lower = message.lower().strip()
+
+            if '基础' in message or message == '1':
+                self.pending_biomechanics_data['report_type'] = 'basic'
+                self.pending_biomechanics_data['step'] = 2
+
+                # 显示需要的字段
+                required_fields = self.biomechanics_generator.get_basic_template_fields()
+                return f"""好的，我将为您生成基础生物力学报告。
+
+📝 **需要的数据字段** ({len(required_fields)} 个)：
+{', '.join(required_fields[:15])}...
+
+请确保已经完成眼科生物测量检查。
+
+是否继续？回复「继续」开始生成，或提供检查数据。""", False
+
+            elif '详细' in message or message == '2':
+                self.pending_biomechanics_data['report_type'] = 'detailed'
+                self.pending_biomechanics_data['step'] = 2
+
+                # 显示需要的字段
+                required_fields = self.biomechanics_generator.get_detailed_template_fields()
+                return f"""好的，我将为您生成详细生物力学报告。
+
+📝 **需要的数据字段** ({len(required_fields)} 个)：
+包括基础测量数据 + 多区域分析数据
+
+请确保已经完成完整的生物力学检查。
+
+是否继续？回复「继续」开始生成，或提供检查数据。""", False
+            else:
+                return "请选择报告类型：\n- 回复「基础报告」或「1」\n- 回复「详细报告」或「2」", False
+
+        elif step == 2:
+            # 执行报告生成
+            report_type = self.pending_biomechanics_data.get('report_type')
+
+            if not scan_data:
+                return "❌ 错误：未找到检查数据。请先完成眼科生物测量检查。", False
+
+            # 将数据库数据格式化为报告模板格式
+            template_data = self.biomechanics_service.format_scan_for_report(scan_data, report_type)
+
+            # 生成报告
+            if report_type == 'basic':
+                result = self.generate_basic_biomechanics_report(template_data)
+            else:  # detailed
+                result = self.generate_detailed_biomechanics_report(template_data)
+
+            # 清理状态
+            self.stage = ReminderStage.SELECT_ACTION
+            self.pending_biomechanics_data = {}
+
+            if result['success']:
+                response = f"""✅ **报告生成成功！**
+
+📄 报告类型：{'基础报告' if report_type == 'basic' else '详细报告'}
+📁 保存位置：{result['output_path']}
+✏️ 替换字段：{result['replacement_count']} 个
+"""
+                if result.get('remaining_placeholders'):
+                    response += f"\n⚠️ 未替换字段：{len(result['remaining_placeholders'])} 个"
+                    response += f"\n（{', '.join(result['remaining_placeholders'][:5])}...）"
+
+                return response, False
+            else:
+                return f"❌ 生成报告失败：{result['message']}", False
+
+        return "处理错误", False

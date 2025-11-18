@@ -121,13 +121,19 @@ async def chat(message: ChatMessage):
         
         # 获取对话历史（用于意图识别）
         conversation_history = sessions[session_id].get("messages", [])
-        
+
+        # 获取当前agent状态
+        current_agent = sessions[session_id].get("current_agent")
+        current_stage = sessions[session_id].get("current_stage")
+
         # 1. 意图识别 - 判断使用哪个Agent
         intent_detector = get_intent_detector()
         intent_result = intent_detector.detect_intent(
             message.message,
             role=role,
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            current_agent=current_agent,
+            current_stage=current_stage
         )
         
         print(f"[意图识别] Agent类型: {intent_result['agent_type']}, "
@@ -178,17 +184,23 @@ async def chat(message: ChatMessage):
         
         # 更新当前使用的Agent
         sessions[session_id]["current_agent"] = agent_type
-        
+
         print(f"[主程序] 使用Agent: {agent_type}")
-        
+
         # 处理消息
         if agent_type == "health":
             response = agent.chat(message.message)
             is_completed = agent.is_completed()
             stage = agent.stage.value
+        elif agent_type == "reminder":
+            response, is_completed = agent.chat(message.message)
+            stage = agent.stage.value
         else:  # report agent
             response, is_completed = agent.chat(message.message)
             stage = agent.stage.value
+
+        # 更新会话中的当前stage（用于下次意图识别）
+        sessions[session_id]["current_stage"] = stage
         
         # 保存消息到会话
         sessions[session_id]["messages"].append({
