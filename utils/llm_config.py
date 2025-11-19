@@ -11,12 +11,12 @@ load_dotenv()
 
 def get_llm():
     """
-    获取配置好的LLM实例
+    获取配置好的LLM实例（业务Agent专用）
     硅基流动平台使用OpenAI兼容接口
     """
     api_key = os.getenv("SILICONFLOW_API_KEY")
     base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B")
+    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-32B-Instruct")  # 业务Agent使用32B
     
     if not api_key:
         raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
@@ -35,11 +35,11 @@ def get_llm():
 
 def get_streaming_llm():
     """
-    获取支持流式输出的LLM实例
+    获取支持流式输出的LLM实例（业务Agent专用）
     """
     api_key = os.getenv("SILICONFLOW_API_KEY")
     base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B")
+    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-32B-Instruct")  # 业务Agent使用32B
     
     if not api_key:
         raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
