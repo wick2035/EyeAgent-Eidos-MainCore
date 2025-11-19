@@ -14,6 +14,8 @@ from database.appointment_service_v2 import AppointmentServiceV2
 from database.report_service import ReportService
 from database.prescription_service import PrescriptionService
 from database.reminder_service import ReminderService
+from database.chat_service import ChatService
+from database.user_history_service_v2 import UserHistoryServiceV2
 from utils.report_generator import ReportGenerator
 from utils.prescription_generator import PrescriptionGenerator
 
@@ -46,6 +48,12 @@ prescription_generator = PrescriptionGenerator()
 
 # 提醒服务
 reminder_service = ReminderService()
+
+# 对话历史服务
+chat_service = ChatService()
+
+# 用户历史服务
+user_history_service = UserHistoryServiceV2()
 
 # 会话存储（生产环境应使用Redis等）
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -90,6 +98,18 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request):
+    """返回历史记录查询界面"""
+    return templates.TemplateResponse("history.html", {"request": request})
+
+
+@app.get("/chat-history", response_class=HTMLResponse)
+async def chat_history_page(request: Request):
+    """返回对话历史记录查询界面"""
+    return templates.TemplateResponse("chat_history.html", {"request": request})
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
     """
@@ -116,8 +136,46 @@ async def chat(message: ChatMessage):
                 "messages": [],
                 "created_at": None,
                 "role": role,
-                "current_agent": None
+                "current_agent": None,
+                "chat_id": None  # 数据库中的Chat_ID
             }
+
+            # 在数据库中创建对话会话
+            if message.user_id or message.phone_number:
+                try:
+                    # 获取patient_id
+                    patient_id = message.user_id
+                    if not patient_id and message.phone_number:
+                        from database.user_history_service_v2 import UserHistoryServiceV2
+                        user_service = UserHistoryServiceV2()
+                        user_info = user_service.get_user_by_phone(message.phone_number)
+                        if user_info:
+                            patient_id = user_info['Patient_ID']
+
+                    # 根据角色创建对话
+                    if patient_id:
+                        if role == "patient":
+                            chat_id = chat_service.create_chat_for_patient(
+                                patient_id=patient_id,
+                                title=None,  # 稍后根据第一条消息生成标题
+                                conversation_type='general',
+                                ai_agent=None  # 稍后根据意图识别结果更新
+                            )
+                        elif role == "doctor":
+                            chat_id = chat_service.create_chat_for_doctor(
+                                doctor_id=patient_id,  # 如果是医生角色，这里应该是doctor_id
+                                title=None,
+                                conversation_type='general',
+                                ai_agent=None
+                            )
+
+                        if chat_id:
+                            sessions[session_id]["chat_id"] = chat_id
+                            print(f"[对话历史] 创建新对话: Chat_ID={chat_id}")
+                except Exception as e:
+                    print(f"[对话历史] 创建对话失败: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # 获取对话历史（用于意图识别）
         conversation_history = sessions[session_id].get("messages", [])
@@ -144,7 +202,7 @@ async def chat(message: ChatMessage):
         if intent_result.get('blocked'):
             print(f"[权限控制] 操作被阻止: {intent_result['reason']}")
             response = f"抱歉，{intent_result['reason']}。您可以查看和分析现有的报告，但无法生成新报告。"
-            
+
             # 保存消息到会话
             sessions[session_id]["messages"].append({
                 "role": "user",
@@ -154,7 +212,28 @@ async def chat(message: ChatMessage):
                 "role": "assistant",
                 "content": response
             })
-            
+
+            # 保存消息到数据库
+            chat_id = sessions[session_id].get("chat_id")
+            if chat_id:
+                try:
+                    chat_service.save_message(
+                        chat_id=chat_id,
+                        message_content=message.message,
+                        message_type='user',
+                        sender_info=f"{role}_{message.user_id or message.phone_number}",
+                        context={'session_id': session_id}
+                    )
+                    chat_service.save_message(
+                        chat_id=chat_id,
+                        message_content=response,
+                        message_type='ai',
+                        sender_info='system',
+                        context={'session_id': session_id, 'blocked': True, 'reason': intent_result['reason']}
+                    )
+                except Exception as e:
+                    print(f"[对话历史] 保存blocked消息失败: {e}")
+
             return ChatResponse(
                 response=response,
                 session_id=session_id,
@@ -201,7 +280,7 @@ async def chat(message: ChatMessage):
 
         # 更新会话中的当前stage（用于下次意图识别）
         sessions[session_id]["current_stage"] = stage
-        
+
         # 保存消息到会话
         sessions[session_id]["messages"].append({
             "role": "user",
@@ -211,7 +290,58 @@ async def chat(message: ChatMessage):
             "role": "assistant",
             "content": response
         })
-        
+
+        # 保存消息到数据库
+        chat_id = sessions[session_id].get("chat_id")
+        if chat_id:
+            try:
+                # 保存用户消息
+                chat_service.save_message(
+                    chat_id=chat_id,
+                    message_content=message.message,
+                    message_type='user',
+                    sender_info=f"{role}_{message.user_id or message.phone_number}",
+                    context={'session_id': session_id}
+                )
+
+                # 保存AI消息
+                chat_service.save_message(
+                    chat_id=chat_id,
+                    message_content=response,
+                    message_type='ai',
+                    sender_info=f'agent_{agent_type}',
+                    context={
+                        'session_id': session_id,
+                        'stage': stage,
+                        'is_completed': is_completed
+                    }
+                )
+
+                # 更新对话的AI代理信息(如果还未设置)
+                chat_info = chat_service.get_chat_by_id(chat_id)
+                if chat_info and not chat_info.get('AI_Agent'):
+                    from database.db_connection import DatabaseConnection
+                    db = DatabaseConnection()
+                    db.execute_update(
+                        "UPDATE chat_conversation SET AI_Agent = %s WHERE Chat_ID = %s",
+                        (f'agent_{agent_type}', chat_id)
+                    )
+                    db.close()
+
+                # 如果是第一条消息,生成对话标题
+                if chat_info and not chat_info.get('Title'):
+                    # 简单地使用用户第一条消息的前30个字符作为标题
+                    title = message.message[:30] + ('...' if len(message.message) > 30 else '')
+                    chat_service.update_chat_title(chat_id, title)
+                    print(f"[对话历史] 更新对话标题: {title}")
+
+                print(f"[对话历史] 消息已保存到数据库: Chat_ID={chat_id}")
+
+            except Exception as e:
+                print(f"[对话历史] 保存消息失败: {e}")
+                import traceback
+                traceback.print_exc()
+
         print(f"[主程序] 对话完成状态: {is_completed}")
         
         # 3. 对于health agent，检查是否需要保存预约
@@ -417,6 +547,45 @@ async def get_users():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询用户列表失败: {str(e)}")
+
+
+@app.get("/api/patients/history/{phone_number}")
+async def get_patient_history(phone_number: str):
+    """
+    根据手机号查询患者的完整历史记录
+    包括基本信息、就诊记录、预约记录和处方信息
+
+    Args:
+        phone_number: 患者手机号
+
+    Returns:
+        包含患者完整历史信息的JSON对象
+    """
+    try:
+        # 使用 UserHistoryServiceV2 查询完整历史信息
+        history_data = user_history_service.get_user_complete_info_by_phone(phone_number)
+
+        if not history_data.get("basic_info"):
+            raise HTTPException(status_code=404, detail=f"未找到手机号 {phone_number} 对应的患者信息")
+
+        # 查询处方信息
+        try:
+            prescriptions = prescription_service.get_prescriptions_by_phone(phone_number)
+        except:
+            prescriptions = []
+
+        # 构造返回数据
+        return {
+            "success": True,
+            "patient": history_data.get("basic_info"),
+            "medical_records": history_data.get("medical_records", []),
+            "appointments": history_data.get("appointments", []),
+            "prescriptions": prescriptions
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询患者历史记录失败: {str(e)}")
 
 
 # ==================== 报告相关API ====================
@@ -957,6 +1126,264 @@ async def update_reminder(request: ReminderRequest):
         raise HTTPException(status_code=500, detail=f"更新提醒失败: {str(e)}")
 
 
+# ==================== 对话历史相关API ====================
+
+@app.get("/api/chat/history/patient/{patient_id}")
+async def get_patient_chat_history(patient_id: int, status: Optional[str] = None, limit: int = 20):
+    """
+    获取患者的对话历史列表
+
+    Args:
+        patient_id: 患者ID
+        status: 状态过滤 (active/archived/closed)
+        limit: 返回记录数限制
+
+    Returns:
+        对话历史列表
+    """
+    try:
+        print(f"[对话历史API] 查询患者对话历史: Patient_ID={patient_id}, Status={status}")
+
+        chats = chat_service.get_user_chats(
+            user_type='patient',
+            user_id=patient_id,
+            status=status,
+            limit=limit
+        )
+
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "count": len(chats),
+            "chats": chats
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询对话历史失败: {str(e)}")
+
+
+@app.get("/api/chat/history/phone/{phone_number}")
+async def get_chat_history_by_phone(phone_number: str, status: Optional[str] = None, limit: int = 20):
+    """
+    通过手机号获取患者的对话历史列表
+
+    Args:
+        phone_number: 患者手机号
+        status: 状态过滤
+        limit: 返回记录数限制
+
+    Returns:
+        对话历史列表
+    """
+    try:
+        print(f"[对话历史API] 通过手机号查询对话历史: Phone={phone_number}, Status={status}")
+
+        # 先获取patient_id
+        from database.user_history_service_v2 import UserHistoryServiceV2
+        user_service = UserHistoryServiceV2()
+        user_info = user_service.get_user_by_phone(phone_number)
+
+        if not user_info:
+            raise HTTPException(status_code=404, detail="未找到该手机号对应的用户")
+
+        patient_id = user_info['Patient_ID']
+
+        chats = chat_service.get_user_chats(
+            user_type='patient',
+            user_id=patient_id,
+            status=status,
+            limit=limit
+        )
+
+        return {
+            "success": True,
+            "phone_number": phone_number,
+            "patient_id": patient_id,
+            "count": len(chats),
+            "chats": chats
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询对话历史失败: {str(e)}")
+
+
+@app.get("/api/chat/messages/{chat_id}")
+async def get_chat_messages(chat_id: int, limit: Optional[int] = None, offset: int = 0):
+    """
+    获取对话的所有消息
+
+    Args:
+        chat_id: 对话ID
+        limit: 返回消息数量限制
+        offset: 偏移量(用于分页)
+
+    Returns:
+        消息列表
+    """
+    try:
+        print(f"[对话历史API] 查询对话消息: Chat_ID={chat_id}")
+
+        messages = chat_service.get_chat_messages(
+            chat_id=chat_id,
+            limit=limit,
+            offset=offset
+        )
+
+        # 获取对话元数据(标题、AI代理等信息)
+        chat = chat_service.get_chat_by_id(chat_id)
+
+        return {
+            "success": True,
+            "chat_id": chat_id,
+            "count": len(messages),
+            "messages": messages,
+            "chat": chat
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询对话消息失败: {str(e)}")
+
+
+@app.get("/api/chat/recent/{patient_id}")
+async def get_recent_chats_with_preview(patient_id: int, limit: int = 10):
+    """
+    获取患者最近的对话及最后一条消息预览
+
+    Args:
+        patient_id: 患者ID
+        limit: 返回数量限制
+
+    Returns:
+        对话列表(包含最后一条消息)
+    """
+    try:
+        print(f"[对话历史API] 查询最近对话: Patient_ID={patient_id}")
+
+        chats = chat_service.get_recent_chats_with_last_message(
+            user_type='patient',
+            user_id=patient_id,
+            limit=limit
+        )
+
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "count": len(chats),
+            "chats": chats
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询最近对话失败: {str(e)}")
+
+
+@app.get("/api/chat/stats/{chat_id}")
+async def get_chat_statistics(chat_id: int):
+    """
+    获取对话的统计信息
+
+    Args:
+        chat_id: 对话ID
+
+    Returns:
+        统计信息
+    """
+    try:
+        print(f"[对话历史API] 查询对话统计: Chat_ID={chat_id}")
+
+        stats = chat_service.get_chat_statistics(chat_id)
+
+        if not stats:
+            raise HTTPException(status_code=404, detail="未找到对话统计信息")
+
+        return {
+            "success": True,
+            "stats": stats
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查询对话统计失败: {str(e)}")
+
+
+@app.post("/api/chat/archive/{chat_id}")
+async def archive_chat_conversation(chat_id: int):
+    """
+    归档对话
+
+    Args:
+        chat_id: 对话ID
+
+    Returns:
+        操作结果
+    """
+    try:
+        print(f"[对话历史API] 归档对话: Chat_ID={chat_id}")
+
+        success = chat_service.archive_chat(chat_id)
+
+        if success:
+            return {
+                "success": True,
+                "message": "对话已归档",
+                "chat_id": chat_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="归档对话失败")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"归档对话失败: {str(e)}")
+
+
+@app.delete("/api/chat/delete/{chat_id}")
+async def delete_chat_conversation(chat_id: int):
+    """
+    删除对话(会级联删除所有消息)
+
+    Args:
+        chat_id: 对话ID
+
+    Returns:
+        操作结果
+    """
+    try:
+        print(f"[对话历史API] 删除对话: Chat_ID={chat_id}")
+
+        success = chat_service.delete_chat(chat_id)
+
+        if success:
+            return {
+                "success": True,
+                "message": "对话已删除",
+                "chat_id": chat_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail="删除对话失败")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"删除对话失败: {str(e)}")
+
+
 @app.post("/api/chat/reminder", response_model=ChatResponse)
 async def chat_reminder(message: ChatMessage):
     """
@@ -1037,6 +1464,7 @@ async def shutdown_event():
     report_service.close()
     prescription_service.close()
     reminder_service.close()
+    chat_service.__del__()  # 关闭chat_service数据库连接
     print("数据库连接已关闭")
 
 
