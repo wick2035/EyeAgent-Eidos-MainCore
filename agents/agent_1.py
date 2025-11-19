@@ -42,7 +42,9 @@ class HealthAgent:
         self.conversation_history = []
         self.collected_fields = set()  # 已收集的字段
         self.needs_appointment = False  # 是否需要预约
-        
+        self.appointment_confirmed = False  # 预约是否确认成功
+        self.appointment_failure_message = None  # 预约失败原因
+
         # 用户角色
         self.role = role  # patient 或 doctor
         
@@ -648,27 +650,37 @@ AI刚刚的问题：{recent_question}
                 self.stage = ConversationStage.APPOINTMENT_BOOKING
         
         elif self.stage == ConversationStage.APPOINTMENT_BOOKING:
-            # 预约信息收集完成，检查关键信息是否齐全
+            # 预约信息收集完成,检查关键信息是否齐全
             appointment_related = {"期望时间", "紧急程度"}
             critical_missing = self._get_missing_critical_fields()
 
             print(f"[调试] 预约阶段 - 已收集预约信息: {appointment_related & self.collected_fields}")
             print(f"[调试] 预约阶段 - 缺失关键字段: {critical_missing}")
+            print(f"[调试] 预约阶段 - 预约确认状态: {self.appointment_confirmed}")
 
-            # 放宽条件：只要收集了期望时间或者对话已进行多轮，且关键信息基本齐全即可完成
+            # 新逻辑:只有预约确认成功后才能转入完成阶段
+            # 信息收集完成且预约已确认
             has_time_info = "期望时间" in self.collected_fields
             has_basic_info = len(critical_missing) <= 3  # 最多缺3个字段
             enough_conversation = len(self.conversation_history) >= 10  # 至少5轮对话(用户+助手各5条)
 
-            if (has_time_info and has_basic_info) or (enough_conversation and has_basic_info):
-                print("[调试] 满足完成条件，转入完成阶段")
+            # 只有在预约确认成功的情况下才能转入完成阶段
+            if self.appointment_confirmed and ((has_time_info and has_basic_info) or (enough_conversation and has_basic_info)):
+                print("[调试] 预约已确认且信息齐全，转入完成阶段")
                 self.stage = ConversationStage.COMPLETED
+            elif not self.appointment_confirmed and (has_time_info or enough_conversation):
+                # 信息收集完成但还未确认预约,保持在APPOINTMENT_BOOKING阶段等待main.py的预约结果反馈
+                print("[调试] 预约信息已收集，等待预约确认结果...")
 
         # 🔥 全局告别/确认意图检测 - 在关键阶段检测到用户确认完成的意图
+        # 但只有在预约已确认或不需要预约的情况下才能完成
         if self.stage in [ConversationStage.APPOINTMENT_BOOKING, ConversationStage.COMPLETED]:
             if self._detect_farewell_intent(user_input):
-                print(f"[调试] 检测到用户告别/确认意图，对话完成")
-                self.stage = ConversationStage.COMPLETED
+                if self.appointment_confirmed or not self.needs_appointment:
+                    print(f"[调试] 检测到用户告别/确认意图，且预约已确认，对话完成")
+                    self.stage = ConversationStage.COMPLETED
+                else:
+                    print(f"[调试] 检测到用户告别意图，但预约尚未确认，保持当前阶段")
     
     def chat(self, user_input: str) -> str:
         """处理用户输入并返回响应"""
@@ -815,7 +827,50 @@ AI刚刚的问题：{recent_question}
     def is_completed(self) -> bool:
         """检查对话是否完成"""
         return self.stage == ConversationStage.COMPLETED
-    
+
+    def set_appointment_result(self, success: bool, message: str = "", appointment_info: Dict[str, Any] = None):
+        """
+        设置预约结果(由main.py在处理预约后调用)
+
+        Args:
+            success: 预约是否成功
+            message: 预约结果消息
+            appointment_info: 预约详细信息(成功时提供)
+        """
+        print(f"\n[Agent] 收到预约结果反馈: success={success}, message={message}")
+
+        if success:
+            # 预约成功,标记为已确认,允许转入完成阶段
+            self.appointment_confirmed = True
+            self.appointment_failure_message = None
+            print("[Agent] 预约确认成功,对话可以结束")
+        else:
+            # 预约失败,保持在APPOINTMENT_BOOKING阶段,准备询问替代方案
+            self.appointment_confirmed = False
+            self.appointment_failure_message = message
+            self.stage = ConversationStage.APPOINTMENT_BOOKING
+            print(f"[Agent] 预约失败: {message}, 保持在预约阶段继续对话")
+
+    def get_appointment_failure_response(self) -> str:
+        """
+        生成预约失败后的响应(用于询问用户是否尝试其他时间)
+
+        Returns:
+            给用户的失败响应消息
+        """
+        if not self.appointment_failure_message:
+            return ""
+
+        # 根据失败原因生成相应的回复
+        base_message = f"{self.appointment_failure_message}\n\n"
+
+        if "没有可用的" in self.appointment_failure_message or "时间已过期" in self.appointment_failure_message:
+            return base_message + "请问您是否可以考虑其他时间段?比如今天下午、明天上午或后天?我可以帮您重新查询可用的医生。"
+        elif "系统中没有" in self.appointment_failure_message:
+            return base_message + "建议您联系医院其他科室,或者稍后再试。"
+        else:
+            return base_message + "请问您是否需要调整预约时间或科室?"
+
     def reset(self):
         """重置智能体状态"""
         self.data_handler.reset()
@@ -823,4 +878,6 @@ AI刚刚的问题：{recent_question}
         self.conversation_history = []
         self.collected_fields = set()
         self.needs_appointment = False
+        self.appointment_confirmed = False
+        self.appointment_failure_message = None
 

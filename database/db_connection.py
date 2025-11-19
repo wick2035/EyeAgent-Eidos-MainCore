@@ -193,3 +193,13 @@ class DatabaseConnection:
         self.close()
         return False
 
+
+def get_db_connection():
+    """
+    便捷函数：创建并返回一个新的数据库连接
+    
+    Returns:
+        pymysql 连接对象
+    """
+    db = DatabaseConnection()
+    return db.get_connection()
