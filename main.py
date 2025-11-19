@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from agents.agent_manager import AgentManager
-from database.appointment_service_v2 import AppointmentServiceV2
+from database.appointment_service_v3 import AppointmentServiceV3
 from database.report_service import ReportService
 from database.prescription_service import PrescriptionService
 from database.reminder_service import ReminderService
@@ -35,8 +35,8 @@ templates = Jinja2Templates(directory="templates")
 # 全局智能体管理器
 agent_manager = AgentManager()
 
-# 全局数据库服务（使用V2版本以匹配数据库架构）
-appointment_service = AppointmentServiceV2()
+# 全局数据库服务（使用V3版本）
+appointment_service = AppointmentServiceV3()
 
 # 报告服务
 report_service = ReportService()
@@ -343,39 +343,69 @@ async def chat(message: ChatMessage):
                 traceback.print_exc()
 
         print(f"[主程序] 对话完成状态: {is_completed}")
-        
-        # 3. 对于health agent，检查是否需要保存预约
-        if agent_type == "health" and is_completed and hasattr(agent, 'needs_appointment') and agent.needs_appointment:
-            try:
-                print("[调试] 开始获取患者数据并保存到数据库...")
-                
-                # 获取患者数据
-                patient_data = agent.get_patient_data()
-                
-                print(f"[调试] 患者数据: {json.dumps(patient_data, ensure_ascii=False)}")
-                
-                # 保存到数据库
-                db_result = appointment_service.process_appointment(patient_data)
-                
-                print(f"[数据库] 预约处理结果: {db_result}")
-                
-                if db_result['success']:
-                    # 将数据库操作结果保存到会话
-                    sessions[session_id]["appointment_result"] = db_result
-                    
-                    # 在响应中添加预约成功信息
-                    response += f"\n\n✅ {db_result['message']}"
-                    response += f"\n预约ID：{db_result['appointment_id']}"
-                    response += f"\n患者ID：{db_result['patient_id']}"
-                else:
-                    # 预约失败，追加错误信息
-                    response += f"\n\n⚠️ 预约失败：{db_result['message']}"
-                    
-            except Exception as e:
-                import traceback
-                print(f"[数据库错误] 保存数据失败: {str(e)}")
-                traceback.print_exc()
-                response += f"\n\n⚠️ 数据保存失败，但您的信息已记录，请联系客服。"
+
+        # 3. 对于health agent,在信息收集完成后(APPOINTMENT_BOOKING阶段)尝试预约
+        # 关键改变:不等到完全completed才处理预约,而是在预约阶段就处理
+        if agent_type == "health" and hasattr(agent, 'needs_appointment') and agent.needs_appointment:
+            # 【修复】必须在APPOINTMENT_BOOKING阶段才能执行预约,确保信息已收集完整
+            if (hasattr(agent, 'appointment_confirmed') and not agent.appointment_confirmed 
+                and stage == "appointment_booking"):  # 添加阶段检查
+                try:
+                    print("[调试] 检测到需要预约且尚未确认,且已到预约阶段,开始处理预约...")
+
+                    # 获取患者数据
+                    patient_data = agent.get_patient_data()
+
+                    print(f"[调试] 患者数据: {json.dumps(patient_data, ensure_ascii=False)}")
+
+                    # 调用预约服务
+                    db_result = appointment_service.process_appointment(patient_data)
+
+                    print(f"[数据库] 预约处理结果: {db_result}")
+
+                    # 关键:将预约结果反馈给agent
+                    agent.set_appointment_result(
+                        success=db_result['success'],
+                        message=db_result['message'],
+                        appointment_info=db_result if db_result['success'] else None
+                    )
+
+                    if db_result['success']:
+                        # 预约成功
+                        sessions[session_id]["appointment_result"] = db_result
+
+                        # 【修复】使用正确的键路径访问patient_id
+                        # 在响应中添加预约成功信息
+                        response += f"\n\n✅ {db_result['message']}"
+                        response += f"\n预约ID：{db_result['appointment_id']}"
+                        if 'appointment_details' in db_result and 'patient_id' in db_result['appointment_details']:
+                            response += f"\n患者ID：{db_result['appointment_details']['patient_id']}"
+
+                        # 预约成功后,重新检查完成状态(agent可能已经转入COMPLETED)
+                        is_completed = agent.is_completed()
+                        print(f"[主程序] 预约成功后,对话完成状态: {is_completed}")
+                    else:
+                        # 预约失败,agent会保持在APPOINTMENT_BOOKING阶段
+                        # 获取失败响应并追加到回复中
+                        failure_response = agent.get_appointment_failure_response()
+                        if failure_response:
+                            response = failure_response
+
+                        # 确保对话未完成,继续收集信息
+                        is_completed = False
+                        print(f"[主程序] 预约失败,对话继续: {db_result['message']}")
+
+                except Exception as e:
+                    import traceback
+                    print(f"[数据库错误] 预约处理失败: {str(e)}")
+                    traceback.print_exc()
+
+                    # 通知agent预约失败
+                    if hasattr(agent, 'set_appointment_result'):
+                        agent.set_appointment_result(success=False, message=f"系统错误: {str(e)}")
+
+                    response += f"\n\n⚠️ 预约处理失败: {str(e)},请稍后重试。"
+                    is_completed = False
         
         # 返回响应
         return ChatResponse(
@@ -1453,6 +1483,10 @@ async def startup_event():
     print("智能医疗咨询系统已启动")
     print("访问地址: http://127.0.0.1:8000")
     print("=" * 60)
+    
+    # 执行启动初始化任务
+    from utils.startup_tasks import on_startup
+    on_startup()
 
 
 @app.on_event("shutdown")

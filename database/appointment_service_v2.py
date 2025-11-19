@@ -230,40 +230,54 @@ class AppointmentServiceV2:
                                doctor_preference: str = None, urgency: str = "普通") -> List[Dict]:
         """查找可用的医生"""
         query = """
-            SELECT * FROM doctor 
+            SELECT * FROM doctor
             WHERE Specialty = %s OR Hospital_Area LIKE %s
             ORDER BY Title DESC
         """
         doctors = self.db.execute_query(query, (department, f"%{department}%"))
-        
+
         if not doctors:
             logger.warning(f"未找到 {department} 的医生")
             return []
-        
+
         # 解析患者期望时间
         preferred_time = None
         if preferred_time_expr:
             preferred_time = self._parse_time_expression(preferred_time_expr)
-        
+            logger.info(f"解析患者期望时间: {preferred_time_expr} -> {preferred_time}")
+
+        # 获取当前时间用于过滤过期日期
+        now = datetime.now()
+        logger.info(f"当前时间: {now}, 将过滤早于此时间的预约")
+
         # 筛选可用医生
         available_doctors = []
+        filtered_count = 0  # 记录被过滤的医生数量
+
         for doctor in doctors:
             available_time_str = doctor.get('Available_Time', '')
             time_range = self._parse_available_time(available_time_str)
-            
+
             if time_range:
                 start_time, end_time = time_range
+
+                # 过滤过期时间:跳过早于当前时间的预约
+                if end_time < now:
+                    filtered_count += 1
+                    logger.debug(f"医生 {doctor.get('Name')} 的时间已过期: {start_time} - {end_time}")
+                    continue
+
                 # 检查时间是否匹配
                 if self._is_time_match(preferred_time, start_time, end_time):
                     doctor['parsed_start_time'] = start_time
                     doctor['parsed_end_time'] = end_time
                     doctor['match_score'] = self._calculate_match_score(doctor, doctor_preference, urgency)
                     available_doctors.append(doctor)
-        
+
         # 按匹配分数排序
         available_doctors.sort(key=lambda x: x['match_score'], reverse=True)
-        
-        logger.info(f"找到 {len(available_doctors)} 位可用医生")
+
+        logger.info(f"找到 {len(available_doctors)} 位可用医生 (过滤了 {filtered_count} 位时间已过期的医生)")
         return available_doctors
     
     def _is_time_match(self, preferred_time: Optional[datetime], 
@@ -411,13 +425,26 @@ class AppointmentServiceV2:
                 doctor_preference=doctor_preference,
                 urgency=urgency
             )
-            
+
             if not available_doctors:
+                # 区分不同的失败原因
+                all_doctors_query = "SELECT COUNT(*) as count FROM doctor WHERE Specialty = %s OR Hospital_Area LIKE %s"
+                all_doctors_count = self.db.execute_one(all_doctors_query, (department, f"%{department}%"))
+
+                if all_doctors_count and all_doctors_count['count'] == 0:
+                    message = f'抱歉,系统中没有{department}的医生'
+                elif preferred_time:
+                    message = f'抱歉,{preferred_time}没有可用的{department}医生,请尝试其他时间段'
+                else:
+                    message = f'抱歉,当前没有可用的{department}医生(所有医生的预约时间可能已过期)'
+
                 return {
                     'success': False,
                     'patient_id': patient_id,
                     'medical_record_id': medical_record_id,
-                    'message': f'未找到符合条件的可用医生',
+                    'message': message,
+                    'department': department,
+                    'preferred_time': preferred_time,
                     'available_doctors': []
                 }
             
