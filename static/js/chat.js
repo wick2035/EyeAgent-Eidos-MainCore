@@ -13,6 +13,7 @@ const userInput = document.getElementById('userInput');
 const sendBtn = document.getElementById('sendBtn');
 const exportBtn = document.getElementById('exportBtn');
 const resetBtn = document.getElementById('resetBtn');
+const historyBtn = document.getElementById('historyBtn');
 const loadingIndicator = document.getElementById('loadingIndicator');
 const sessionIdDisplay = document.getElementById('sessionId');
 const currentStageDisplay = document.getElementById('currentStage');
@@ -23,6 +24,8 @@ const jsonContent = document.getElementById('jsonContent');
 const userSelect = document.getElementById('userSelect');
 const roleSelect = document.getElementById('roleSelect');
 const userSelectLabel = document.getElementById('userSelectLabel');
+const historySidebar = document.getElementById('historySidebar');
+const historyList = document.getElementById('historyList');
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
@@ -40,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     exportBtn.addEventListener('click', exportPatientData);
     resetBtn.addEventListener('click', resetSession);
+    historyBtn.addEventListener('click', toggleHistorySidebar);
     
     // 身份选择事件 - 切换身份时自动重置会话并更新UI
     roleSelect.addEventListener('change', async (e) => {
@@ -473,4 +477,235 @@ jsonModal.addEventListener('click', (e) => {
         closeJsonModal();
     }
 });
+
+// ========== 历史记录功能 ==========
+
+// 切换历史记录侧边栏
+function toggleHistorySidebar() {
+    const isActive = historySidebar.classList.toggle('active');
+
+    // 如果打开侧边栏且有选中用户,自动加载历史
+    if (isActive && (selectedUserId || selectedUserPhone)) {
+        loadChatHistory();
+    }
+}
+
+// 加载对话历史列表
+async function loadChatHistory() {
+    if (!selectedUserId && !selectedUserPhone) {
+        historyList.innerHTML = `
+            <div class="empty-history">
+                <div class="empty-icon">👤</div>
+                <p>请先选择用户</p>
+                <small>从顶部选择一个用户后即可查看历史对话</small>
+            </div>
+        `;
+        return;
+    }
+
+    historyList.innerHTML = `
+        <div class="loading-history">
+            <div class="loading-spinner"></div>
+            <p>加载历史记录...</p>
+        </div>
+    `;
+
+    try {
+        // 判断使用哪个API
+        let endpoint;
+        if (selectedUserPhone) {
+            endpoint = `/api/chat/history/phone/${selectedUserPhone}`;
+        } else {
+            endpoint = `/api/chat/history/${currentRole}/${selectedUserId}`;
+        }
+
+        const response = await fetch(endpoint);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || '查询失败');
+        }
+
+        displayChatHistory(data.chats || []);
+    } catch (error) {
+        historyList.innerHTML = `
+            <div class="empty-history">
+                <div class="empty-icon">❌</div>
+                <p>加载失败</p>
+                <small>${error.message}</small>
+            </div>
+        `;
+    }
+}
+
+// 显示对话历史列表
+function displayChatHistory(chats) {
+    if (chats.length === 0) {
+        historyList.innerHTML = `
+            <div class="empty-history">
+                <div class="empty-icon">💭</div>
+                <p>暂无历史对话</p>
+                <small>开始新对话后会自动保存</small>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '';
+    chats.forEach(chat => {
+        const statusClass = `status-${chat.Status || 'active'}`;
+        const title = chat.Title || `对话 #${chat.Chat_ID}`;
+        const agent = chat.AI_Agent || '-';
+        const type = chat.Conversation_Type || 'general';
+        const messageCount = chat.Total_Messages || 0;
+        const time = formatHistoryTime(chat.Created_At);
+        const isCurrent = sessionId && chat.Chat_ID === parseInt(sessionId);
+
+        html += `
+            <div class="history-item ${isCurrent ? 'current' : ''}" onclick="loadHistoryChat(${chat.Chat_ID})">
+                <div class="history-item-header">
+                    <span class="history-title">${escapeHtml(title)}</span>
+                    <span class="history-status ${statusClass}">${chat.Status || 'active'}</span>
+                </div>
+                <div class="history-meta">
+                    🤖 ${agent} | 💬 ${messageCount} 条
+                </div>
+                <div class="history-preview">
+                    ${chat.Summary || '暂无摘要'}
+                </div>
+                <div class="history-time">
+                    🕐 ${time}
+                </div>
+            </div>
+        `;
+    });
+
+    historyList.innerHTML = html;
+}
+
+// 加载历史对话
+async function loadHistoryChat(chatId) {
+    showLoading();
+
+    try {
+        const response = await fetch(`/api/chat/messages/${chatId}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || '加载失败');
+        }
+
+        // 清空当前对话
+        chatMessages.innerHTML = '';
+
+        // 加载历史消息
+        const messages = data.messages || [];
+        messages.forEach(msg => {
+            const messageType = msg.Message_Type === 'user' ? 'user' : 'assistant';
+            addMessageToUI(msg.Message_Content, messageType);
+        });
+
+        // 更新UI状态
+        const chat = data.chat;
+        if (chat) {
+            // 可以选择是否更新sessionId为历史对话的ID
+            // sessionId = chatId.toString();
+            // sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+
+            if (chat.AI_Agent) {
+                updateAgentDisplay(chat.AI_Agent);
+            }
+
+            addSystemMessage(`📜 已加载历史对话: ${chat.Title || '对话 #' + chatId} (${messages.length} 条消息)`);
+        }
+
+        // 关闭侧边栏
+        historySidebar.classList.remove('active');
+
+        // 更新历史列表中的高亮
+        loadChatHistory();
+
+    } catch (error) {
+        console.error('Error:', error);
+        addSystemMessage(`❌ 加载历史对话失败: ${error.message}`);
+    } finally {
+        hideLoading();
+    }
+}
+
+// 添加消息到UI(不滚动到底部)
+function addMessageToUI(text, type) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${type}-message`;
+
+    const avatarDiv = document.createElement('div');
+    avatarDiv.className = 'message-avatar';
+    avatarDiv.textContent = type === 'user' ? '👤' : '🤖';
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'message-text';
+    textDiv.textContent = text;
+
+    const timeDiv = document.createElement('div');
+    timeDiv.className = 'message-time';
+    timeDiv.textContent = getCurrentTime();
+
+    contentDiv.appendChild(textDiv);
+    contentDiv.appendChild(timeDiv);
+
+    messageDiv.appendChild(avatarDiv);
+    messageDiv.appendChild(contentDiv);
+
+    chatMessages.appendChild(messageDiv);
+}
+
+// 格式化历史时间
+function formatHistoryTime(dateStr) {
+    if (!dateStr) return '-';
+
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diff = now - date;
+
+    // 小于1分钟
+    if (diff < 60000) {
+        return '刚刚';
+    }
+
+    // 小于1小时
+    if (diff < 3600000) {
+        const minutes = Math.floor(diff / 60000);
+        return `${minutes}分钟前`;
+    }
+
+    // 小于1天
+    if (diff < 86400000) {
+        const hours = Math.floor(diff / 3600000);
+        return `${hours}小时前`;
+    }
+
+    // 小于7天
+    if (diff < 604800000) {
+        const days = Math.floor(diff / 86400000);
+        return `${days}天前`;
+    }
+
+    // 超过7天显示具体日期
+    return date.toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+// HTML转义函数
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
 

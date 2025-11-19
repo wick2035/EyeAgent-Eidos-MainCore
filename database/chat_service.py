@@ -54,7 +54,7 @@ class ChatService:
                 (User_Type, Patient_ID, Title, Conversation_Type, AI_Agent)
                 VALUES ('patient', %s, %s, %s, %s)
             """
-            chat_id = self.db.execute(query, (patient_id, title, conversation_type, ai_agent))
+            chat_id = self.db.execute_insert(query, (patient_id, title, conversation_type, ai_agent))
             logger.info(f"为患者创建对话成功: Patient_ID={patient_id}, Chat_ID={chat_id}")
             return chat_id
         except Exception as e:
@@ -86,7 +86,7 @@ class ChatService:
                 (User_Type, Doctor_ID, Title, Conversation_Type, AI_Agent)
                 VALUES ('doctor', %s, %s, %s, %s)
             """
-            chat_id = self.db.execute(query, (doctor_id, title, conversation_type, ai_agent))
+            chat_id = self.db.execute_insert(query, (doctor_id, title, conversation_type, ai_agent))
             logger.info(f"为医生创建对话成功: Doctor_ID={doctor_id}, Chat_ID={chat_id}")
             return chat_id
         except Exception as e:
@@ -180,7 +180,7 @@ class ChatService:
         """
         try:
             query = "UPDATE chat_conversation SET Title = %s WHERE Chat_ID = %s"
-            self.db.execute(query, (title, chat_id))
+            self.db.execute_update(query, (title, chat_id))
             logger.info(f"更新对话标题成功: Chat_ID={chat_id}, Title={title}")
             return True
         except Exception as e:
@@ -200,7 +200,7 @@ class ChatService:
         """
         try:
             query = "UPDATE chat_conversation SET Summary = %s WHERE Chat_ID = %s"
-            self.db.execute(query, (summary, chat_id))
+            self.db.execute_update(query, (summary, chat_id))
             logger.info(f"更新对话摘要成功: Chat_ID={chat_id}")
             return True
         except Exception as e:
@@ -220,7 +220,7 @@ class ChatService:
         """
         try:
             query = "UPDATE chat_conversation SET Status = %s WHERE Chat_ID = %s"
-            self.db.execute(query, (status, chat_id))
+            self.db.execute_update(query, (status, chat_id))
             logger.info(f"更新对话状态成功: Chat_ID={chat_id}, Status={status}")
             return True
         except Exception as e:
@@ -263,7 +263,7 @@ class ChatService:
         """
         try:
             query = "DELETE FROM chat_conversation WHERE Chat_ID = %s"
-            self.db.execute(query, (chat_id,))
+            self.db.execute_update(query, (chat_id,))
             logger.info(f"删除对话成功: Chat_ID={chat_id}")
             return True
         except Exception as e:
@@ -314,7 +314,7 @@ class ChatService:
                 (Chat_ID, Message_Order, Message_Content, Message_Type, Sender_Info, Context, Tokens_Used)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
-            message_id = self.db.execute(
+            message_id = self.db.execute_insert(
                 insert_query,
                 (chat_id, next_order, message_content, message_type, sender_info, context_json, tokens_used)
             )
@@ -325,7 +325,7 @@ class ChatService:
                 SET Total_Messages = Total_Messages + 1
                 WHERE Chat_ID = %s
             """
-            self.db.execute(update_query, (chat_id,))
+            self.db.execute_update(update_query, (chat_id,))
 
             logger.info(f"保存消息成功: Chat_ID={chat_id}, Message_ID={message_id}, Type={message_type}")
             return message_id
@@ -421,7 +421,7 @@ class ChatService:
         """
         try:
             query = "UPDATE chat_message SET Message_Content = %s WHERE Message_ID = %s"
-            self.db.execute(query, (new_content, message_id))
+            self.db.execute_update(query, (new_content, message_id))
             logger.info(f"更新消息内容成功: Message_ID={message_id}")
             return True
         except Exception as e:
@@ -448,7 +448,7 @@ class ChatService:
 
             # 删除消息
             query = "DELETE FROM chat_message WHERE Message_ID = %s"
-            self.db.execute(query, (message_id,))
+            self.db.execute_update(query, (message_id,))
 
             # 更新对话的消息总数
             update_query = """
@@ -456,7 +456,7 @@ class ChatService:
                 SET Total_Messages = Total_Messages - 1
                 WHERE Chat_ID = %s AND Total_Messages > 0
             """
-            self.db.execute(update_query, (chat_id,))
+            self.db.execute_update(update_query, (chat_id,))
 
             logger.info(f"删除消息成功: Message_ID={message_id}")
             return True

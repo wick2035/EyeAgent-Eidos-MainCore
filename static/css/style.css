@@ -27,6 +27,7 @@ body {
     flex-direction: column;
     height: 90vh;
     max-height: 800px;
+    position: relative;
 }
 
 /* 顶部标题栏 */
@@ -474,24 +475,222 @@ body {
 
 /* 滚动条样式 */
 .chat-messages::-webkit-scrollbar,
-.modal-body::-webkit-scrollbar {
+.modal-body::-webkit-scrollbar,
+.history-list::-webkit-scrollbar {
     width: 8px;
 }
 
 .chat-messages::-webkit-scrollbar-track,
-.modal-body::-webkit-scrollbar-track {
+.modal-body::-webkit-scrollbar-track,
+.history-list::-webkit-scrollbar-track {
     background: #f1f1f1;
 }
 
 .chat-messages::-webkit-scrollbar-thumb,
-.modal-body::-webkit-scrollbar-thumb {
+.modal-body::-webkit-scrollbar-thumb,
+.history-list::-webkit-scrollbar-thumb {
     background: #888;
     border-radius: 4px;
 }
 
 .chat-messages::-webkit-scrollbar-thumb:hover,
-.modal-body::-webkit-scrollbar-thumb:hover {
+.modal-body::-webkit-scrollbar-thumb:hover,
+.history-list::-webkit-scrollbar-thumb:hover {
     background: #555;
+}
+
+/* 历史记录侧边栏 */
+.history-sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 320px;
+    height: 100%;
+    background: white;
+    box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
+    transform: translateX(100%);
+    transition: transform 0.3s ease;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+}
+
+.history-sidebar.active {
+    transform: translateX(0);
+}
+
+.history-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.history-header h3 {
+    font-size: 18px;
+    margin: 0;
+}
+
+.close-sidebar {
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    color: white;
+    font-size: 28px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s;
+}
+
+.close-sidebar:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: rotate(90deg);
+}
+
+.history-controls {
+    padding: 15px;
+    border-bottom: 1px solid #e8e8e8;
+}
+
+.btn-load-history {
+    width: 100%;
+    padding: 10px;
+    background: #667eea;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.btn-load-history:hover {
+    background: #5568d3;
+    transform: translateY(-1px);
+}
+
+.history-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+}
+
+.empty-history {
+    text-align: center;
+    padding: 40px 20px;
+    color: #999;
+}
+
+.empty-icon {
+    font-size: 48px;
+    margin-bottom: 10px;
+}
+
+.empty-history p {
+    margin: 10px 0 5px 0;
+    font-size: 14px;
+}
+
+.empty-history small {
+    font-size: 12px;
+    color: #bbb;
+}
+
+.history-item {
+    background: #f8f9fa;
+    border: 2px solid #e8e8e8;
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.history-item:hover {
+    border-color: #667eea;
+    background: #f0f4ff;
+    transform: translateX(-2px);
+}
+
+.history-item.current {
+    border-color: #667eea;
+    background: #e3f2fd;
+}
+
+.history-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.history-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #333;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.history-status {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    margin-left: 8px;
+}
+
+.status-active {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-archived {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-closed {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.history-meta {
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 5px;
+}
+
+.history-preview {
+    font-size: 11px;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.history-time {
+    font-size: 10px;
+    color: #999;
+    margin-top: 5px;
+}
+
+.loading-history {
+    text-align: center;
+    padding: 40px 20px;
+    color: #666;
+}
+
+.loading-history .loading-spinner {
+    margin: 0 auto 15px auto;
 }
 
 /* 响应式设计 */
@@ -517,6 +716,10 @@ body {
     .modal-content {
         width: 95%;
         max-height: 90vh;
+    }
+
+    .history-sidebar {
+        width: 280px;
     }
 }
 

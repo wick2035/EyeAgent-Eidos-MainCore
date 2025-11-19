@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史记录查询 - 智能医疗咨询系统</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .search-section {
+            padding: 30px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .search-box {
+            display: flex;
+            gap: 10px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .search-box input {
+            flex: 1;
+            padding: 12px 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .search-box button {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .search-box button:hover {
+            transform: translateY(-2px);
+        }
+
+        .search-box button:active {
+            transform: translateY(0);
+        }
+
+        .result-section {
+            padding: 30px;
+            min-height: 400px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+            font-size: 16px;
+        }
+
+        .patient-info {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+
+        .patient-info h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .info-item {
+            display: flex;
+            gap: 10px;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #666;
+            min-width: 80px;
+        }
+
+        .info-value {
+            color: #333;
+        }
+
+        .records-section {
+            margin-top: 30px;
+        }
+
+        .section-title {
+            color: #333;
+            font-size: 18px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .record-card {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            transition: all 0.3s;
+        }
+
+        .record-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
+        }
+
+        .record-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .record-title {
+            font-weight: 600;
+            color: #333;
+            font-size: 16px;
+        }
+
+        .record-date {
+            color: #999;
+            font-size: 14px;
+        }
+
+        .record-content {
+            display: grid;
+            gap: 10px;
+        }
+
+        .record-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .record-label {
+            font-weight: 600;
+            color: #666;
+            min-width: 100px;
+        }
+
+        .record-value {
+            color: #333;
+            flex: 1;
+        }
+
+        .error-message {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 历史记录查询系统</h1>
+            <p>查询患者的就诊记录、预约信息和处方历史</p>
+        </div>
+
+        <div class="search-section">
+            <div class="search-box">
+                <input
+                    type="text"
+                    id="phoneInput"
+                    placeholder="请输入手机号（例如：13800138000）"
+                    maxlength="11"
+                >
+                <button onclick="searchHistory()">🔍 查询</button>
+            </div>
+        </div>
+
+        <div class="result-section" id="resultSection">
+            <div class="empty-state">
+                <div class="empty-state-icon">🔍</div>
+                <p>请输入手机号查询历史记录</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 按Enter键搜索
+        document.getElementById('phoneInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                searchHistory();
+            }
+        });
+
+        async function searchHistory() {
+            const phoneInput = document.getElementById('phoneInput');
+            const phone = phoneInput.value.trim();
+            const resultSection = document.getElementById('resultSection');
+
+            // 验证手机号
+            if (!phone) {
+                alert('请输入手机号');
+                return;
+            }
+
+            if (!/^1[3-9]\d{9}$/.test(phone)) {
+                alert('请输入有效的手机号');
+                return;
+            }
+
+            // 显示加载状态
+            resultSection.innerHTML = `
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>正在查询历史记录...</p>
+                </div>
+            `;
+
+            try {
+                // 调用API查询历史记录
+                const response = await fetch(`/api/patients/history/${phone}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || '查询失败');
+                }
+
+                displayHistory(data);
+            } catch (error) {
+                resultSection.innerHTML = `
+                    <div class="error-message">
+                        ❌ 查询失败: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function displayHistory(data) {
+            const resultSection = document.getElementById('resultSection');
+
+            if (!data.patient) {
+                resultSection.innerHTML = `
+                    <div class="no-data">
+                        <div class="empty-state-icon">😕</div>
+                        <p>未找到该手机号的患者信息</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+
+            // 患者基本信息
+            html += `
+                <div class="patient-info">
+                    <h2>👤 患者基本信息</h2>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <span class="info-label">姓名：</span>
+                            <span class="info-value">${data.patient.Name || '-'}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">手机号：</span>
+                            <span class="info-value">${data.patient.Phone_Number || '-'}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">性别：</span>
+                            <span class="info-value">${data.patient.Gender || '-'}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">年龄：</span>
+                            <span class="info-value">${data.patient.Age || '-'} 岁</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">患者ID：</span>
+                            <span class="info-value">${data.patient.Patient_ID || '-'}</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">注册日期：</span>
+                            <span class="info-value">${data.patient.Registration_Date || '-'}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // 就诊记录
+            if (data.medical_records && data.medical_records.length > 0) {
+                html += `
+                    <div class="records-section">
+                        <h3 class="section-title">🏥 就诊记录 (${data.medical_records.length} 条)</h3>
+                `;
+
+                data.medical_records.forEach((record, index) => {
+                    html += `
+                        <div class="record-card">
+                            <div class="record-header">
+                                <span class="record-title">就诊记录 #${index + 1}</span>
+                                <span class="record-date">${record.Visit_Date || '-'}</span>
+                            </div>
+                            <div class="record-content">
+                                <div class="record-row">
+                                    <span class="record-label">病历号：</span>
+                                    <span class="record-value">${record.Record_ID || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">主诉：</span>
+                                    <span class="record-value">${record.Chief_Complaint || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">症状：</span>
+                                    <span class="record-value">${record.Symptoms || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">诊断：</span>
+                                    <span class="record-value">${record.Diagnosis || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">治疗方案：</span>
+                                    <span class="record-value">${record.Treatment || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">接诊医生：</span>
+                                    <span class="record-value">${record.Doctor_ID || '-'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
+            }
+
+            // 预约记录
+            if (data.appointments && data.appointments.length > 0) {
+                html += `
+                    <div class="records-section">
+                        <h3 class="section-title">📅 预约记录 (${data.appointments.length} 条)</h3>
+                `;
+
+                data.appointments.forEach((apt, index) => {
+                    const statusColor = apt.Status === '已完成' ? '#4caf50' :
+                                      apt.Status === '已取消' ? '#f44336' : '#ff9800';
+                    html += `
+                        <div class="record-card">
+                            <div class="record-header">
+                                <span class="record-title">预约 #${index + 1}</span>
+                                <span class="record-date" style="color: ${statusColor}">
+                                    ${apt.Status || '-'}
+                                </span>
+                            </div>
+                            <div class="record-content">
+                                <div class="record-row">
+                                    <span class="record-label">预约号：</span>
+                                    <span class="record-value">${apt.Appointment_ID || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">预约时间：</span>
+                                    <span class="record-value">${apt.Appointment_Date || '-'} ${apt.Appointment_Time || ''}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">预约医生：</span>
+                                    <span class="record-value">${apt.Doctor_ID || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">预约原因：</span>
+                                    <span class="record-value">${apt.Reason || '-'}</span>
+                                </div>
+                                ${apt.Notes ? `
+                                <div class="record-row">
+                                    <span class="record-label">备注：</span>
+                                    <span class="record-value">${apt.Notes}</span>
+                                </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
+            }
+
+            // 处方记录
+            if (data.prescriptions && data.prescriptions.length > 0) {
+                html += `
+                    <div class="records-section">
+                        <h3 class="section-title">💊 处方记录 (${data.prescriptions.length} 条)</h3>
+                `;
+
+                data.prescriptions.forEach((presc, index) => {
+                    html += `
+                        <div class="record-card">
+                            <div class="record-header">
+                                <span class="record-title">处方 #${index + 1}</span>
+                                <span class="record-date">${presc.Prescription_Date || '-'}</span>
+                            </div>
+                            <div class="record-content">
+                                <div class="record-row">
+                                    <span class="record-label">处方号：</span>
+                                    <span class="record-value">${presc.Prescription_Number || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">药品名称：</span>
+                                    <span class="record-value">${presc.Drug_Name || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">用法用量：</span>
+                                    <span class="record-value">${presc.Dosage || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">频率：</span>
+                                    <span class="record-value">${presc.Frequency || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">疗程：</span>
+                                    <span class="record-value">${presc.Duration || '-'}</span>
+                                </div>
+                                <div class="record-row">
+                                    <span class="record-label">开方医生：</span>
+                                    <span class="record-value">${presc.Doctor_ID || '-'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
+            }
+
+            // 如果没有任何记录
+            if ((!data.medical_records || data.medical_records.length === 0) &&
+                (!data.appointments || data.appointments.length === 0) &&
+                (!data.prescriptions || data.prescriptions.length === 0)) {
+                html += `
+                    <div class="no-data">
+                        <div class="empty-state-icon">📝</div>
+                        <p>该患者暂无就诊记录、预约或处方信息</p>
+                    </div>
+                `;
+            }
+
+            resultSection.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
