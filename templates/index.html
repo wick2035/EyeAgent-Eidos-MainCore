@@ -26,8 +26,27 @@
                         <option value="">新用户（无历史记录）</option>
                     </select>
                 </div>
+                <button id="historyBtn" class="btn-secondary">💬 历史记录</button>
                 <button id="exportBtn" class="btn-secondary">📄 导出病例</button>
                 <button id="resetBtn" class="btn-danger">🔄 重新开始</button>
+            </div>
+        </div>
+
+        <!-- 历史记录侧边栏 -->
+        <div id="historySidebar" class="history-sidebar">
+            <div class="history-header">
+                <h3>💬 对话历史</h3>
+                <button class="close-sidebar" onclick="toggleHistorySidebar()">×</button>
+            </div>
+            <div class="history-controls">
+                <button class="btn-load-history" onclick="loadChatHistory()">🔄 刷新列表</button>
+            </div>
+            <div class="history-list" id="historyList">
+                <div class="empty-history">
+                    <div class="empty-icon">💭</div>
+                    <p>暂无历史对话</p>
+                    <small>开始新对话后会自动保存</small>
+                </div>
             </div>
         </div>
 
