@@ -718,3 +718,78 @@ class ChatService(BaseServiceWithUUID):
         except Exception as e:
             logger.error(f"搜索消息失败: {e}")
             return []
+
+    # ==================== ID验证方法 ====================
+
+    def validate_patient_id(self, patient_id: Union[str, int]) -> bool:
+        """
+        验证患者ID是否存在于patient表中
+
+        Args:
+            patient_id: 患者ID（支持Patient_ID或Patient_UUID）
+
+        Returns:
+            True if patient exists, False otherwise
+        """
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+            query = """
+                SELECT Patient_ID FROM patient
+                WHERE Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s
+            """
+            result = self.db.execute_one(query, (patient_id_normalized, patient_id_normalized))
+            is_valid = result is not None
+            if is_valid:
+                logger.info(f"患者ID验证成功: {patient_id}")
+            else:
+                logger.warning(f"患者ID验证失败，未找到患者: {patient_id}")
+            return is_valid
+        except Exception as e:
+            logger.error(f"验证患者ID时出错: {e}")
+            return False
+
+    def validate_doctor_id(self, doctor_id: Union[str, int]) -> bool:
+        """
+        验证医生ID是否存在于doctor表中
+
+        Args:
+            doctor_id: 医生ID（支持Doctor_ID或Doctor_UUID）
+
+        Returns:
+            True if doctor exists, False otherwise
+        """
+        try:
+            doctor_id_normalized = normalize_id(doctor_id)
+            query = """
+                SELECT Doctor_ID FROM doctor
+                WHERE Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s
+            """
+            result = self.db.execute_one(query, (doctor_id_normalized, doctor_id_normalized))
+            is_valid = result is not None
+            if is_valid:
+                logger.info(f"医生ID验证成功: {doctor_id}")
+            else:
+                logger.warning(f"医生ID验证失败，未找到医生: {doctor_id}")
+            return is_valid
+        except Exception as e:
+            logger.error(f"验证医生ID时出错: {e}")
+            return False
+
+    def validate_user_id_for_role(self, user_id: Union[str, int], role: str) -> bool:
+        """
+        根据角色验证用户ID是否有效
+
+        Args:
+            user_id: 用户ID（患者ID或医生ID）
+            role: 用户角色('patient' 或 'doctor')
+
+        Returns:
+            True if user ID is valid for the given role, False otherwise
+        """
+        if role == "patient":
+            return self.validate_patient_id(user_id)
+        elif role == "doctor":
+            return self.validate_doctor_id(user_id)
+        else:
+            logger.error(f"无效的角色: {role}")
+            return False
