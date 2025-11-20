@@ -1,12 +1,13 @@
 """
-处方单PDF生成工具
+处方单PDF生成工具 + UUID支持
 创建日期：2025-11-17
+更新日期：2025-11-20 (UUID支持)
 功能：从数据库读取处方数据，使用Word模板填充并生成PDF，包含条形码和logo
 """
 
 import os
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -64,38 +65,46 @@ class PrescriptionGenerator:
         
         logger.info(f"处方生成器初始化完成: 模板={self.template_path}, 输出={self.output_dir}")
     
-    def generate_prescription_from_db(self, prescription_id: int) -> Optional[str]:
+    def generate_prescription_from_db(self, prescription_id: Union[str, int]) -> Optional[str]:
         """
-        从数据库生成处方单PDF
-        
+        从数据库生成处方单PDF (支持UUID)
+
         Args:
-            prescription_id: 处方ID
-            
+            prescription_id: 处方ID（支持Prescription_ID或Prescription_UUID）
+
         Returns:
             生成的PDF文件路径，失败返回 None
         """
         try:
             from database.prescription_service import PrescriptionService
-            
+            from database.base_service import normalize_id
+
+            # 规范化prescription_id
+            try:
+                prescription_id_normalized = normalize_id(prescription_id)
+            except ValueError as e:
+                logger.error(f"无效的处方ID格式: {prescription_id}, 错误: {e}")
+                return None
+
             # 获取处方数据
             service = PrescriptionService()
-            data = service.get_prescription_full(prescription_id)
-            
+            data = service.get_prescription_full(prescription_id_normalized)
+
             if not data:
-                logger.error(f"未找到处方ID: {prescription_id}")
+                logger.error(f"未找到处方ID: {prescription_id_normalized}")
                 service.close()
                 return None
-            
-            # 生成输出文件名
+
+            # 生成输出文件名（使用规范化的ID）
             prescription_number = data['prescription_info']['prescription_number']
-            output_filename = f"prescription_{prescription_id}_{prescription_number}"
-            
+            output_filename = f"prescription_{prescription_id_normalized}_{prescription_number}"
+
             # 生成处方单
             pdf_path = self.generate_prescription_from_data(data, output_filename)
-            
+
             service.close()
             return pdf_path
-            
+
         except Exception as e:
             logger.error(f"从数据库生成处方单失败: {e}")
             import traceback

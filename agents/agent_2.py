@@ -1,9 +1,10 @@
 """
-2号智能体 - 病例报告生成和历史分析
+2号智能体 - 病例报告生成和历史分析 + UUID支持
+更新日期：2025-11-20 (UUID支持)
 """
 import json
 from enum import Enum
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from utils.llm_config import get_llm
@@ -12,6 +13,7 @@ from utils.prescription_generator import PrescriptionGenerator
 from database.report_service import ReportService
 from database.user_history_service_v2 import UserHistoryServiceV2
 from database.prescription_service import PrescriptionService
+from database.base_service import normalize_id
 
 
 class ReportStage(Enum):
@@ -28,24 +30,33 @@ class ReportStage(Enum):
 class ReportAgent:
     """2号病例报告智能体"""
     
-    def __init__(self, patient_id: int = None, phone_number: str = None, role: str = "patient"):
+    def __init__(self, patient_id: Union[str, int, None] = None, phone_number: str = None, role: str = "patient"):
         """
-        初始化报告智能体
-        
+        初始化报告智能体 (支持UUID)
+
         Args:
-            patient_id: 用户ID（Patient_ID）
+            patient_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
             phone_number: 手机号（推荐使用）
             role: 用户角色（patient/doctor）
         """
         self.llm = get_llm()
         self.stage = ReportStage.GREETING
         self.conversation_history = []
-        
+
         # 用户角色
         self.role = role  # patient 或 doctor
-        
-        # 用户信息
-        self.patient_id = patient_id
+
+        # 用户信息 - 支持UUID
+        # 规范化patient_id（兼容INT和UUID）
+        if patient_id is not None:
+            try:
+                self.patient_id = normalize_id(patient_id)  # 用户ID（支持Patient_ID或Patient_UUID）
+            except ValueError as e:
+                print(f"[ReportAgent警告] 无效的用户ID格式: {patient_id}, 错误: {e}")
+                self.patient_id = None
+        else:
+            self.patient_id = None
+
         self.phone_number = phone_number
         
         # 服务实例
@@ -68,24 +79,28 @@ class ReportAgent:
         self.conversation_chain = self._create_conversation_chain()
     
     def load_user_data(self):
-        """加载用户数据"""
+        """加载用户数据 (支持UUID)"""
         try:
             # 优先使用手机号
             if self.phone_number:
                 # 获取用户信息
                 self.user_info = self.history_service.get_user_by_phone(self.phone_number)
                 if self.user_info:
-                    self.patient_id = self.user_info['Patient_ID']
+                    # 使用Patient_UUID（如果有），否则使用Patient_ID
+                    if self.user_info.get('Patient_UUID'):
+                        self.patient_id = self.user_info['Patient_UUID']
+                    else:
+                        self.patient_id = normalize_id(self.user_info['Patient_ID'])
                     # 获取报告列表
                     self.user_reports = self.report_service.get_all_reports_by_phone(self.phone_number)
             elif self.patient_id:
-                # 使用用户ID
+                # 使用用户ID（支持INT或UUID）
                 self.user_info = self.history_service.get_user_by_id(self.patient_id)
                 if self.user_info:
                     self.user_reports = self.report_service.get_all_reports_by_patient(self.patient_id)
-            
+
             print(f"[ReportAgent] 加载用户数据完成: patient_id={self.patient_id}, 报告数={len(self.user_reports)}")
-            
+
         except Exception as e:
             print(f"[ReportAgent] 加载用户数据失败: {e}")
     
@@ -328,10 +343,10 @@ class ReportAgent:
         
         return None
     
-    def _extract_report_id(self, text: str) -> Optional[int]:
-        """从文本中提取病例ID"""
+    def _extract_report_id(self, text: str) -> Union[str, int, None]:
+        """从文本中提取病例ID (支持UUID)"""
         import re
-        
+
         # 排除处方相关的请求（避免混淆）
         if any(keyword in text.lower() for keyword in ['处方', 'prescription']):
             print(f"[ReportAgent] 检测到处方关键词，跳过病例ID提取")
@@ -386,8 +401,8 @@ class ReportAgent:
         print(f"[ReportAgent] 无法从文本中提取报告ID: {text}")
         return None
     
-    def _extract_prescription_id(self, text: str) -> Optional[int]:
-        """从文本中提取处方ID"""
+    def _extract_prescription_id(self, text: str) -> Union[str, int, None]:
+        """从文本中提取处方ID (支持UUID)"""
         import re
         
         # 优先检测明确的处方ID表达：Prescription_ID:1, 处方ID:1 等
@@ -486,13 +501,13 @@ class ReportAgent:
     
     # ==================== 核心功能方法 ====================
     
-    def generate_report(self, medical_record_id: int) -> str:
+    def generate_report(self, medical_record_id: Union[str, int]) -> str:
         """
-        生成病例报告
-        
+        生成病例报告 (支持UUID)
+
         Args:
-            medical_record_id: 病例ID
-            
+            medical_record_id: 病例ID（支持Medical_Record_ID(INT)或Medical_Record_UUID(STR)）
+
         Returns:
             操作结果消息
         """
@@ -518,13 +533,13 @@ class ReportAgent:
             traceback.print_exc()
             return f"❌ 生成报告时出现错误：{str(e)}"
     
-    def generate_prescription(self, prescription_id: int) -> str:
+    def generate_prescription(self, prescription_id: Union[str, int]) -> str:
         """
-        生成处方单
-        
+        生成处方单 (支持UUID)
+
         Args:
-            prescription_id: 处方ID
-            
+            prescription_id: 处方ID（支持Prescription_ID(INT)或Prescription_UUID(STR)）
+
         Returns:
             操作结果消息
         """
@@ -550,13 +565,13 @@ class ReportAgent:
             traceback.print_exc()
             return f"❌ 生成处方单时出现错误：{str(e)}"
     
-    def analyze_history_trends(self, patient_id: int) -> str:
+    def analyze_history_trends(self, patient_id: Union[str, int]) -> str:
         """
-        分析病情发展趋势
-        
+        分析病情发展趋势 (支持UUID)
+
         Args:
-            patient_id: 用户ID
-            
+            patient_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
+
         Returns:
             分析结果文本
         """
@@ -620,13 +635,13 @@ class ReportAgent:
         
         return "\n".join(prompt_parts)
     
-    def compare_records(self, record_ids: List[int]) -> str:
+    def compare_records(self, record_ids: List[Union[str, int]]) -> str:
         """
-        对比多次就诊记录
-        
+        对比多次就诊记录 (支持UUID)
+
         Args:
-            record_ids: 病例ID列表
-            
+            record_ids: 病例ID列表（支持Medical_Record_ID(INT)或Medical_Record_UUID(STR)）
+
         Returns:
             对比结果文本
         """
@@ -687,13 +702,13 @@ class ReportAgent:
         
         return "\n".join(prompt_parts)
     
-    def detect_anomalies(self, patient_id: int) -> str:
+    def detect_anomalies(self, patient_id: Union[str, int]) -> str:
         """
-        检测历史记录中的异常变化
-        
+        检测历史记录中的异常变化 (支持UUID)
+
         Args:
-            patient_id: 用户ID
-            
+            patient_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
+
         Returns:
             检测结果文本
         """
