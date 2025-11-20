@@ -163,7 +163,7 @@ CREATE TABLE doctor_time_slots (
     Max_Capacity INT NOT NULL DEFAULT 5 COMMENT '最大接诊人数',
     Current_Bookings INT NOT NULL DEFAULT 0 COMMENT '当前已预约人数',
     Is_Available BOOLEAN DEFAULT TRUE COMMENT '是否可预约',
-    Slot_Type VARCHAR(20) DEFAULT '普通' COMMENT '时间段类型(普通/加号/特殊)',
+    Slot_Type VARCHAR(20) DEFAULT 'normal' COMMENT '时间段类型(normal/extra/special)',
     Notes TEXT COMMENT '备注',
     Created_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     Updated_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -212,7 +212,7 @@ CREATE TABLE appointment (
     Appointment_Category VARCHAR(50) COMMENT '预约分类(普通/紧急)',
     Severity_Level VARCHAR(20) COMMENT '严重等级',
     Description TEXT COMMENT '简要描述',
-    Appointment_Status VARCHAR(20) DEFAULT '已预约' COMMENT '预约状态',
+    Appointment_Status VARCHAR(20) DEFAULT 'booked' COMMENT '预约状态(booked/completed/cancelled)',
     Appointment_Time_Change_Record TEXT COMMENT '预约时间变化记录',
     Created_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     Updated_At TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -246,7 +246,7 @@ CREATE TABLE drugs (
     price DECIMAL(10, 2) COMMENT '价格',
     stock_quantity INT DEFAULT 0 COMMENT '库存量',
     is_prescription_drug BOOLEAN DEFAULT TRUE COMMENT '是否处方药',
-    drug_status ENUM('在售', '停用', '下架') DEFAULT '在售' COMMENT '药物状态',
+    drug_status ENUM('active', 'inactive', 'discontinued') DEFAULT 'active' COMMENT '药物状态',
     warning_info TEXT COMMENT '警示信息',
     drug_description TEXT COMMENT '药物描述',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -268,7 +268,7 @@ CREATE TABLE prescription (
     Prescription_Type VARCHAR(20) COMMENT '处方类型(普通/急诊/儿科等)',
     Diagnosis_Description TEXT COMMENT '诊断说明',
     Usage_Instruction TEXT COMMENT '用药说明',
-    Prescription_Status ENUM('待审核', '已审核', '已配药', '已完成', '已作废') DEFAULT '待审核' COMMENT '处方状态',
+    Prescription_Status ENUM('pending', 'approved', 'dispensed', 'completed', 'cancelled') DEFAULT 'pending' COMMENT '处方状态',
     Total_Amount DECIMAL(10, 2) DEFAULT 0.00 COMMENT '处方总金额',
     Notes TEXT COMMENT '备注',
     Prescriber_Name VARCHAR(50) COMMENT '开方医生姓名',
@@ -297,7 +297,7 @@ CREATE TABLE prescription_detail (
     Drug_Name VARCHAR(255) COMMENT '药物名称(冗余字段)',
     Drug_Specification VARCHAR(100) COMMENT '药物规格(冗余字段)',
     Quantity INT NOT NULL DEFAULT 1 COMMENT '数量',
-    Unit VARCHAR(20) DEFAULT '盒' COMMENT '单位',
+    Unit VARCHAR(20) DEFAULT 'box' COMMENT '单位',
     Dosage VARCHAR(100) COMMENT '用法用量',
     Frequency VARCHAR(50) COMMENT '用药频率(如:一日三次)',
     Duration VARCHAR(50) COMMENT '用药疗程(如:7天)',
@@ -383,7 +383,7 @@ CREATE TABLE biomechanics_scan (
     R5_T1 DECIMAL(6,2), R5_T2 DECIMAL(6,2), R5_T3 DECIMAL(6,2), R5_T4 DECIMAL(6,2),
     R5_T5 DECIMAL(6,2), R5_T6 DECIMAL(6,2), R5_T7 DECIMAL(6,2), R5_T8 DECIMAL(6,2),
     Notes TEXT COMMENT '备注说明',
-    Report_Status ENUM('待生成', '已生成', '已归档') DEFAULT '待生成' COMMENT '报告状态',
+    Report_Status ENUM('pending', 'generated', 'archived') DEFAULT 'pending' COMMENT '报告状态',
     Report_Type VARCHAR(20) COMMENT '生成的报告类型(basic/detailed)',
     Report_Path VARCHAR(255) COMMENT '生成的报告文件路径',
     Reviewed_By VARCHAR(50) COMMENT '审核医生',
@@ -614,13 +614,14 @@ DELIMITER ;
 
 -- 插入测试医生
 INSERT INTO doctor (Name, Hospital_Area, Title, Gender, Age, Phone_Number, Specialty,
-                    default_slot_duration_minutes, default_max_patients_per_slot, booking_window_days, is_active)
+                    default_slot_duration_minutes, default_max_patients_per_slot, booking_window_days, is_active,
+                    Create_By, Version, Deleted)
 VALUES
-    ('张医生', '眼科医院', '主任医师', '男', 45, '13800000001', '眼科', 60, 5, 3, TRUE),
-    ('李医生', '眼科医院', '副主任医师', '女', 38, '13800000002', '眼科', 60, 5, 3, TRUE),
-    ('王医生', '眼科医院', '主治医师', '男', 35, '13800000003', '眼科', 60, 4, 3, TRUE),
-    ('赵医生', '眼科医院', '主任医师', '女', 50, '13800000004', '眼科', 60, 6, 3, TRUE),
-    ('刘医生', '眼科医院', '副主任医师', '男', 42, '13800000005', '眼科', 60, 5, 3, TRUE);
+    ('张医生', '眼科医院', '主任医师', '男', 45, '13800000001', '眼科', 60, 5, 3, TRUE, 'system', 0, 0),
+    ('李医生', '眼科医院', '副主任医师', '女', 38, '13800000002', '眼科', 60, 5, 3, TRUE, 'system', 0, 0),
+    ('王医生', '眼科医院', '主治医师', '男', 35, '13800000003', '眼科', 60, 4, 3, TRUE, 'system', 0, 0),
+    ('赵医生', '眼科医院', '主任医师', '女', 50, '13800000004', '眼科', 60, 6, 3, TRUE, 'system', 0, 0),
+    ('刘医生', '眼科医院', '副主任医师', '男', 42, '13800000005', '眼科', 60, 5, 3, TRUE, 'system', 0, 0);
 
 -- 插入医生工作时间模板
 INSERT INTO doctor_working_schedule (Doctor_ID, Day_of_Week, Shift_Start_Time, Shift_End_Time, Is_Active)
@@ -648,11 +649,11 @@ VALUES
     (5, 5, '09:00:00', '17:00:00', TRUE);
 
 -- 插入测试患者
-INSERT INTO patient (Name, Gender, Age, Phone_Number, Address)
+INSERT INTO patient (Name, Gender, Age, Phone_Number, Address, Create_By, Version, Deleted)
 VALUES
-    ('张三', '男', 35, '13900000001', '北京市朝阳区'),
-    ('李四', '女', 28, '13900000002', '上海市浦东区'),
-    ('王五', '男', 45, '13900000003', '广州市天河区');
+    ('张三', '男', 35, '13900000001', '北京市朝阳区', 'system', 0, 0),
+    ('李四', '女', 28, '13900000002', '上海市浦东区', 'system', 0, 0),
+    ('王五', '男', 45, '13900000003', '广州市天河区', 'system', 0, 0);
 
 -- 插入测试病例
 INSERT INTO medical_record (

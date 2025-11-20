@@ -11,6 +11,7 @@ Updated: 2025-11-20 (UUID support)
 """
 
 import re
+import uuid
 from datetime import datetime, timedelta, date, time as dt_time
 from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
@@ -41,12 +42,13 @@ class AppointmentServiceV3(BaseServiceWithUUID):
 
     # ==================== 用户管理相关方法（UUID支持）====================
 
-    def create_or_get_patient(self, patient_info: Dict[str, Any]) -> str:
+    def create_or_get_patient(self, patient_info: Dict[str, Any], created_by_uuid: str = 'system') -> str:
         """
         创建或获取用户（一个人只有一个Patient记录）
 
         Args:
             patient_info: 用户基本信息 {'name': '', 'phone': '', 'gender': '', 'age': ''}
+            created_by_uuid: 创建人UUID（默认'system'）
 
         Returns:
             Patient_UUID (用户UUID) - 现在返回UUID而非INT
@@ -56,8 +58,8 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         if not phone:
             raise ValueError("手机号不能为空")
 
-        # 检查用户是否已存在
-        query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Phone_Number = %s"
+        # 检查用户是否已存在 (仅查询未删除的记录)
+        query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Phone_Number = %s AND Deleted = 0"
         existing_user = self.db.execute_one(query, (phone,))
 
         if existing_user:
@@ -69,15 +71,17 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         # 创建新用户 (触发器会自动生成UUID)
         insert_query = """
             INSERT INTO patient (
-                Name, Gender, Age, Phone_Number
-            ) VALUES (%s, %s, %s, %s)
+                Name, Gender, Age, Phone_Number,
+                Create_By, Version, Deleted
+            ) VALUES (%s, %s, %s, %s, %s, 0, 0)
         """
 
         params = (
             patient_info.get('name', '未提供'),
             patient_info.get('gender', '未知'),
             patient_info.get('age', 0),
-            phone
+            phone,
+            created_by_uuid
         )
 
         patient_id = self.db.execute_insert(insert_query, params)
@@ -87,7 +91,7 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         result = self.db.execute_one(query_uuid, (patient_id,))
         patient_uuid = result['Patient_UUID'] if result else None
 
-        logger.info(f"创建新用户，Patient_ID: {patient_id}, Patient_UUID: {patient_uuid}")
+        logger.info(f"创建新用户，Patient_ID: {patient_id}, Patient_UUID: {patient_uuid}, Created_By: {created_by_uuid}")
 
         return patient_uuid  # 返回UUID
 
@@ -101,7 +105,7 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         year = datetime.now().year
         query = """
             SELECT Visit_Card_Number FROM medical_record
-            WHERE Visit_Card_Number LIKE %s
+            WHERE Visit_Card_Number LIKE %s AND Deleted = 0
             ORDER BY Visit_Card_Number DESC
             LIMIT 1
         """
@@ -115,13 +119,14 @@ class AppointmentServiceV3(BaseServiceWithUUID):
 
         return f"{year}-{new_number:06d}"
 
-    def create_medical_record(self, patient_id: Union[str, int], patient_data: Dict[str, Any]) -> str:
+    def create_medical_record(self, patient_id: Union[str, int], patient_data: Dict[str, Any], created_by_uuid: str = 'system') -> str:
         """
         创建病例记录（每次就诊创建新病例）
 
         Args:
             patient_id: 患者ID（支持Patient_ID或Patient_UUID）
             patient_data: 病例数据
+            created_by_uuid: 创建人UUID（默认'system'）
 
         Returns:
             Medical_Record_UUID (病例UUID)
@@ -145,9 +150,10 @@ class AppointmentServiceV3(BaseServiceWithUUID):
             INSERT INTO medical_record (
                 Patient_UUID, Visit_Card_Number, Visit_Date, Department,
                 Chief_Complaint, Present_Illness, Medical_History,
-                Allergy_History, Family_History, Medication_History
+                Allergy_History, Family_History, Medication_History,
+                Create_By, Version, Deleted
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0
             )
         """
 
@@ -161,7 +167,8 @@ class AppointmentServiceV3(BaseServiceWithUUID):
             patient_data.get('medical_history', ''),
             patient_data.get('allergy_history', ''),
             patient_data.get('family_history', ''),
-            patient_data.get('medication_history', '')
+            patient_data.get('medication_history', ''),
+            created_by_uuid
         )
 
         medical_record_id = self.db.execute_insert(insert_query, params)
@@ -171,7 +178,7 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         result = self.db.execute_one(query_uuid, (medical_record_id,))
         medical_record_uuid = result['Medical_Record_UUID'] if result else None
 
-        logger.info(f"创建病例记录，Medical_Record_ID: {medical_record_id}, Medical_Record_UUID: {medical_record_uuid}, 就诊卡号: {visit_card_number}")
+        logger.info(f"创建病例记录，Medical_Record_ID: {medical_record_id}, Medical_Record_UUID: {medical_record_uuid}, Created_By: {created_by_uuid}")
 
         return medical_record_uuid  # 返回UUID
 
@@ -379,7 +386,8 @@ class AppointmentServiceV3(BaseServiceWithUUID):
         medical_record_id: int,
         patient_id: int,
         slot_id: int,
-        patient_data: Dict[str, Any]
+        patient_data: Dict[str, Any],
+        created_by_uuid: str = 'system'
     ) -> Dict[str, Any]:
         """
         V3 版本：基于时间段创建预约（带并发控制）
@@ -389,6 +397,7 @@ class AppointmentServiceV3(BaseServiceWithUUID):
             patient_id: 用户ID
             slot_id: 时间段ID
             patient_data: 患者数据字典
+            created_by_uuid: 创建人UUID（默认'system'）
 
         Returns:
             {
@@ -434,40 +443,47 @@ class AppointmentServiceV3(BaseServiceWithUUID):
             if patient_data.get('present_illness'):
                 description += f" | {patient_data.get('present_illness')}"
 
-            # 3. 创建预约记录
+            # 3. 创建预约记录 (使用UUID主键)
             insert_query = """
                 INSERT INTO appointment (
-                    Medical_Record_ID, Patient_ID, Doctor_ID, Time_Slot_ID,
+                    Appointment_UUID, Medical_Record_UUID, Patient_UUID, Doctor_UUID, Time_Slot_UUID,
                     Patient_Name, Appointment_Time, Appointment_Category,
-                    Severity_Level, Description, Appointment_Status
+                    Severity_Level, Description, Appointment_Status,
+                    Create_By, Version, Deleted
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0
                 )
             """
 
+            # 生成Appointment UUID
+            appointment_uuid = str(uuid.uuid4())
+
             params = (
-                medical_record_id,
-                patient_id,
-                doctor_id,
-                slot_id,
+                appointment_uuid,  # Appointment_UUID
+                medical_record_id,  # Medical_Record_UUID (应该已经是UUID)
+                patient_id,         # Patient_UUID (应该已经是UUID)
+                doctor_id,          # Doctor_UUID (应该已经是UUID)
+                slot_id,            # Time_Slot_UUID (应该已经是UUID)
                 patient_info.get('name', ''),
                 appointment_datetime,
                 category,
                 severity_level,
                 description,
-                '已预约'
+                '已预约',
+                created_by_uuid
             )
 
-            appointment_id = self.db.execute_insert(insert_query, params)
+            self.db.execute_insert(insert_query, params)
 
             # 4. 触发器会自动增加 current_bookings
 
-            logger.info(f"创建预约成功，Appointment_ID: {appointment_id}, 时间段ID: {slot_id}")
+            logger.info(f"创建预约成功，Appointment_UUID: {appointment_uuid}, Created_By: {created_by_uuid}")
 
             return {
                 "success": True,
                 "message": f"预约成功！预约时间：{appointment_datetime.strftime('%Y-%m-%d %H:%M')}",
-                "appointment_id": appointment_id,
+                "appointment_id": appointment_uuid,  # 现在返回UUID而非INT
+                "appointment_uuid": appointment_uuid,  # 同时提供明确的UUID字段
                 "appointment_time": appointment_datetime.strftime('%Y-%m-%d %H:%M'),
                 "slot_id": slot_id
             }
@@ -479,27 +495,31 @@ class AppointmentServiceV3(BaseServiceWithUUID):
                 "message": f"预约失败：{str(e)}"
             }
 
-    def cancel_appointment(self, appointment_id: int) -> Dict[str, Any]:
+    def cancel_appointment(self, appointment_id: int, updated_by_uuid: str = 'system') -> Dict[str, Any]:
         """
         取消预约（触发器会自动减少 current_bookings）
 
         Args:
             appointment_id: 预约ID
+            updated_by_uuid: 更新人UUID（默认'system'）
 
         Returns:
             {"success": bool, "message": str}
         """
         try:
-            # 更新预约状态为已取消
+            # 更新预约状态为已取消 (使用乐观锁)
             update_query = """
                 UPDATE appointment
                 SET Appointment_Status = '已取消',
+                    Update_By = %s,
+                    Version = Version + 1,
                     Updated_At = CURRENT_TIMESTAMP
                 WHERE Appointment_ID = %s
                   AND Appointment_Status IN ('已预约', '已确认')
+                  AND Deleted = 0
             """
 
-            rows_affected = self.db.execute_update(update_query, (appointment_id,))
+            rows_affected = self.db.execute_update(update_query, (updated_by_uuid, appointment_id))
 
             if rows_affected > 0:
                 logger.info(f"取消预约成功，Appointment_ID: {appointment_id}")
