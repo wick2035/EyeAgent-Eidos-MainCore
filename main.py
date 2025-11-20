@@ -153,36 +153,57 @@ async def chat(message: ChatMessage):
             # 在数据库中创建对话会话 (支持UUID)
             if user_id_normalized or message.phone_number:
                 try:
-                    # 获取patient_id（优先使用UUID）
-                    patient_id = user_id_normalized
-                    if not patient_id and message.phone_number:
-                        from database.user_history_service_v2 import UserHistoryServiceV2
-                        user_service = UserHistoryServiceV2()
-                        user_info = user_service.get_user_by_phone(message.phone_number)
-                        if user_info:
-                            # 优先使用Patient_UUID，如果没有则使用Patient_ID
-                            patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+                    from database.user_history_service_v2 import UserHistoryServiceV2
+                    user_service = UserHistoryServiceV2()
+
+                    # 根据角色分别查询患者或医生信息
+                    patient_id = None
+                    doctor_id = None
+
+                    if role == "patient":
+                        # 查询患者信息
+                        patient_id = user_id_normalized
+                        if not patient_id and message.phone_number:
+                            user_info = user_service.get_user_by_phone(message.phone_number)
+                            if user_info:
+                                # 优先使用Patient_UUID，如果没有则使用Patient_ID
+                                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+
+                    elif role == "doctor":
+                        # 查询医生信息
+                        doctor_id = user_id_normalized
+                        if not doctor_id and message.phone_number:
+                            doctor_info = user_service.get_doctor_by_phone(message.phone_number)
+                            if doctor_info:
+                                # 优先使用Doctor_UUID，如果没有则使用Doctor_ID
+                                doctor_id = doctor_info.get('Doctor_UUID') or normalize_id(doctor_info['Doctor_ID'])
 
                     # 根据角色创建对话
-                    if patient_id:
-                        if role == "patient":
-                            chat_id = chat_service.create_chat_for_patient(
-                                patient_id=patient_id,
-                                title=None,  # 稍后根据第一条消息生成标题
-                                conversation_type='general',
-                                ai_agent=None  # 稍后根据意图识别结果更新
-                            )
-                        elif role == "doctor":
-                            chat_id = chat_service.create_chat_for_doctor(
-                                doctor_id=patient_id,  # 如果是医生角色，这里应该是doctor_id
-                                title=None,
-                                conversation_type='general',
-                                ai_agent=None
-                            )
-
+                    if role == "patient" and patient_id:
+                        chat_id = chat_service.create_chat_for_patient(
+                            patient_id=patient_id,
+                            title=None,  # 稍后根据第一条消息生成标题
+                            conversation_type='general',
+                            ai_agent=None  # 稍后根据意图识别结果更新
+                        )
                         if chat_id:
                             sessions[session_id]["chat_id"] = chat_id
-                            print(f"[对话历史] 创建新对话: Chat_ID={chat_id}")
+                            print(f"[对话历史] 创建患者对话: Chat_ID={chat_id}, Patient_ID={patient_id}")
+
+                    elif role == "doctor" and doctor_id:
+                        chat_id = chat_service.create_chat_for_doctor(
+                            doctor_id=doctor_id,
+                            title=None,
+                            conversation_type='general',
+                            ai_agent=None
+                        )
+                        if chat_id:
+                            sessions[session_id]["chat_id"] = chat_id
+                            print(f"[对话历史] 创建医生对话: Chat_ID={chat_id}, Doctor_ID={doctor_id}")
+
+                    else:
+                        print(f"[对话历史] 无法创建对话: role={role}, patient_id={patient_id}, doctor_id={doctor_id}")
+
                 except Exception as e:
                     print(f"[对话历史] 创建对话失败: {e}")
                     import traceback
