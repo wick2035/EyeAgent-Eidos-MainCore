@@ -23,25 +23,59 @@ def check_env_file():
         print("[X] .env 文件不存在")
         print("\n请创建 .env 文件并添加以下配置：")
         print("-" * 50)
+        print("# LLM API配置")
         print("SILICONFLOW_API_KEY=your_api_key_here")
         print("SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1")
         print("MODEL_NAME=Qwen/Qwen2.5-7B-Instruct")
+        print()
+        print("# 数据库配置")
+        print("DB_HOST=localhost")
+        print("DB_PORT=3306")
+        print("DB_USER=root")
+        print("DB_PASSWORD=your_password_here")
+        print("DB_NAME=medical_db")
+        print("DB_CHARSET=utf8mb4")
+        print("DB_AUTOCOMMIT=False")
         print("-" * 50)
         return False
-    
+
     print("[OK] .env 文件存在")
-    
+
     # 尝试加载环境变量
     from dotenv import load_dotenv
     load_dotenv()
-    
+
+    all_ok = True
+
+    # 检查API密钥
     api_key = os.getenv("SILICONFLOW_API_KEY")
     if api_key and api_key != "your_api_key_here":
         print(f"[OK] API密钥已配置 (长度: {len(api_key)})")
-        return True
     else:
         print("[X] API密钥未配置或使用的是示例值")
-        return False
+        all_ok = False
+
+    # 检查数据库配置
+    db_password = os.getenv("DB_PASSWORD")
+    if db_password and db_password != "your_password_here":
+        print(f"[OK] 数据库密码已配置")
+    else:
+        print("[X] 数据库密码未配置或使用的是示例值")
+        all_ok = False
+
+    db_host = os.getenv("DB_HOST")
+    if db_host:
+        print(f"[OK] 数据库主机已配置: {db_host}")
+    else:
+        print("[WARNING] 数据库主机未配置，将使用默认值: localhost")
+
+    db_name = os.getenv("DB_NAME")
+    if db_name:
+        print(f"[OK] 数据库名称已配置: {db_name}")
+    else:
+        print("[WARNING] 数据库名称未配置，将使用默认值: medical_db")
+
+    return all_ok
 
 
 def check_dependencies():
