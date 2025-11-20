@@ -94,9 +94,19 @@ The system uses `IntentDetector` (utils/intent_detector.py) to:
 
 **Environment Variables Required (.env):**
 ```
+# LLM API Configuration
 SILICONFLOW_API_KEY=your_api_key
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
 MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+
+# Database Configuration
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=your_password_here
+DB_NAME=medical_db
+DB_CHARSET=utf8mb4
+DB_AUTOCOMMIT=False
 ```
 
 ### Document Generation
@@ -189,17 +199,27 @@ State transitions controlled by `_determine_next_stage()` logic in each agent.
 ## Database Configuration
 
 **Connection:** `database/db_config.py`
+
+Database configuration is loaded from environment variables for security:
+
 ```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 DB_CONFIG = {
-    'host': 'localhost',
-    'port': 3306,
-    'user': 'root',
-    'password': '20041118',  # Change this!
-    'database': 'medical_db',
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': int(os.getenv('DB_PORT', '3306')),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME', 'medical_db'),
+    'charset': os.getenv('DB_CHARSET', 'utf8mb4'),
+    'autocommit': os.getenv('DB_AUTOCOMMIT', 'False').lower() == 'true',
 }
 ```
 
-**Important:** Update password in `db_config.py` before running.
+**Important:** Configure database credentials in `.env` file. Never commit passwords to version control.
 
 ## Project File Structure
 
@@ -253,4 +273,5 @@ To add a new agent (e.g., agent_3):
 - **Role parameter** must be passed when creating agents for access control
 - **Session management** is in-memory - implement Redis for production
 - **PDF generation** requires Microsoft Word on Windows for docx2pdf
-- **Database password** in db_config.py should be changed and not committed
+- **Environment variables** - All sensitive configuration (API keys, database passwords) must be in `.env` file, never hardcoded
+- **Security** - Never commit `.env` file to version control (already in `.gitignore`)
