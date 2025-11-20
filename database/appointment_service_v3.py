@@ -1,32 +1,36 @@
 """
-预约服务核心模块 V3 - 整合时间段管理系统
+预约服务核心模块 V3 - 整合时间段管理系统 + UUID支持
 处理用户创建、病例创建、医生查询和预约操作
 
 新架构：Patient(用户) → Medical_Record(病例) → Appointment(预约)
 V3 新增：基于 doctor_time_slots 的智能预约系统
+UUID支持：兼容INT和UUID格式的ID
 
 Created: 2025-11-19
+Updated: 2025-11-20 (UUID support)
 """
 
 import re
 from datetime import datetime, timedelta, date, time as dt_time
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
 
 from .db_connection import DatabaseConnection
 from .time_slot_service import TimeSlotService
 from .doctor_schedule_service import DoctorScheduleService
+from .base_service import BaseServiceWithUUID, normalize_id
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class AppointmentServiceV3:
-    """预约服务类 V3 - 基于时间段管理系统"""
+class AppointmentServiceV3(BaseServiceWithUUID):
+    """预约服务类 V3 - 基于时间段管理系统 (支持UUID)"""
 
     def __init__(self):
         """初始化预约服务"""
+        super().__init__()
         self.db = DatabaseConnection()
         self.slot_service = TimeSlotService()
         self.schedule_service = DoctorScheduleService()
@@ -35,17 +39,17 @@ class AppointmentServiceV3:
         """析构时关闭数据库连接"""
         self.db.close()
 
-    # ==================== 用户管理相关方法（保持不变）====================
+    # ==================== 用户管理相关方法（UUID支持）====================
 
-    def create_or_get_patient(self, patient_info: Dict[str, Any]) -> int:
+    def create_or_get_patient(self, patient_info: Dict[str, Any]) -> str:
         """
-        创建或获取用户（一个人只有一个Patient_ID）
+        创建或获取用户（一个人只有一个Patient记录）
 
         Args:
             patient_info: 用户基本信息 {'name': '', 'phone': '', 'gender': '', 'age': ''}
 
         Returns:
-            Patient_ID (用户ID)
+            Patient_UUID (用户UUID) - 现在返回UUID而非INT
         """
         phone = patient_info.get('contact') or patient_info.get('phone', '')
 
@@ -53,15 +57,16 @@ class AppointmentServiceV3:
             raise ValueError("手机号不能为空")
 
         # 检查用户是否已存在
-        query = "SELECT Patient_ID FROM patient WHERE Phone_Number = %s"
+        query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Phone_Number = %s"
         existing_user = self.db.execute_one(query, (phone,))
 
         if existing_user:
+            patient_uuid = existing_user['Patient_UUID']
             patient_id = existing_user['Patient_ID']
-            logger.info(f"用户已存在，Patient_ID: {patient_id}")
-            return patient_id
+            logger.info(f"用户已存在，Patient_ID: {patient_id}, Patient_UUID: {patient_uuid}")
+            return patient_uuid  # 返回UUID
 
-        # 创建新用户
+        # 创建新用户 (触发器会自动生成UUID)
         insert_query = """
             INSERT INTO patient (
                 Name, Gender, Age, Phone_Number
@@ -76,9 +81,15 @@ class AppointmentServiceV3:
         )
 
         patient_id = self.db.execute_insert(insert_query, params)
-        logger.info(f"创建新用户，Patient_ID: {patient_id}")
 
-        return patient_id
+        # 查询生成的UUID
+        query_uuid = "SELECT Patient_UUID FROM patient WHERE Patient_ID = %s"
+        result = self.db.execute_one(query_uuid, (patient_id,))
+        patient_uuid = result['Patient_UUID'] if result else None
+
+        logger.info(f"创建新用户，Patient_ID: {patient_id}, Patient_UUID: {patient_uuid}")
+
+        return patient_uuid  # 返回UUID
 
     # ==================== 病例管理相关方法（保持不变）====================
 
@@ -104,14 +115,35 @@ class AppointmentServiceV3:
 
         return f"{year}-{new_number:06d}"
 
-    def create_medical_record(self, patient_id: int, patient_data: Dict[str, Any]) -> int:
-        """创建病例记录（每次就诊创建新病例）"""
+    def create_medical_record(self, patient_id: Union[str, int], patient_data: Dict[str, Any]) -> str:
+        """
+        创建病例记录（每次就诊创建新病例）
+
+        Args:
+            patient_id: 患者ID（支持Patient_ID或Patient_UUID）
+            patient_data: 病例数据
+
+        Returns:
+            Medical_Record_UUID (病例UUID)
+        """
         visit_card_number = self._generate_visit_card_number()
         visit_date = datetime.now().strftime("%Y-%m-%d")
 
+        # 规范化patient_id
+        patient_id_normalized = normalize_id(patient_id)
+
+        # 查询Patient_UUID (如果传入的是INT ID)
+        if patient_id_normalized.isdigit():
+            query_patient = "SELECT Patient_UUID FROM patient WHERE Patient_ID = %s"
+            patient_result = self.db.execute_one(query_patient, (patient_id_normalized,))
+            patient_uuid = patient_result['Patient_UUID'] if patient_result else patient_id_normalized
+        else:
+            patient_uuid = patient_id_normalized
+
+        # 使用Patient_UUID插入 (触发器会自动填充Patient_ID和生成Medical_Record_UUID)
         insert_query = """
             INSERT INTO medical_record (
-                Patient_ID, Visit_Card_Number, Visit_Date, Department,
+                Patient_UUID, Visit_Card_Number, Visit_Date, Department,
                 Chief_Complaint, Present_Illness, Medical_History,
                 Allergy_History, Family_History, Medication_History
             ) VALUES (
@@ -120,7 +152,7 @@ class AppointmentServiceV3:
         """
 
         params = (
-            patient_id,
+            patient_uuid,
             visit_card_number,
             visit_date,
             patient_data.get('appointment', {}).get('department', '眼科'),
@@ -133,9 +165,15 @@ class AppointmentServiceV3:
         )
 
         medical_record_id = self.db.execute_insert(insert_query, params)
-        logger.info(f"创建病例记录，Medical_Record_ID: {medical_record_id}, 就诊卡号: {visit_card_number}")
 
-        return medical_record_id
+        # 查询生成的UUID
+        query_uuid = "SELECT Medical_Record_UUID FROM medical_record WHERE Medical_Record_ID = %s"
+        result = self.db.execute_one(query_uuid, (medical_record_id,))
+        medical_record_uuid = result['Medical_Record_UUID'] if result else None
+
+        logger.info(f"创建病例记录，Medical_Record_ID: {medical_record_id}, Medical_Record_UUID: {medical_record_uuid}, 就诊卡号: {visit_card_number}")
+
+        return medical_record_uuid  # 返回UUID
 
     # ==================== V3 新增：基于时间段的医生查询 ====================
 

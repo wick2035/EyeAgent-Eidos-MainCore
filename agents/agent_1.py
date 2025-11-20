@@ -1,14 +1,16 @@
 """
-1号智能体 - 健康咨询、眼科分诊、医生预约
+1号智能体 - 健康咨询、眼科分诊、医生预约 + UUID支持
+更新日期：2025-11-20 (UUID支持)
 """
 import json
 from enum import Enum
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from utils.llm_config import get_llm
 from utils.data_handler import PatientDataHandler
 from database.user_history_service_v2 import UserHistoryServiceV2
+from database.base_service import normalize_id
 
 
 class ConversationStage(Enum):
@@ -27,12 +29,12 @@ class ConversationStage(Enum):
 class HealthAgent:
     """1号健康咨询智能体"""
     
-    def __init__(self, user_id: int = None, phone_number: str = None, role: str = "patient"):
+    def __init__(self, user_id: Union[str, int, None] = None, phone_number: str = None, role: str = "patient"):
         """
-        初始化健康智能体
-        
+        初始化健康智能体 (支持UUID)
+
         Args:
-            user_id: 用户ID（Patient_ID，仅查询单个病例，不推荐）
+            user_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)，建议使用UUID）
             phone_number: 手机号（推荐使用，可查询该用户的所有历史病例）
             role: 用户角色（patient/doctor）
         """
@@ -47,51 +49,60 @@ class HealthAgent:
 
         # 用户角色
         self.role = role  # patient 或 doctor
-        
-        # 用户历史信息相关
-        self.user_id = user_id  # 用户ID（Patient_ID）
+
+        # 用户历史信息相关 - 支持UUID
+        # 规范化user_id（兼容INT和UUID）
+        if user_id is not None:
+            try:
+                self.user_id = normalize_id(user_id)  # 用户ID（支持Patient_ID或Patient_UUID）
+            except ValueError as e:
+                print(f"[警告] 无效的用户ID格式: {user_id}, 错误: {e}")
+                self.user_id = None
+        else:
+            self.user_id = None
+
         self.phone_number = phone_number  # 手机号（推荐使用）
         self.user_history = None  # 用户历史信息
         self.history_loaded = False  # 历史信息是否已加载
         self.user_history_text = ""  # 格式化的历史信息文本
-        
+
         # 初始化对话链
         self.conversation_chain = self._create_conversation_chain()
     
-    def _load_user_history(self, user_id: Optional[int] = None, phone_number: Optional[str] = None) -> bool:
+    def _load_user_history(self, user_id: Union[str, int, None] = None, phone_number: Optional[str] = None) -> bool:
         """
-        从数据库加载用户历史信息
-        
-        【重要】优先使用手机号查询（可获取所有病例），其次使用user_id（仅单个病例）
-        
+        从数据库加载用户历史信息 (支持UUID)
+
+        【重要】优先使用手机号查询（可获取所有病例），其次使用user_id（支持INT或UUID）
+
         Args:
-            user_id: 用户ID（Patient_ID）
+            user_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
             phone_number: 手机号（推荐使用）
-            
+
         Returns:
             是否成功加载历史信息
         """
         # 确定使用的标识：优先手机号，其次user_id
         phone = phone_number or self.phone_number
         uid = user_id or self.user_id
-        
+
         print(f"[调试] _load_user_history 被调用 - phone={phone}, uid={uid}")
         print(f"[调试] self.phone_number={self.phone_number}, self.user_id={self.user_id}")
-        
+
         if not phone and not uid:
             print("[调试] 未提供用户ID或手机号，跳过历史信息加载")
             self.user_history_text = "【新用户】\n本次为初次就诊，暂无历史记录。"
             self.history_loaded = True
             return False
-        
+
         if self.history_loaded:
             identifier = phone if phone else f"ID={uid}"
             print(f"[调试] 用户 {identifier} 的历史信息已加载，跳过重复加载")
             return True
-        
+
         try:
             history_service = UserHistoryServiceV2()
-            
+
             # 优先使用手机号查询（推荐）
             if phone:
                 print(f"[调试] 开始通过手机号加载用户历史信息: {phone}")
@@ -100,9 +111,9 @@ class HealthAgent:
                 print(f"[调试] 查询结果 - basic_info: {self.user_history.get('basic_info')}")
                 print(f"[调试] 查询结果 - medical_records数量: {len(self.user_history.get('medical_records', []))}")
                 self.user_history_text = history_service.format_user_history_text_by_phone(phone)
-            # 如果没有手机号，使用user_id（仅查询单个病例）
+            # 如果没有手机号，使用user_id（支持INT或UUID）
             elif uid:
-                print(f"[调试] 开始通过Patient_ID加载用户历史信息: {uid}")
+                print(f"[调试] 开始通过Patient_ID/UUID加载用户历史信息: {uid}")
                 self.user_history = history_service.get_user_complete_info(uid)
                 print(f"[调试] 查询结果 - has_history: {self.user_history.get('has_history')}")
                 print(f"[调试] 查询结果 - basic_info: {self.user_history.get('basic_info')}")
