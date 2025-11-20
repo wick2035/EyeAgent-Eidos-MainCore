@@ -1,9 +1,10 @@
 """
-FastAPI主应用 - 智能体集群系统后端服务
+FastAPI主应用 - 智能体集群系统后端服务 + UUID支持
+更新日期：2025-11-20 (UUID支持)
 """
 import json
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +17,7 @@ from database.prescription_service import PrescriptionService
 from database.reminder_service import ReminderService
 from database.chat_service import ChatService
 from database.user_history_service_v2 import UserHistoryServiceV2
+from database.base_service import normalize_id, is_valid_uuid
 from utils.report_generator import ReportGenerator
 from utils.prescription_generator import PrescriptionGenerator
 
@@ -60,10 +62,10 @@ sessions: Dict[str, Dict[str, Any]] = {}
 
 
 class ChatMessage(BaseModel):
-    """聊天消息模型"""
+    """聊天消息模型 (支持UUID)"""
     message: str
     session_id: Optional[str] = None
-    user_id: Optional[int] = None  # 用于模拟不同用户（Patient_ID）
+    user_id: Optional[Union[str, int]] = None  # 用户ID（支持Patient_ID或Patient_UUID）
     phone_number: Optional[str] = None  # 用户手机号（推荐使用，可获取完整历史信息）
     role: Optional[str] = "patient"  # 用户角色：patient（患者）或 doctor（医生）
 
@@ -78,18 +80,18 @@ class ChatResponse(BaseModel):
 
 
 class ReportRequest(BaseModel):
-    """报告请求模型"""
-    patient_id: Optional[int] = None
+    """报告请求模型 (支持UUID)"""
+    patient_id: Optional[Union[str, int]] = None  # 支持Patient_ID或Patient_UUID
     phone_number: Optional[str] = None
-    medical_record_id: Optional[int] = None
+    medical_record_id: Optional[Union[str, int]] = None  # 支持Medical_Record_ID或Medical_Record_UUID
 
 
 class AnalysisRequest(BaseModel):
-    """分析请求模型"""
-    patient_id: Optional[int] = None
+    """分析请求模型 (支持UUID)"""
+    patient_id: Optional[Union[str, int]] = None  # 支持Patient_ID或Patient_UUID
     phone_number: Optional[str] = None
     analysis_type: str = "trends"  # trends, compare, anomalies
-    record_ids: Optional[list] = None  # 用于对比的记录ID列表
+    record_ids: Optional[list] = None  # 用于对比的记录ID列表（支持混合INT和UUID）
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -113,20 +115,28 @@ async def chat_history_page(request: Request):
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
     """
-    处理聊天消息 - 智能路由版本
+    处理聊天消息 - 智能路由版本 (支持UUID)
     根据用户角色和消息内容自动选择合适的Agent
     """
     try:
         from utils.intent_detector import get_intent_detector
-        
+
         # 生成或获取会话ID
         session_id = message.session_id or str(uuid.uuid4())
         role = message.role or "patient"
-        
+
+        # 规范化user_id（兼容INT和UUID）
+        user_id_normalized = None
+        if message.user_id is not None:
+            try:
+                user_id_normalized = normalize_id(message.user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"无效的用户ID格式: {message.user_id}")
+
         print(f"\n[主程序] 收到聊天请求:")
         print(f"  - session_id: {session_id}")
         print(f"  - role: {role}")
-        print(f"  - user_id: {message.user_id}")
+        print(f"  - user_id: {user_id_normalized}")
         print(f"  - phone_number: {message.phone_number}")
         print(f"  - message: {message.message[:50]}...")
         
@@ -140,17 +150,18 @@ async def chat(message: ChatMessage):
                 "chat_id": None  # 数据库中的Chat_ID
             }
 
-            # 在数据库中创建对话会话
-            if message.user_id or message.phone_number:
+            # 在数据库中创建对话会话 (支持UUID)
+            if user_id_normalized or message.phone_number:
                 try:
-                    # 获取patient_id
-                    patient_id = message.user_id
+                    # 获取patient_id（优先使用UUID）
+                    patient_id = user_id_normalized
                     if not patient_id and message.phone_number:
                         from database.user_history_service_v2 import UserHistoryServiceV2
                         user_service = UserHistoryServiceV2()
                         user_info = user_service.get_user_by_phone(message.phone_number)
                         if user_info:
-                            patient_id = user_info['Patient_ID']
+                            # 优先使用Patient_UUID，如果没有则使用Patient_ID
+                            patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
 
                     # 根据角色创建对话
                     if patient_id:
@@ -252,11 +263,11 @@ async def chat(message: ChatMessage):
             # 重置agent以切换
             agent_manager.reset_agent(session_id)
         
-        # 创建或获取Agent
+        # 创建或获取Agent (支持UUID)
         agent = agent_manager.get_or_create_agent(
-            session_id, 
+            session_id,
             agent_type,
-            user_id=message.user_id,
+            user_id=user_id_normalized,
             phone_number=message.phone_number,
             role=role  # 传递角色参数
         )
@@ -300,7 +311,7 @@ async def chat(message: ChatMessage):
                     chat_id=chat_id,
                     message_content=message.message,
                     message_type='user',
-                    sender_info=f"{role}_{message.user_id or message.phone_number}",
+                    sender_info=f"{role}_{user_id_normalized or message.phone_number}",
                     context={'session_id': session_id}
                 )
 
@@ -322,9 +333,11 @@ async def chat(message: ChatMessage):
                 if chat_info and not chat_info.get('AI_Agent'):
                     from database.db_connection import DatabaseConnection
                     db = DatabaseConnection()
+                    # 支持UUID和INT ID查询
+                    chat_id_for_update = normalize_id(chat_id)
                     db.execute_update(
-                        "UPDATE chat_conversation SET AI_Agent = %s WHERE Chat_ID = %s",
-                        (f'agent_{agent_type}', chat_id)
+                        "UPDATE chat_conversation SET AI_Agent = %s WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s",
+                        (f'agent_{agent_type}', chat_id_for_update, chat_id_for_update)
                     )
                     db.close()
 
@@ -623,49 +636,62 @@ async def get_patient_history(phone_number: str):
 @app.post("/api/report/generate")
 async def generate_report(request: ReportRequest):
     """
-    生成病例报告PDF
-    
+    生成病例报告PDF (支持UUID)
+
     Args:
         request: 包含patient_id或phone_number，以及可选的medical_record_id
-        
+
     Returns:
         生成结果和文件路径
     """
     try:
-        # 获取用户ID
-        patient_id = request.patient_id
+        # 获取用户ID（支持UUID）
+        patient_id = None
+        if request.patient_id:
+            try:
+                patient_id = normalize_id(request.patient_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {request.patient_id}")
+
         if not patient_id and request.phone_number:
             user_info = report_service.db.execute_one(
-                "SELECT Patient_ID FROM patient WHERE Phone_Number = %s",
+                "SELECT Patient_UUID, Patient_ID FROM patient WHERE Phone_Number = %s",
                 (request.phone_number,)
             )
             if user_info:
-                patient_id = user_info['Patient_ID']
-        
+                # 优先使用UUID
+                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+
         if not patient_id:
             raise HTTPException(status_code=400, detail="未提供有效的患者信息")
-        
-        # 如果指定了病例ID，生成单个报告
+
+        # 如果指定了病例ID，生成单个报告（支持UUID）
         if request.medical_record_id:
-            pdf_path = report_generator.generate_report_from_db(request.medical_record_id)
+            try:
+                medical_record_id_normalized = normalize_id(request.medical_record_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的病例ID格式: {request.medical_record_id}")
+
+            pdf_path = report_generator.generate_report_from_db(medical_record_id_normalized)
             if pdf_path:
                 return {
                     "success": True,
                     "message": "报告生成成功",
                     "file_path": pdf_path,
-                    "medical_record_id": request.medical_record_id
+                    "medical_record_id": medical_record_id_normalized
                 }
             else:
                 raise HTTPException(status_code=500, detail="报告生成失败")
-        
+
         # 否则生成最新的报告
         reports = report_service.get_all_reports_by_patient(patient_id, limit=1)
         if not reports:
             raise HTTPException(status_code=404, detail="未找到病例记录")
-        
-        latest_record_id = reports[0]['Medical_Record_ID']
+
+        # 使用UUID（如果有）否则使用ID
+        latest_record_id = reports[0].get('Medical_Record_UUID') or reports[0]['Medical_Record_ID']
         pdf_path = report_generator.generate_report_from_db(latest_record_id)
-        
+
         if pdf_path:
             return {
                 "success": True,
@@ -675,7 +701,7 @@ async def generate_report(request: ReportRequest):
             }
         else:
             raise HTTPException(status_code=500, detail="报告生成失败")
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -685,24 +711,32 @@ async def generate_report(request: ReportRequest):
 
 
 @app.get("/api/report/history/{patient_id}")
-async def get_report_history(patient_id: int):
+async def get_report_history(patient_id: str):
     """
-    获取用户的历史报告列表
-    
+    获取用户的历史报告列表 (支持UUID)
+
     Args:
-        patient_id: 用户ID
-        
+        patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+
     Returns:
         报告列表
     """
     try:
-        reports = report_service.get_all_reports_by_patient(patient_id)
+        # 规范化patient_id
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
+
+        reports = report_service.get_all_reports_by_patient(patient_id_normalized)
         return {
             "success": True,
-            "patient_id": patient_id,
+            "patient_id": patient_id_normalized,
             "count": len(reports),
             "reports": reports
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询报告历史失败: {str(e)}")
 
@@ -710,32 +744,38 @@ async def get_report_history(patient_id: int):
 @app.post("/api/report/analyze")
 async def analyze_reports(request: AnalysisRequest):
     """
-    分析历史报告
-    
+    分析历史报告 (支持UUID)
+
     Args:
         request: 包含patient_id或phone_number，以及analysis_type
-        
+
     Returns:
         分析结果
     """
     try:
-        # 获取用户ID
-        patient_id = request.patient_id
+        # 获取用户ID（支持UUID）
+        patient_id = None
+        if request.patient_id:
+            try:
+                patient_id = normalize_id(request.patient_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {request.patient_id}")
+
         if not patient_id and request.phone_number:
             user_info = report_service.db.execute_one(
-                "SELECT Patient_ID FROM patient WHERE Phone_Number = %s",
+                "SELECT Patient_UUID, Patient_ID FROM patient WHERE Phone_Number = %s",
                 (request.phone_number,)
             )
             if user_info:
-                patient_id = user_info['Patient_ID']
-        
+                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+
         if not patient_id:
             raise HTTPException(status_code=400, detail="未提供有效的患者信息")
-        
+
         # 创建临时的 ReportAgent 进行分析
         from agents.agent_2 import ReportAgent
         agent = ReportAgent(patient_id=patient_id)
-        
+
         # 根据分析类型执行不同的分析
         if request.analysis_type == "trends":
             result = agent.analyze_history_trends(patient_id)
@@ -744,16 +784,23 @@ async def analyze_reports(request: AnalysisRequest):
         elif request.analysis_type == "compare":
             if not request.record_ids or len(request.record_ids) < 2:
                 raise HTTPException(status_code=400, detail="对比分析需要至少两个病例ID")
-            result = agent.compare_records(request.record_ids)
+            # 规范化所有record_ids
+            normalized_record_ids = []
+            for rid in request.record_ids:
+                try:
+                    normalized_record_ids.append(normalize_id(rid))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"无效的病例ID格式: {rid}")
+            result = agent.compare_records(normalized_record_ids)
         else:
             raise HTTPException(status_code=400, detail=f"未知的分析类型: {request.analysis_type}")
-        
+
         return {
             "success": True,
             "analysis_type": request.analysis_type,
             "result": result
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -765,20 +812,28 @@ async def analyze_reports(request: AnalysisRequest):
 @app.post("/api/chat/report", response_model=ChatResponse)
 async def chat_report(message: ChatMessage):
     """
-    报告智能体对话接口
-    
+    报告智能体对话接口 (支持UUID)
+
     与 /api/chat 类似，但使用 ReportAgent
     """
     try:
         # 生成或获取会话ID
         session_id = message.session_id or str(uuid.uuid4())
-        
+
+        # 规范化user_id
+        user_id_normalized = None
+        if message.user_id is not None:
+            try:
+                user_id_normalized = normalize_id(message.user_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的用户ID格式: {message.user_id}")
+
         print(f"\n[报告Agent] 收到对话请求:")
         print(f"  - session_id: {session_id}")
-        print(f"  - user_id: {message.user_id}")
+        print(f"  - user_id: {user_id_normalized}")
         print(f"  - phone_number: {message.phone_number}")
         print(f"  - message: {message.message[:50]}...")
-        
+
         # 初始化会话
         if session_id not in sessions:
             sessions[session_id] = {
@@ -786,12 +841,12 @@ async def chat_report(message: ChatMessage):
                 "agent_type": "report",
                 "created_at": None
             }
-        
+
         # 获取或创建报告智能体
         agent = agent_manager.get_or_create_agent(
-            session_id, 
-            "report", 
-            user_id=message.user_id,
+            session_id,
+            "report",
+            user_id=user_id_normalized,
             phone_number=message.phone_number
         )
         
@@ -825,55 +880,69 @@ async def chat_report(message: ChatMessage):
 # ==================== 处方相关API ====================
 
 class PrescriptionRequest(BaseModel):
-    """处方请求模型"""
-    prescription_id: int
-    patient_id: Optional[int] = None
+    """处方请求模型 (支持UUID)"""
+    prescription_id: Union[str, int]  # 支持Prescription_ID或Prescription_UUID
+    patient_id: Optional[Union[str, int]] = None  # 支持Patient_ID或Patient_UUID
     phone_number: Optional[str] = None
 
 
 @app.post("/api/prescription/generate")
 async def generate_prescription(request: PrescriptionRequest):
     """
-    生成处方单PDF
-    
+    生成处方单PDF (支持UUID)
+
     Args:
         request: 包含prescription_id（必填），以及可选的patient_id/phone_number用于验证
-        
+
     Returns:
         生成结果和文件路径
     """
     try:
-        print(f"[处方API] 收到生成处方单请求: Prescription_ID={request.prescription_id}")
-        
+        # 规范化prescription_id
+        try:
+            prescription_id_normalized = normalize_id(request.prescription_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的处方ID格式: {request.prescription_id}")
+
+        print(f"[处方API] 收到生成处方单请求: Prescription_ID={prescription_id_normalized}")
+
         # 可选：验证处方是否属于指定患者
         if request.patient_id or request.phone_number:
-            prescription_data = prescription_service.get_prescription_full(request.prescription_id)
+            prescription_data = prescription_service.get_prescription_full(prescription_id_normalized)
             if not prescription_data:
                 raise HTTPException(status_code=404, detail="未找到处方记录")
-            
+
             # 验证患者ID
             if request.patient_id:
-                if prescription_data['patient_info']['patient_id'] != request.patient_id:
+                try:
+                    patient_id_normalized = normalize_id(request.patient_id)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {request.patient_id}")
+
+                # 比较UUID或ID
+                prescription_patient_uuid = prescription_data['patient_info'].get('patient_uuid')
+                prescription_patient_id = str(prescription_data['patient_info'].get('patient_id', ''))
+                if patient_id_normalized not in [prescription_patient_uuid, prescription_patient_id]:
                     raise HTTPException(status_code=403, detail="无权访问此处方")
-            
+
             # 验证手机号
             if request.phone_number:
                 if prescription_data['patient_info']['phone'] != request.phone_number:
                     raise HTTPException(status_code=403, detail="无权访问此处方")
-        
+
         # 生成处方单
-        pdf_path = prescription_generator.generate_prescription_from_db(request.prescription_id)
-        
+        pdf_path = prescription_generator.generate_prescription_from_db(prescription_id_normalized)
+
         if pdf_path:
             return {
                 "success": True,
                 "message": "处方单生成成功",
                 "file_path": pdf_path,
-                "prescription_id": request.prescription_id
+                "prescription_id": prescription_id_normalized
             }
         else:
             raise HTTPException(status_code=500, detail="处方单生成失败")
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -883,29 +952,37 @@ async def generate_prescription(request: PrescriptionRequest):
 
 
 @app.get("/api/prescription/list/{patient_id}")
-async def get_prescription_list(patient_id: int, limit: int = 50):
+async def get_prescription_list(patient_id: str, limit: int = 50):
     """
-    获取患者的处方列表
-    
+    获取患者的处方列表 (支持UUID)
+
     Args:
-        patient_id: 患者ID
+        patient_id: 患者ID（支持Patient_ID或Patient_UUID）
         limit: 返回记录数限制（默认50）
-        
+
     Returns:
         处方摘要列表
     """
     try:
-        print(f"[处方API] 查询患者处方列表: Patient_ID={patient_id}")
-        
-        prescriptions = prescription_service.get_prescriptions_by_patient(patient_id, limit)
-        
+        # 规范化patient_id
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
+
+        print(f"[处方API] 查询患者处方列表: Patient_ID={patient_id_normalized}")
+
+        prescriptions = prescription_service.get_prescriptions_by_patient(patient_id_normalized, limit)
+
         return {
             "success": True,
-            "patient_id": patient_id,
+            "patient_id": patient_id_normalized,
             "count": len(prescriptions),
             "prescriptions": prescriptions
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -943,29 +1020,35 @@ async def get_prescription_list_by_phone(phone_number: str, limit: int = 50):
 
 
 @app.get("/api/prescription/detail/{prescription_id}")
-async def get_prescription_detail(prescription_id: int):
+async def get_prescription_detail(prescription_id: str):
     """
-    获取单个处方的完整详情
-    
+    获取单个处方的完整详情 (支持UUID)
+
     Args:
-        prescription_id: 处方ID
-        
+        prescription_id: 处方ID（支持Prescription_ID或Prescription_UUID）
+
     Returns:
         完整处方信息（包含药物明细）
     """
     try:
-        print(f"[处方API] 查询处方详情: Prescription_ID={prescription_id}")
-        
-        prescription_data = prescription_service.get_prescription_full(prescription_id)
-        
+        # 规范化prescription_id
+        try:
+            prescription_id_normalized = normalize_id(prescription_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的处方ID格式: {prescription_id}")
+
+        print(f"[处方API] 查询处方详情: Prescription_ID={prescription_id_normalized}")
+
+        prescription_data = prescription_service.get_prescription_full(prescription_id_normalized)
+
         if not prescription_data:
             raise HTTPException(status_code=404, detail="未找到处方记录")
-        
+
         return {
             "success": True,
             "prescription": prescription_data
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -977,21 +1060,21 @@ async def get_prescription_detail(prescription_id: int):
 # ==================== 提醒相关API ====================
 
 class ReminderRequest(BaseModel):
-    """提醒请求模型"""
-    patient_id: Optional[int] = None
+    """提醒请求模型 (支持UUID)"""
+    patient_id: Optional[Union[str, int]] = None  # 支持Patient_ID或Patient_UUID
     phone_number: Optional[str] = None
-    reminder_id: Optional[int] = None
+    reminder_id: Optional[Union[str, int]] = None  # 支持Reminder_ID或Reminder_UUID
     status: Optional[str] = None
     reminder_type: Optional[str] = None
 
 
 @app.get("/api/reminder/list/{patient_id}")
-async def get_reminder_list(patient_id: int, status: Optional[str] = None, limit: int = 50):
+async def get_reminder_list(patient_id: str, status: Optional[str] = None, limit: int = 50):
     """
-    获取患者的提醒列表
+    获取患者的提醒列表 (支持UUID)
 
     Args:
-        patient_id: 患者ID
+        patient_id: 患者ID（支持Patient_ID或Patient_UUID）
         status: 状态过滤 (pending/sent/completed/cancelled/expired)
         limit: 返回记录数限制（默认50）
 
@@ -999,17 +1082,25 @@ async def get_reminder_list(patient_id: int, status: Optional[str] = None, limit
         提醒列表
     """
     try:
-        print(f"[提醒API] 查询患者提醒列表: Patient_ID={patient_id}, Status={status}")
+        # 规范化patient_id
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
 
-        reminders = reminder_service.get_reminders_by_patient(patient_id, status=status, limit=limit)
+        print(f"[提醒API] 查询患者提醒列表: Patient_ID={patient_id_normalized}, Status={status}")
+
+        reminders = reminder_service.get_reminders_by_patient(patient_id_normalized, status=status, limit=limit)
 
         return {
             "success": True,
-            "patient_id": patient_id,
+            "patient_id": patient_id_normalized,
             "count": len(reminders),
             "reminders": reminders
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1159,12 +1250,12 @@ async def update_reminder(request: ReminderRequest):
 # ==================== 对话历史相关API ====================
 
 @app.get("/api/chat/history/patient/{patient_id}")
-async def get_patient_chat_history(patient_id: int, status: Optional[str] = None, limit: int = 20):
+async def get_patient_chat_history(patient_id: str, status: Optional[str] = None, limit: int = 20):
     """
-    获取患者的对话历史列表
+    获取患者的对话历史列表 (支持UUID)
 
     Args:
-        patient_id: 患者ID
+        patient_id: 患者ID（支持Patient_ID或Patient_UUID）
         status: 状态过滤 (active/archived/closed)
         limit: 返回记录数限制
 
@@ -1172,22 +1263,30 @@ async def get_patient_chat_history(patient_id: int, status: Optional[str] = None
         对话历史列表
     """
     try:
-        print(f"[对话历史API] 查询患者对话历史: Patient_ID={patient_id}, Status={status}")
+        # 规范化patient_id
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
+
+        print(f"[对话历史API] 查询患者对话历史: Patient_ID={patient_id_normalized}, Status={status}")
 
         chats = chat_service.get_user_chats(
             user_type='patient',
-            user_id=patient_id,
+            user_id=patient_id_normalized,
             status=status,
             limit=limit
         )
 
         return {
             "success": True,
-            "patient_id": patient_id,
+            "patient_id": patient_id_normalized,
             "count": len(chats),
             "chats": chats
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1244,12 +1343,12 @@ async def get_chat_history_by_phone(phone_number: str, status: Optional[str] = N
 
 
 @app.get("/api/chat/messages/{chat_id}")
-async def get_chat_messages(chat_id: int, limit: Optional[int] = None, offset: int = 0):
+async def get_chat_messages(chat_id: str, limit: Optional[int] = None, offset: int = 0):
     """
-    获取对话的所有消息
+    获取对话的所有消息 (支持UUID)
 
     Args:
-        chat_id: 对话ID
+        chat_id: 对话ID（支持Chat_ID或Chat_UUID）
         limit: 返回消息数量限制
         offset: 偏移量(用于分页)
 
@@ -1257,25 +1356,33 @@ async def get_chat_messages(chat_id: int, limit: Optional[int] = None, offset: i
         消息列表
     """
     try:
-        print(f"[对话历史API] 查询对话消息: Chat_ID={chat_id}")
+        # 规范化chat_id
+        try:
+            chat_id_normalized = normalize_id(chat_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的对话ID格式: {chat_id}")
+
+        print(f"[对话历史API] 查询对话消息: Chat_ID={chat_id_normalized}")
 
         messages = chat_service.get_chat_messages(
-            chat_id=chat_id,
+            chat_id=chat_id_normalized,
             limit=limit,
             offset=offset
         )
 
         # 获取对话元数据(标题、AI代理等信息)
-        chat = chat_service.get_chat_by_id(chat_id)
+        chat = chat_service.get_chat_by_id(chat_id_normalized)
 
         return {
             "success": True,
-            "chat_id": chat_id,
+            "chat_id": chat_id_normalized,
             "count": len(messages),
             "messages": messages,
             "chat": chat
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1283,33 +1390,41 @@ async def get_chat_messages(chat_id: int, limit: Optional[int] = None, offset: i
 
 
 @app.get("/api/chat/recent/{patient_id}")
-async def get_recent_chats_with_preview(patient_id: int, limit: int = 10):
+async def get_recent_chats_with_preview(patient_id: str, limit: int = 10):
     """
-    获取患者最近的对话及最后一条消息预览
+    获取患者最近的对话及最后一条消息预览 (支持UUID)
 
     Args:
-        patient_id: 患者ID
+        patient_id: 患者ID（支持Patient_ID或Patient_UUID）
         limit: 返回数量限制
 
     Returns:
         对话列表(包含最后一条消息)
     """
     try:
-        print(f"[对话历史API] 查询最近对话: Patient_ID={patient_id}")
+        # 规范化patient_id
+        try:
+            patient_id_normalized = normalize_id(patient_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
+
+        print(f"[对话历史API] 查询最近对话: Patient_ID={patient_id_normalized}")
 
         chats = chat_service.get_recent_chats_with_last_message(
             user_type='patient',
-            user_id=patient_id,
+            user_id=patient_id_normalized,
             limit=limit
         )
 
         return {
             "success": True,
-            "patient_id": patient_id,
+            "patient_id": patient_id_normalized,
             "count": len(chats),
             "chats": chats
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1317,20 +1432,26 @@ async def get_recent_chats_with_preview(patient_id: int, limit: int = 10):
 
 
 @app.get("/api/chat/stats/{chat_id}")
-async def get_chat_statistics(chat_id: int):
+async def get_chat_statistics(chat_id: str):
     """
-    获取对话的统计信息
+    获取对话的统计信息 (支持UUID)
 
     Args:
-        chat_id: 对话ID
+        chat_id: 对话ID（支持Chat_ID或Chat_UUID）
 
     Returns:
         统计信息
     """
     try:
-        print(f"[对话历史API] 查询对话统计: Chat_ID={chat_id}")
+        # 规范化chat_id
+        try:
+            chat_id_normalized = normalize_id(chat_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的对话ID格式: {chat_id}")
 
-        stats = chat_service.get_chat_statistics(chat_id)
+        print(f"[对话历史API] 查询对话统计: Chat_ID={chat_id_normalized}")
+
+        stats = chat_service.get_chat_statistics(chat_id_normalized)
 
         if not stats:
             raise HTTPException(status_code=404, detail="未找到对话统计信息")
@@ -1349,26 +1470,32 @@ async def get_chat_statistics(chat_id: int):
 
 
 @app.post("/api/chat/archive/{chat_id}")
-async def archive_chat_conversation(chat_id: int):
+async def archive_chat_conversation(chat_id: str):
     """
-    归档对话
+    归档对话 (支持UUID)
 
     Args:
-        chat_id: 对话ID
+        chat_id: 对话ID（支持Chat_ID或Chat_UUID）
 
     Returns:
         操作结果
     """
     try:
-        print(f"[对话历史API] 归档对话: Chat_ID={chat_id}")
+        # 规范化chat_id
+        try:
+            chat_id_normalized = normalize_id(chat_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的对话ID格式: {chat_id}")
 
-        success = chat_service.archive_chat(chat_id)
+        print(f"[对话历史API] 归档对话: Chat_ID={chat_id_normalized}")
+
+        success = chat_service.archive_chat(chat_id_normalized)
 
         if success:
             return {
                 "success": True,
                 "message": "对话已归档",
-                "chat_id": chat_id
+                "chat_id": chat_id_normalized
             }
         else:
             raise HTTPException(status_code=500, detail="归档对话失败")
@@ -1382,26 +1509,32 @@ async def archive_chat_conversation(chat_id: int):
 
 
 @app.delete("/api/chat/delete/{chat_id}")
-async def delete_chat_conversation(chat_id: int):
+async def delete_chat_conversation(chat_id: str):
     """
-    删除对话(会级联删除所有消息)
+    删除对话(会级联删除所有消息) (支持UUID)
 
     Args:
-        chat_id: 对话ID
+        chat_id: 对话ID（支持Chat_ID或Chat_UUID）
 
     Returns:
         操作结果
     """
     try:
-        print(f"[对话历史API] 删除对话: Chat_ID={chat_id}")
+        # 规范化chat_id
+        try:
+            chat_id_normalized = normalize_id(chat_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的对话ID格式: {chat_id}")
 
-        success = chat_service.delete_chat(chat_id)
+        print(f"[对话历史API] 删除对话: Chat_ID={chat_id_normalized}")
+
+        success = chat_service.delete_chat(chat_id_normalized)
 
         if success:
             return {
                 "success": True,
                 "message": "对话已删除",
-                "chat_id": chat_id
+                "chat_id": chat_id_normalized
             }
         else:
             raise HTTPException(status_code=500, detail="删除对话失败")
@@ -1417,7 +1550,7 @@ async def delete_chat_conversation(chat_id: int):
 @app.post("/api/chat/reminder", response_model=ChatResponse)
 async def chat_reminder(message: ChatMessage):
     """
-    提醒智能体对话接口
+    提醒智能体对话接口 (支持UUID)
 
     与 /api/chat 类似，但使用 ReminderAgent
     """
@@ -1425,9 +1558,17 @@ async def chat_reminder(message: ChatMessage):
         # 生成或获取会话ID
         session_id = message.session_id or str(uuid.uuid4())
 
+        # 规范化user_id
+        user_id_normalized = None
+        if message.user_id is not None:
+            try:
+                user_id_normalized = normalize_id(message.user_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的用户ID格式: {message.user_id}")
+
         print(f"\n[提醒Agent] 收到对话请求:")
         print(f"  - session_id: {session_id}")
-        print(f"  - user_id: {message.user_id}")
+        print(f"  - user_id: {user_id_normalized}")
         print(f"  - phone_number: {message.phone_number}")
         print(f"  - message: {message.message[:50]}...")
 
@@ -1443,7 +1584,7 @@ async def chat_reminder(message: ChatMessage):
         agent = agent_manager.get_or_create_agent(
             session_id,
             "reminder",
-            user_id=message.user_id,
+            user_id=user_id_normalized,
             phone_number=message.phone_number,
             role=message.role or "patient"
         )

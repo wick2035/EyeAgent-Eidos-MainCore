@@ -1,11 +1,12 @@
 """
-病例报告生成工具 - 填充docx模板并转换为PDF
+病例报告生成工具 - 填充docx模板并转换为PDF + UUID支持
 创建日期：2025-11-17
+更新日期：2025-11-20 (UUID支持)
 """
 
 import os
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from datetime import datetime
 from pathlib import Path
 
@@ -96,45 +97,53 @@ class ReportGenerator:
             traceback.print_exc()
             return None
     
-    def generate_report_from_db(self, medical_record_id: int) -> Optional[str]:
+    def generate_report_from_db(self, medical_record_id: Union[str, int]) -> Optional[str]:
         """
-        根据病例ID从数据库生成报告
-        
+        根据病例ID从数据库生成报告 (支持UUID)
+
         Args:
-            medical_record_id: 病例ID
-            
+            medical_record_id: 病例ID（支持Medical_Record_ID或Medical_Record_UUID）
+
         Returns:
             生成的PDF文件路径，失败返回 None
         """
         try:
             from database.report_service import ReportService
-            
+            from database.base_service import normalize_id
+
+            # 规范化medical_record_id
+            try:
+                medical_record_id_normalized = normalize_id(medical_record_id)
+            except ValueError as e:
+                logger.error(f"无效的病例ID格式: {medical_record_id}, 错误: {e}")
+                return None
+
             # 获取报告数据
             service = ReportService()
-            data = service.get_report_data_for_template(medical_record_id)
-            
+            data = service.get_report_data_for_template(medical_record_id_normalized)
+
             if not data:
-                logger.error(f"未找到病例ID: {medical_record_id}")
+                logger.error(f"未找到病例ID: {medical_record_id_normalized}")
                 service.close()
                 return None
-            
+
             # 确保有报告编号
             if not data['patient_info'].get('report_id'):
-                report_id = service.assign_report_id(medical_record_id)
+                report_id = service.assign_report_id(medical_record_id_normalized)
                 if report_id:
                     data['patient_info']['report_id'] = report_id
-            
-            # 生成报告
-            output_filename = f"report_{medical_record_id}_{data['patient_info'].get('report_id', 'unknown')}"
+
+            # 生成报告（使用规范化的ID作为文件名）
+            output_filename = f"report_{medical_record_id_normalized}_{data['patient_info'].get('report_id', 'unknown')}"
             pdf_path = self.generate_report_from_data(data, output_filename)
-            
+
             # 标记报告已打印
             if pdf_path:
-                service.mark_report_printed(medical_record_id)
-            
+                service.mark_report_printed(medical_record_id_normalized)
+
             service.close()
             return pdf_path
-            
+
         except Exception as e:
             logger.error(f"从数据库生成报告失败: {e}")
             import traceback
@@ -399,38 +408,47 @@ class ReportGenerator:
         logger.error(f"PDF转换失败，请手动转换docx文件: {docx_path}")
         return None
     
-    def batch_generate(self, patient_id: int, medical_record_ids: list = None) -> list:
+    def batch_generate(self, patient_id: Union[str, int], medical_record_ids: list = None) -> list:
         """
-        批量生成报告
-        
+        批量生成报告 (支持UUID)
+
         Args:
-            patient_id: 用户ID
-            medical_record_ids: 病例ID列表，如果为None则生成该用户的所有报告
-            
+            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            medical_record_ids: 病例ID列表（支持混合INT和UUID），如果为None则生成该用户的所有报告
+
         Returns:
             生成的PDF文件路径列表
         """
         try:
             from database.report_service import ReportService
-            
+            from database.base_service import normalize_id
+
+            # 规范化patient_id
+            try:
+                patient_id_normalized = normalize_id(patient_id)
+            except ValueError as e:
+                logger.error(f"无效的患者ID格式: {patient_id}, 错误: {e}")
+                return []
+
             service = ReportService()
-            
+
             # 如果没有指定病例ID，获取所有病例
             if medical_record_ids is None:
-                reports = service.get_all_reports_by_patient(patient_id)
-                medical_record_ids = [r['Medical_Record_ID'] for r in reports]
-            
+                reports = service.get_all_reports_by_patient(patient_id_normalized)
+                # 优先使用Medical_Record_UUID，如果没有则使用Medical_Record_ID
+                medical_record_ids = [r.get('Medical_Record_UUID') or r['Medical_Record_ID'] for r in reports]
+
             # 批量生成
             generated_files = []
             for record_id in medical_record_ids:
                 pdf_path = self.generate_report_from_db(record_id)
                 if pdf_path:
                     generated_files.append(pdf_path)
-            
+
             service.close()
             logger.info(f"批量生成完成: 成功 {len(generated_files)}/{len(medical_record_ids)}")
             return generated_files
-            
+
         except Exception as e:
             logger.error(f"批量生成失败: {e}")
             return []

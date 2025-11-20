@@ -1,7 +1,8 @@
 """
-智能体管理器 - 管理多个智能体实例
+智能体管理器 - 管理多个智能体实例 + UUID支持
+更新日期：2025-11-20 (UUID支持)
 """
-from typing import Dict, Any
+from typing import Dict, Any, Union, Optional
 from agents.agent_1 import HealthAgent
 from agents.agent_2 import ReportAgent
 from agents.agent_3 import ReminderAgent
@@ -14,10 +15,22 @@ class AgentManager:
         self.agents: Dict[str, Any] = {}
         self.active_sessions: Dict[str, str] = {}  # session_id -> agent_id
     
-    def create_agent(self, agent_id: str, agent_type: str = "health", user_id: int = None, phone_number: str = None, role: str = "patient"):
-        """创建新的智能体实例"""
+    def create_agent(self, agent_id: str, agent_type: str = "health", user_id: Union[str, int, None] = None, phone_number: Optional[str] = None, role: str = "patient"):
+        """
+        创建新的智能体实例 (支持UUID)
+
+        Args:
+            agent_id: Agent唯一标识
+            agent_type: Agent类型 (health/report/reminder)
+            user_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
+            phone_number: 手机号
+            role: 用户角色 (patient/doctor)
+
+        Returns:
+            创建的Agent实例
+        """
         print(f"[AgentManager] 创建新Agent - agent_id={agent_id}, type={agent_type}, user_id={user_id}, phone_number={phone_number}, role={role}")
-        
+
         if agent_type == "health":
             self.agents[agent_id] = HealthAgent(user_id=user_id, phone_number=phone_number, role=role)
         elif agent_type == "report":
@@ -26,7 +39,7 @@ class AgentManager:
             self.agents[agent_id] = ReminderAgent(patient_id=user_id, phone_number=phone_number, role=role)
         else:
             raise ValueError(f"未知的智能体类型: {agent_type}")
-        
+
         print(f"[AgentManager] Agent创建完成 - total_agents={len(self.agents)}")
         return self.agents[agent_id]
     
@@ -34,11 +47,23 @@ class AgentManager:
         """获取智能体实例"""
         return self.agents.get(agent_id)
     
-    def get_or_create_agent(self, session_id: str, agent_type: str = "health", user_id: int = None, phone_number: str = None, role: str = "patient"):
-        """获取或创建会话对应的智能体"""
+    def get_or_create_agent(self, session_id: str, agent_type: str = "health", user_id: Union[str, int, None] = None, phone_number: Optional[str] = None, role: str = "patient"):
+        """
+        获取或创建会话对应的智能体 (支持UUID)
+
+        Args:
+            session_id: 会话ID
+            agent_type: Agent类型 (health/report/reminder)
+            user_id: 用户ID（支持Patient_ID(INT)或Patient_UUID(STR)）
+            phone_number: 手机号
+            role: 用户角色 (patient/doctor)
+
+        Returns:
+            Agent实例
+        """
         print(f"[AgentManager] get_or_create_agent 被调用 - session_id={session_id}, agent_type={agent_type}, user_id={user_id}, phone_number={phone_number}, role={role}")
         print(f"[AgentManager] 当前 active_sessions: {list(self.active_sessions.keys())}")
-        
+
         if session_id not in self.active_sessions:
             print(f"[AgentManager] Session不存在，创建新Agent")
             agent_id = f"{agent_type}_{session_id}"
@@ -46,7 +71,7 @@ class AgentManager:
             self.active_sessions[session_id] = agent_id
         else:
             print(f"[AgentManager] Session已存在，返回已有Agent")
-        
+
         agent_id = self.active_sessions[session_id]
         agent = self.agents[agent_id]
         if hasattr(agent, 'user_id') and hasattr(agent, 'phone_number'):
