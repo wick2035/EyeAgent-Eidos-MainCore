@@ -72,10 +72,11 @@ class PrescriptionService(BaseServiceWithUUID):
                     mr.Chief_Complaint,
                     mr.Diagnosis as Medical_Diagnosis
                 FROM prescription p
-                LEFT JOIN patient pat ON p.Patient_UUID = pat.Patient_UUID
-                LEFT JOIN doctor d ON p.Doctor_UUID = d.Doctor_UUID
-                LEFT JOIN medical_record mr ON p.Medical_Record_UUID = mr.Medical_Record_UUID
-                WHERE p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s
+                LEFT JOIN patient pat ON p.Patient_UUID = pat.Patient_UUID AND pat.Deleted = 0
+                LEFT JOIN doctor d ON p.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
+                LEFT JOIN medical_record mr ON p.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
+                WHERE (p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s)
+                  AND p.Deleted = 0
             """
 
             prescription_main = self.db.execute_one(main_query, (prescription_id_normalized, prescription_id_normalized))
@@ -102,8 +103,9 @@ class PrescriptionService(BaseServiceWithUUID):
                     pd.Subtotal,
                     pd.Special_Instructions
                 FROM prescription_detail pd
-                INNER JOIN prescription p ON pd.Prescription_UUID = p.Prescription_UUID
-                WHERE p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s
+                INNER JOIN prescription p ON pd.Prescription_UUID = p.Prescription_UUID AND p.Deleted = 0
+                WHERE (p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s)
+                  AND pd.Deleted = 0
                 ORDER BY pd.Detail_ID
             """
 
@@ -212,9 +214,10 @@ class PrescriptionService(BaseServiceWithUUID):
                     d.Title as Doctor_Title,
                     pat.Patient_UUID
                 FROM prescription p
-                LEFT JOIN doctor d ON p.Doctor_UUID = d.Doctor_UUID
-                INNER JOIN patient pat ON p.Patient_UUID = pat.Patient_UUID
-                WHERE pat.Patient_UUID = %s OR CAST(pat.Patient_ID AS CHAR) = %s
+                LEFT JOIN doctor d ON p.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
+                INNER JOIN patient pat ON p.Patient_UUID = pat.Patient_UUID AND pat.Deleted = 0
+                WHERE (pat.Patient_UUID = %s OR CAST(pat.Patient_ID AS CHAR) = %s)
+                  AND p.Deleted = 0
                 ORDER BY p.Prescription_Date DESC
                 LIMIT %s
             """
@@ -257,8 +260,8 @@ class PrescriptionService(BaseServiceWithUUID):
             处方摘要列表
         """
         try:
-            # 先获取患者UUID
-            patient_query = "SELECT Patient_UUID FROM patient WHERE Phone_Number = %s"
+            # 先获取患者UUID (仅查询未删除的记录)
+            patient_query = "SELECT Patient_UUID FROM patient WHERE Phone_Number = %s AND Deleted = 0"
             patient_result = self.db.execute_one(patient_query, (phone_number,))
 
             if not patient_result:
@@ -302,8 +305,9 @@ class PrescriptionService(BaseServiceWithUUID):
                     pd.Special_Instructions,
                     p.Prescription_UUID
                 FROM prescription_detail pd
-                INNER JOIN prescription p ON pd.Prescription_UUID = p.Prescription_UUID
-                WHERE p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s
+                INNER JOIN prescription p ON pd.Prescription_UUID = p.Prescription_UUID AND p.Deleted = 0
+                WHERE (p.Prescription_UUID = %s OR CAST(p.Prescription_ID AS CHAR) = %s)
+                  AND pd.Deleted = 0
                 ORDER BY pd.Detail_ID
             """
 

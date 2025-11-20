@@ -42,12 +42,12 @@ class ReportService(BaseServiceWithUUID):
         """
         year = datetime.now().year
         
-        # 查询当年最大的报告编号
+        # 查询当年最大的报告编号 (仅查询未删除的记录)
         query = """
-            SELECT Report_ID 
-            FROM medical_record 
-            WHERE Report_ID LIKE %s 
-            ORDER BY Report_ID DESC 
+            SELECT Report_ID
+            FROM medical_record
+            WHERE Report_ID LIKE %s AND Deleted = 0
+            ORDER BY Report_ID DESC
             LIMIT 1
         """
         result = self.db.execute_one(query, (f"FILE-{year}-%",))
@@ -88,8 +88,9 @@ class ReportService(BaseServiceWithUUID):
                     p.Age as Patient_Age,
                     p.Phone_Number as Patient_Phone
                 FROM medical_record mr
-                LEFT JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
-                WHERE mr.Medical_Record_UUID = %s OR CAST(mr.Medical_Record_ID AS CHAR) = %s
+                LEFT JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                WHERE (mr.Medical_Record_UUID = %s OR CAST(mr.Medical_Record_ID AS CHAR) = %s)
+                  AND mr.Deleted = 0
             """
             result = self.db.execute_one(query, (medical_record_id_normalized, medical_record_id_normalized))
 
@@ -136,8 +137,9 @@ class ReportService(BaseServiceWithUUID):
                     mr.Created_At,
                     p.Patient_UUID
                 FROM medical_record mr
-                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
-                WHERE p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s
+                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                  AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC, mr.Visit_Time DESC
                 LIMIT %s
             """
@@ -180,8 +182,9 @@ class ReportService(BaseServiceWithUUID):
                     p.Patient_ID,
                     p.Patient_UUID
                 FROM medical_record mr
-                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
+                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
                 WHERE p.Phone_Number = %s
+                  AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC, mr.Visit_Time DESC
                 LIMIT %s
             """
@@ -311,12 +314,15 @@ class ReportService(BaseServiceWithUUID):
                 logger.warning("没有需要更新的字段")
                 return False
 
+            # 添加Version字段用于乐观锁
+            update_fields.append("Version = Version + 1")
             params.extend([medical_record_id_normalized, medical_record_id_normalized])
 
             query = f"""
                 UPDATE medical_record
                 SET {', '.join(update_fields)}
-                WHERE Medical_Record_UUID = %s OR CAST(Medical_Record_ID AS CHAR) = %s
+                WHERE (Medical_Record_UUID = %s OR CAST(Medical_Record_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
 
             affected_rows = self.db.execute_update(query, tuple(params))
@@ -422,8 +428,9 @@ class ReportService(BaseServiceWithUUID):
                     mr.Created_At,
                     p.Patient_UUID
                 FROM medical_record mr
-                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
-                WHERE p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s
+                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                  AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC, mr.Visit_Time DESC
                 LIMIT %s
             """
@@ -452,7 +459,7 @@ class ReportService(BaseServiceWithUUID):
             # Normalize all IDs
             normalized_ids = [normalize_id(rid) for rid in record_ids]
 
-            # Build query with UUID support
+            # Build query with UUID support (仅查询未删除的记录)
             placeholders = ', '.join(['%s'] * len(normalized_ids) * 2)
             query = f"""
                 SELECT
@@ -468,8 +475,9 @@ class ReportService(BaseServiceWithUUID):
                     Eye_Exam_Results,
                     Special_Exams
                 FROM medical_record
-                WHERE Medical_Record_UUID IN ({', '.join(['%s'] * len(normalized_ids))})
-                   OR CAST(Medical_Record_ID AS CHAR) IN ({', '.join(['%s'] * len(normalized_ids))})
+                WHERE (Medical_Record_UUID IN ({', '.join(['%s'] * len(normalized_ids))})
+                   OR CAST(Medical_Record_ID AS CHAR) IN ({', '.join(['%s'] * len(normalized_ids))}))
+                  AND Deleted = 0
                 ORDER BY Visit_Date DESC, Visit_Time DESC
             """
             params = normalized_ids + normalized_ids
