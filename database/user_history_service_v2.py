@@ -66,25 +66,82 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
     def get_user_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
         """
         根据手机号查询用户基本信息
-        
+
         Args:
             phone_number: 手机号
-            
+
         Returns:
             用户基本信息字典，如果未找到返回 None
         """
         try:
             query = "SELECT * FROM patient WHERE Phone_Number = %s"
             result = self.db.execute_one(query, (phone_number,))
-            
+
             if result:
                 logger.info(f"成功查询到用户信息: 手机号={phone_number}, 姓名={result.get('Name')}")
             else:
                 logger.warning(f"未找到手机号: {phone_number}")
-            
+
             return result
         except Exception as e:
             logger.error(f"查询用户信息失败: {e}")
+            return None
+
+    # ==================== 医生信息查询 ====================
+
+    def get_doctor_by_id(self, doctor_id: Union[str, int]) -> Optional[Dict[str, Any]]:
+        """
+        根据Doctor_ID或Doctor_UUID查询医生基本信息
+
+        Args:
+            doctor_id: 医生ID（支持INT格式的Doctor_ID或UUID格式的Doctor_UUID）
+
+        Returns:
+            医生基本信息字典，如果未找到返回 None
+        """
+        try:
+            # 规范化ID(兼容INT和UUID)
+            doctor_id_normalized = normalize_id(doctor_id)
+
+            # 优先使用UUID查询,兼容INT ID
+            query = """
+                SELECT * FROM doctor
+                WHERE Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s
+            """
+            result = self.db.execute_one(query, (doctor_id_normalized, doctor_id_normalized))
+
+            if result:
+                logger.info(f"成功查询到医生信息: ID={doctor_id}, 姓名={result.get('Name')}, UUID={result.get('Doctor_UUID')}")
+            else:
+                logger.warning(f"未找到医生ID: {doctor_id}")
+
+            return result
+        except Exception as e:
+            logger.error(f"查询医生信息失败: {e}")
+            return None
+
+    def get_doctor_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
+        """
+        根据手机号查询医生基本信息
+
+        Args:
+            phone_number: 手机号
+
+        Returns:
+            医生基本信息字典，如果未找到返回 None
+        """
+        try:
+            query = "SELECT * FROM doctor WHERE Phone_Number = %s"
+            result = self.db.execute_one(query, (phone_number,))
+
+            if result:
+                logger.info(f"成功查询到医生信息: 手机号={phone_number}, 姓名={result.get('Name')}")
+            else:
+                logger.warning(f"未找到医生手机号: {phone_number}")
+
+            return result
+        except Exception as e:
+            logger.error(f"查询医生信息失败: {e}")
             return None
     
     # ==================== 病例记录查询 ====================
