@@ -14,8 +14,8 @@ def test_import():
     print("="*60)
     
     try:
-        from database import AppointmentService, DatabaseConnection, DB_CONFIG
-        print("✓ 成功导入 AppointmentService")
+        from database import AppointmentServiceV3, DatabaseConnection, DB_CONFIG
+        print("✓ 成功导入 AppointmentServiceV3")
         print("✓ 成功导入 DatabaseConnection")
         print("✓ 成功导入 DB_CONFIG")
         return True
