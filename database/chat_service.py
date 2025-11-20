@@ -39,7 +39,8 @@ class ChatService(BaseServiceWithUUID):
         patient_id: Union[str, int],
         title: Optional[str] = None,
         conversation_type: str = 'general',
-        ai_agent: Optional[str] = None
+        ai_agent: Optional[str] = None,
+        created_by_uuid: str = 'system'
     ) -> Optional[str]:
         """
         为患者创建新对话会话
@@ -49,6 +50,7 @@ class ChatService(BaseServiceWithUUID):
             title: 对话标题(可选)
             conversation_type: 对话类型(general/consultation/appointment/report等)
             ai_agent: AI代理名称(agent_1/agent_2/agent_3等)
+            created_by_uuid: 创建人UUID（默认'system'）
 
         Returns:
             新创建的Chat_UUID，失败返回None
@@ -57,10 +59,10 @@ class ChatService(BaseServiceWithUUID):
             # 规范化patient_id并查询Patient_ID和Patient_UUID
             patient_id_normalized = normalize_id(patient_id)
 
-            # 查询Patient_ID和Patient_UUID
+            # 查询Patient_ID和Patient_UUID (仅查询未删除的记录)
             if patient_id_normalized.isdigit():
                 # 输入是INT，查询UUID
-                patient_query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Patient_ID = %s"
+                patient_query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Patient_ID = %s AND Deleted = 0"
                 patient_result = self.db.execute_one(patient_query, (patient_id_normalized,))
                 if not patient_result:
                     logger.error(f"未找到患者: {patient_id}")
@@ -69,7 +71,7 @@ class ChatService(BaseServiceWithUUID):
                 patient_uuid = patient_result['Patient_UUID']
             else:
                 # 输入是UUID，查询INT
-                patient_query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Patient_UUID = %s"
+                patient_query = "SELECT Patient_ID, Patient_UUID FROM patient WHERE Patient_UUID = %s AND Deleted = 0"
                 patient_result = self.db.execute_one(patient_query, (patient_id_normalized,))
                 if not patient_result:
                     logger.error(f"未找到患者: {patient_id}")
@@ -77,13 +79,13 @@ class ChatService(BaseServiceWithUUID):
                 patient_id_int = patient_result['Patient_ID']
                 patient_uuid = patient_result['Patient_UUID']
 
-            # 使用Patient_ID和Patient_UUID插入 (约束要求Patient_ID NOT NULL)
+            # 使用Patient_ID和Patient_UUID插入 (约束要求Patient_ID NOT NULL, 添加系统字段)
             query = """
                 INSERT INTO chat_conversation
-                (User_Type, Patient_ID, Patient_UUID, Title, Conversation_Type, AI_Agent)
-                VALUES ('patient', %s, %s, %s, %s, %s)
+                (User_Type, Patient_ID, Patient_UUID, Title, Conversation_Type, AI_Agent, Create_By, Version, Deleted)
+                VALUES ('patient', %s, %s, %s, %s, %s, %s, 0, 0)
             """
-            chat_id = self.db.execute_insert(query, (patient_id_int, patient_uuid, title, conversation_type, ai_agent))
+            chat_id = self.db.execute_insert(query, (patient_id_int, patient_uuid, title, conversation_type, ai_agent, created_by_uuid))
 
             # 查询生成的Chat_UUID
             chat_uuid_query = "SELECT Chat_UUID FROM chat_conversation WHERE Chat_ID = %s"
@@ -101,7 +103,8 @@ class ChatService(BaseServiceWithUUID):
         doctor_id: Union[str, int],
         title: Optional[str] = None,
         conversation_type: str = 'general',
-        ai_agent: Optional[str] = None
+        ai_agent: Optional[str] = None,
+        created_by_uuid: str = 'system'
     ) -> Optional[str]:
         """
         为医生创建新对话会话
@@ -111,6 +114,7 @@ class ChatService(BaseServiceWithUUID):
             title: 对话标题(可选)
             conversation_type: 对话类型
             ai_agent: AI代理名称
+            created_by_uuid: 创建人UUID（默认'system'）
 
         Returns:
             新创建的Chat_UUID，失败返回None
@@ -119,10 +123,10 @@ class ChatService(BaseServiceWithUUID):
             # 规范化doctor_id并查询Doctor_ID和Doctor_UUID
             doctor_id_normalized = normalize_id(doctor_id)
 
-            # 查询Doctor_ID和Doctor_UUID
+            # 查询Doctor_ID和Doctor_UUID (仅查询未删除的记录)
             if doctor_id_normalized.isdigit():
                 # 输入是INT，查询UUID
-                doctor_query = "SELECT Doctor_ID, Doctor_UUID FROM doctor WHERE Doctor_ID = %s"
+                doctor_query = "SELECT Doctor_ID, Doctor_UUID FROM doctor WHERE Doctor_ID = %s AND Deleted = 0"
                 doctor_result = self.db.execute_one(doctor_query, (doctor_id_normalized,))
                 if not doctor_result:
                     logger.error(f"未找到医生: {doctor_id}")
@@ -131,7 +135,7 @@ class ChatService(BaseServiceWithUUID):
                 doctor_uuid = doctor_result['Doctor_UUID']
             else:
                 # 输入是UUID，查询INT
-                doctor_query = "SELECT Doctor_ID, Doctor_UUID FROM doctor WHERE Doctor_UUID = %s"
+                doctor_query = "SELECT Doctor_ID, Doctor_UUID FROM doctor WHERE Doctor_UUID = %s AND Deleted = 0"
                 doctor_result = self.db.execute_one(doctor_query, (doctor_id_normalized,))
                 if not doctor_result:
                     logger.error(f"未找到医生: {doctor_id}")
@@ -139,13 +143,13 @@ class ChatService(BaseServiceWithUUID):
                 doctor_id_int = doctor_result['Doctor_ID']
                 doctor_uuid = doctor_result['Doctor_UUID']
 
-            # 使用Doctor_ID和Doctor_UUID插入 (约束要求Doctor_ID NOT NULL)
+            # 使用Doctor_ID和Doctor_UUID插入 (约束要求Doctor_ID NOT NULL, 添加系统字段)
             query = """
                 INSERT INTO chat_conversation
-                (User_Type, Doctor_ID, Doctor_UUID, Title, Conversation_Type, AI_Agent)
-                VALUES ('doctor', %s, %s, %s, %s, %s)
+                (User_Type, Doctor_ID, Doctor_UUID, Title, Conversation_Type, AI_Agent, Create_By, Version, Deleted)
+                VALUES ('doctor', %s, %s, %s, %s, %s, %s, 0, 0)
             """
-            chat_id = self.db.execute_insert(query, (doctor_id_int, doctor_uuid, title, conversation_type, ai_agent))
+            chat_id = self.db.execute_insert(query, (doctor_id_int, doctor_uuid, title, conversation_type, ai_agent, created_by_uuid))
 
             # 查询生成的Chat_UUID
             chat_uuid_query = "SELECT Chat_UUID FROM chat_conversation WHERE Chat_ID = %s"
@@ -185,6 +189,7 @@ class ChatService(BaseServiceWithUUID):
                     SELECT * FROM chat_conversation
                     WHERE User_Type = 'patient'
                     AND (Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s)
+                    AND Deleted = 0
                 """
                 params = [user_id_normalized, user_id_normalized]
             elif user_type == 'doctor':
@@ -192,6 +197,7 @@ class ChatService(BaseServiceWithUUID):
                     SELECT * FROM chat_conversation
                     WHERE User_Type = 'doctor'
                     AND (Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s)
+                    AND Deleted = 0
                 """
                 params = [user_id_normalized, user_id_normalized]
             else:
@@ -228,7 +234,8 @@ class ChatService(BaseServiceWithUUID):
             chat_id_normalized = normalize_id(chat_id)
             query = """
                 SELECT * FROM chat_conversation
-                WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s
+                WHERE (Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (chat_id_normalized, chat_id_normalized))
             if result:
@@ -254,8 +261,10 @@ class ChatService(BaseServiceWithUUID):
         try:
             chat_id_normalized = normalize_id(chat_id)
             query = """
-                UPDATE chat_conversation SET Title = %s
-                WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s
+                UPDATE chat_conversation
+                SET Title = %s, Version = Version + 1
+                WHERE (Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             self.db.execute_update(query, (title, chat_id_normalized, chat_id_normalized))
             logger.info(f"更新对话标题成功: Chat_ID={chat_id}, Title={title}")
@@ -278,8 +287,10 @@ class ChatService(BaseServiceWithUUID):
         try:
             chat_id_normalized = normalize_id(chat_id)
             query = """
-                UPDATE chat_conversation SET Summary = %s
-                WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s
+                UPDATE chat_conversation
+                SET Summary = %s, Version = Version + 1
+                WHERE (Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             self.db.execute_update(query, (summary, chat_id_normalized, chat_id_normalized))
             logger.info(f"更新对话摘要成功: Chat_ID={chat_id}")
@@ -302,8 +313,10 @@ class ChatService(BaseServiceWithUUID):
         try:
             chat_id_normalized = normalize_id(chat_id)
             query = """
-                UPDATE chat_conversation SET Status = %s
-                WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s
+                UPDATE chat_conversation
+                SET Status = %s, Version = Version + 1
+                WHERE (Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             self.db.execute_update(query, (status, chat_id_normalized, chat_id_normalized))
             logger.info(f"更新对话状态成功: Chat_ID={chat_id}, Status={status}")
@@ -368,7 +381,8 @@ class ChatService(BaseServiceWithUUID):
         message_type: str,
         sender_info: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
-        tokens_used: Optional[int] = None
+        tokens_used: Optional[int] = None,
+        created_by_uuid: str = 'system'
     ) -> Optional[str]:
         """
         保存一条消息到对话中
@@ -388,10 +402,11 @@ class ChatService(BaseServiceWithUUID):
             # 规范化chat_id并查询Chat_UUID
             chat_id_normalized = normalize_id(chat_id)
 
-            # 查询Chat_UUID
+            # 查询Chat_UUID (仅查询未删除的记录)
             chat_query = """
                 SELECT Chat_ID, Chat_UUID FROM chat_conversation
-                WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s
+                WHERE (Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             chat_result = self.db.execute_one(chat_query, (chat_id_normalized, chat_id_normalized))
             if not chat_result:
@@ -401,12 +416,13 @@ class ChatService(BaseServiceWithUUID):
             chat_uuid = chat_result['Chat_UUID']
             chat_id_int = chat_result['Chat_ID']
 
-            # 获取当前对话的最大消息序号
+            # 获取当前对话的最大消息序号 (仅查询未删除的记录)
             order_query = """
                 SELECT COALESCE(MAX(Message_Order), 0) + 1 as next_order
                 FROM chat_message cm
                 INNER JOIN chat_conversation cc ON cm.Chat_UUID = cc.Chat_UUID
                 WHERE cc.Chat_UUID = %s
+                  AND cm.Deleted = 0
             """
             result = self.db.execute_one(order_query, (chat_uuid,))
             next_order = result['next_order'] if result else 1
@@ -414,15 +430,15 @@ class ChatService(BaseServiceWithUUID):
             # 将context字典转为JSON字符串
             context_json = json.dumps(context, ensure_ascii=False) if context else None
 
-            # 插入消息（使用Chat_ID和Chat_UUID，Chat_ID是必需的）
+            # 插入消息（使用Chat_ID和Chat_UUID，Chat_ID是必需的，添加系统字段）
             insert_query = """
                 INSERT INTO chat_message
-                (Chat_ID, Chat_UUID, Message_Order, Message_Content, Message_Type, Sender_Info, Context, Tokens_Used)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (Chat_ID, Chat_UUID, Message_Order, Message_Content, Message_Type, Sender_Info, Context, Tokens_Used, Create_By, Version, Deleted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0)
             """
             message_id = self.db.execute_insert(
                 insert_query,
-                (chat_id_int, chat_uuid, next_order, message_content, message_type, sender_info, context_json, tokens_used)
+                (chat_id_int, chat_uuid, next_order, message_content, message_type, sender_info, context_json, tokens_used, created_by_uuid)
             )
 
             # 查询生成的Message_UUID
@@ -430,11 +446,13 @@ class ChatService(BaseServiceWithUUID):
             message_result = self.db.execute_one(message_uuid_query, (message_id,))
             message_uuid = message_result['Message_UUID'] if message_result else None
 
-            # 更新对话的消息总数
+            # 更新对话的消息总数 (使用乐观锁)
             update_query = """
                 UPDATE chat_conversation
-                SET Total_Messages = Total_Messages + 1
+                SET Total_Messages = Total_Messages + 1,
+                    Version = Version + 1
                 WHERE Chat_UUID = %s
+                  AND Deleted = 0
             """
             self.db.execute_update(update_query, (chat_uuid,))
 
@@ -467,7 +485,9 @@ class ChatService(BaseServiceWithUUID):
                 SELECT cm.*, cc.Chat_UUID
                 FROM chat_message cm
                 INNER JOIN chat_conversation cc ON cm.Chat_UUID = cc.Chat_UUID
-                WHERE cc.Chat_UUID = %s OR CAST(cc.Chat_ID AS CHAR) = %s
+                WHERE (cc.Chat_UUID = %s OR CAST(cc.Chat_ID AS CHAR) = %s)
+                  AND cm.Deleted = 0
+                  AND cc.Deleted = 0
                 ORDER BY cm.Message_Order ASC
             """
             params = [chat_id_normalized, chat_id_normalized]
@@ -506,7 +526,8 @@ class ChatService(BaseServiceWithUUID):
             message_id_normalized = normalize_id(message_id)
             query = """
                 SELECT * FROM chat_message
-                WHERE Message_UUID = %s OR CAST(Message_ID AS CHAR) = %s
+                WHERE (Message_UUID = %s OR CAST(Message_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (message_id_normalized, message_id_normalized))
 
@@ -540,8 +561,10 @@ class ChatService(BaseServiceWithUUID):
         try:
             message_id_normalized = normalize_id(message_id)
             query = """
-                UPDATE chat_message SET Message_Content = %s
-                WHERE Message_UUID = %s OR CAST(Message_ID AS CHAR) = %s
+                UPDATE chat_message
+                SET Message_Content = %s, Version = Version + 1
+                WHERE (Message_UUID = %s OR CAST(Message_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             self.db.execute_update(query, (new_content, message_id_normalized, message_id_normalized))
             logger.info(f"更新消息内容成功: Message_ID={message_id}")
@@ -576,11 +599,14 @@ class ChatService(BaseServiceWithUUID):
             """
             self.db.execute_update(query, (message_id_normalized, message_id_normalized))
 
-            # 更新对话的消息总数
+            # 更新对话的消息总数 (使用乐观锁)
             update_query = """
                 UPDATE chat_conversation
-                SET Total_Messages = Total_Messages - 1
-                WHERE Chat_UUID = %s AND Total_Messages > 0
+                SET Total_Messages = Total_Messages - 1,
+                    Version = Version + 1
+                WHERE Chat_UUID = %s
+                  AND Total_Messages > 0
+                  AND Deleted = 0
             """
             self.db.execute_update(update_query, (chat_uuid,))
 
@@ -613,11 +639,13 @@ class ChatService(BaseServiceWithUUID):
             chats = self.get_user_chats(user_type, user_id, status='active', limit=limit)
 
             for chat in chats:
-                # 获取最后一条消息
+                # 获取最后一条消息 (仅查询未删除的记录)
                 query = """
                     SELECT cm.* FROM chat_message cm
                     INNER JOIN chat_conversation cc ON cm.Chat_UUID = cc.Chat_UUID
                     WHERE cc.Chat_UUID = %s
+                      AND cm.Deleted = 0
+                      AND cc.Deleted = 0
                     ORDER BY cm.Message_Order DESC
                     LIMIT 1
                 """
@@ -659,7 +687,9 @@ class ChatService(BaseServiceWithUUID):
                     MAX(cm.Created_At) as last_message_time
                 FROM chat_message cm
                 INNER JOIN chat_conversation cc ON cm.Chat_UUID = cc.Chat_UUID
-                WHERE cc.Chat_UUID = %s OR CAST(cc.Chat_ID AS CHAR) = %s
+                WHERE (cc.Chat_UUID = %s OR CAST(cc.Chat_ID AS CHAR) = %s)
+                  AND cm.Deleted = 0
+                  AND cc.Deleted = 0
                 GROUP BY cc.Chat_ID, cc.Chat_UUID
             """
             result = self.db.execute_one(query, (chat_id_normalized, chat_id_normalized))
@@ -693,7 +723,9 @@ class ChatService(BaseServiceWithUUID):
                 SELECT cm.* FROM chat_message cm
                 INNER JOIN chat_conversation cc ON cm.Chat_UUID = cc.Chat_UUID
                 WHERE (cc.Chat_UUID = %s OR CAST(cc.Chat_ID AS CHAR) = %s)
-                AND cm.Message_Content LIKE %s
+                  AND cm.Message_Content LIKE %s
+                  AND cm.Deleted = 0
+                  AND cc.Deleted = 0
             """
             params = [chat_id_normalized, chat_id_normalized, f'%{keyword}%']
 
@@ -735,7 +767,8 @@ class ChatService(BaseServiceWithUUID):
             patient_id_normalized = normalize_id(patient_id)
             query = """
                 SELECT Patient_ID FROM patient
-                WHERE Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s
+                WHERE (Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (patient_id_normalized, patient_id_normalized))
             is_valid = result is not None
@@ -762,7 +795,8 @@ class ChatService(BaseServiceWithUUID):
             doctor_id_normalized = normalize_id(doctor_id)
             query = """
                 SELECT Doctor_ID FROM doctor
-                WHERE Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s
+                WHERE (Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (doctor_id_normalized, doctor_id_normalized))
             is_valid = result is not None

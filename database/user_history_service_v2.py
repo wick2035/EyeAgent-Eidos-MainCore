@@ -46,10 +46,11 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             # 规范化ID(兼容INT和UUID)
             patient_id_normalized = normalize_id(patient_id)
 
-            # 优先使用UUID查询,兼容INT ID
+            # 优先使用UUID查询,兼容INT ID (仅查询未删除的记录)
             query = """
                 SELECT * FROM patient
-                WHERE Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s
+                WHERE (Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (patient_id_normalized, patient_id_normalized))
 
@@ -74,7 +75,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             用户基本信息字典，如果未找到返回 None
         """
         try:
-            query = "SELECT * FROM patient WHERE Phone_Number = %s"
+            query = "SELECT * FROM patient WHERE Phone_Number = %s AND Deleted = 0"
             result = self.db.execute_one(query, (phone_number,))
 
             if result:
@@ -103,10 +104,11 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             # 规范化ID(兼容INT和UUID)
             doctor_id_normalized = normalize_id(doctor_id)
 
-            # 优先使用UUID查询,兼容INT ID
+            # 优先使用UUID查询,兼容INT ID (仅查询未删除的记录)
             query = """
                 SELECT * FROM doctor
-                WHERE Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s
+                WHERE (Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s)
+                  AND Deleted = 0
             """
             result = self.db.execute_one(query, (doctor_id_normalized, doctor_id_normalized))
 
@@ -131,7 +133,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             医生基本信息字典，如果未找到返回 None
         """
         try:
-            query = "SELECT * FROM doctor WHERE Phone_Number = %s"
+            query = "SELECT * FROM doctor WHERE Phone_Number = %s AND Deleted = 0"
             result = self.db.execute_one(query, (phone_number,))
 
             if result:
@@ -174,8 +176,9 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     mr.Family_History,
                     mr.Treatment_Plan
                 FROM medical_record mr
-                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
-                WHERE p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s
+                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                  AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC
                 LIMIT %s
             """
@@ -213,8 +216,9 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     mr.Family_History,
                     mr.Treatment_Plan
                 FROM medical_record mr
-                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID
+                INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
                 WHERE p.Phone_Number = %s
+                  AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC
                 LIMIT %s
             """
@@ -259,10 +263,11 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     mr.Chief_Complaint as Medical_Record_Chief_Complaint,
                     mr.Visit_Date as Medical_Record_Visit_Date
                 FROM appointment a
-                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID
-                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID
-                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID
-                WHERE p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s
+                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
+                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
+                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                  AND a.Deleted = 0
                 ORDER BY a.Appointment_Time DESC
                 LIMIT %s
             """
@@ -304,11 +309,12 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     d.Specialty as Doctor_Specialty,
                     mr.Chief_Complaint as Medical_Record_Chief_Complaint
                 FROM appointment a
-                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID
-                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID
-                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID
+                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
+                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
                 WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
                   AND DATE(a.Appointment_Time) < CURDATE()
+                  AND a.Deleted = 0
                 ORDER BY a.Appointment_Time DESC
                 LIMIT %s
             """
@@ -350,11 +356,12 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     d.Specialty as Doctor_Specialty,
                     mr.Chief_Complaint as Medical_Record_Chief_Complaint
                 FROM appointment a
-                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID
-                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID
-                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID
+                INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
+                LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
+                LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
                 WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
                   AND DATE(a.Appointment_Time) >= CURDATE()
+                  AND a.Deleted = 0
                 ORDER BY a.Appointment_Time ASC
                 LIMIT %s
             """
