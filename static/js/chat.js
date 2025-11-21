@@ -554,15 +554,16 @@ function displayChatHistory(chats) {
     let html = '';
     chats.forEach(chat => {
         const statusClass = `status-${chat.Status || 'active'}`;
-        const title = chat.Title || `对话 #${chat.Chat_ID}`;
+        const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
+        const title = chat.Title || `对话 #${chatId}`;
         const agent = chat.AI_Agent || '-';
         const type = chat.Conversation_Type || 'general';
         const messageCount = chat.Total_Messages || 0;
         const time = formatHistoryTime(chat.Created_At);
-        const isCurrent = sessionId && chat.Chat_ID === parseInt(sessionId);
+        const isCurrent = sessionId && chatId === sessionId;
 
         html += `
-            <div class="history-item ${isCurrent ? 'current' : ''}" onclick="loadHistoryChat(${chat.Chat_ID})">
+            <div class="history-item ${isCurrent ? 'current' : ''}" onclick="loadHistoryChat('${chatId}')">
                 <div class="history-item-header">
                     <span class="history-title">${escapeHtml(title)}</span>
                     <span class="history-status ${statusClass}">${chat.Status || 'active'}</span>
