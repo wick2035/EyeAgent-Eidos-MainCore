@@ -1,6 +1,6 @@
 """
 医生排班管理服务 (Doctor Schedule Service)
-V3 版本 - 支持灵活的排班管理和时间段生成
+V4 版本 - UUID适配版本,支持灵活的排班管理和时间段生成
 
 功能：
 1. 创建和管理医生每周工作时间模板 (doctor_working_schedule)
@@ -9,20 +9,29 @@ V3 版本 - 支持灵活的排班管理和时间段生成
 4. 调整医生接诊容量和时间段配置
 5. 查询医生可用时间段
 
+Migration: 已适配UUID主键格式
 Created: 2025-11-19
+Updated: 2025-11-21 (UUID Migration)
 """
 
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, date, time, timedelta
 import pymysql
-from database.db_connection import get_db_connection
+from database.db_connection import DatabaseConnection
+from database.base_service import BaseServiceWithUUID
 
 
-class DoctorScheduleService:
-    """医生排班管理服务"""
+class DoctorScheduleService(BaseServiceWithUUID):
+    """医生排班管理服务 - UUID版本"""
 
     def __init__(self):
-        pass
+        super().__init__()
+        self.db = DatabaseConnection()
+
+    def close(self):
+        """关闭数据库连接"""
+        if hasattr(self, 'db'):
+            self.db.close()
 
     # ========================================
     # 1. 每周排班模板管理
@@ -30,14 +39,14 @@ class DoctorScheduleService:
 
     def create_weekly_schedule(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         schedule_data: List[Dict[str, any]]
     ) -> Dict[str, any]:
         """
         创建医生的每周工作时间模板
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             schedule_data: 排班数据列表，格式：
                 [
                     {
@@ -54,14 +63,14 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             # 验证医生是否存在
-            cursor.execute("SELECT Name FROM doctor WHERE Doctor_ID = %s", (doctor_id,))
+            cursor.execute("SELECT Name FROM doctor WHERE Doctor_UUID = %s", (doctor_uuid,))
             doctor = cursor.fetchone()
             if not doctor:
-                return {"success": False, "message": f"医生ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生UUID {doctor_uuid} 不存在"}
 
             created_count = 0
 
@@ -75,17 +84,20 @@ class DoctorScheduleService:
                 if day_of_week is None or not shift_start or not shift_end:
                     continue
 
+                # 生成Schedule_UUID
+                schedule_uuid = self.generate_uuid()
+
                 # 插入排班记录（使用 ON DUPLICATE KEY UPDATE 处理重复）
                 sql = """
                     INSERT INTO doctor_working_schedule
-                    (Doctor_ID, Day_of_Week, Shift_Start_Time, Shift_End_Time, Is_Active)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (Schedule_UUID, Doctor_UUID, Day_of_Week, Shift_Start_Time, Shift_End_Time, Is_Active)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         Shift_End_Time = VALUES(Shift_End_Time),
                         Is_Active = VALUES(Is_Active),
                         Updated_At = CURRENT_TIMESTAMP
                 """
-                cursor.execute(sql, (doctor_id, day_of_week, shift_start, shift_end, is_active))
+                cursor.execute(sql, (schedule_uuid, doctor_uuid, day_of_week, shift_start, shift_end, is_active))
                 created_count += 1
 
             conn.commit()
@@ -104,12 +116,12 @@ class DoctorScheduleService:
             if conn:
                 conn.close()
 
-    def get_weekly_schedule(self, doctor_id: int) -> Dict[str, any]:
+    def get_weekly_schedule(self, doctor_uuid: str) -> Dict[str, any]:
         """
         获取医生的每周排班模板
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
 
         Returns:
             {
@@ -120,23 +132,23 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             # 获取医生信息
-            cursor.execute("SELECT Name FROM doctor WHERE Doctor_ID = %s", (doctor_id,))
+            cursor.execute("SELECT Name FROM doctor WHERE Doctor_UUID = %s", (doctor_uuid,))
             doctor = cursor.fetchone()
             if not doctor:
-                return {"success": False, "message": f"医生ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生UUID {doctor_uuid} 不存在"}
 
             # 获取排班记录
             sql = """
-                SELECT Schedule_ID, Day_of_Week, Shift_Start_Time, Shift_End_Time, Is_Active
+                SELECT Schedule_UUID, Day_of_Week, Shift_Start_Time, Shift_End_Time, Is_Active
                 FROM doctor_working_schedule
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
                 ORDER BY Day_of_Week, Shift_Start_Time
             """
-            cursor.execute(sql, (doctor_id,))
+            cursor.execute(sql, (doctor_uuid,))
             rows = cursor.fetchall()
 
             schedule_list = []
@@ -144,7 +156,7 @@ class DoctorScheduleService:
 
             for row in rows:
                 schedule_list.append({
-                    "schedule_id": row['Schedule_ID'],
+                    "schedule_uuid": row['Schedule_UUID'],
                     "day_of_week": row['Day_of_Week'],
                     "day_name": day_names[row['Day_of_Week']],
                     "shift_start_time": str(row['Shift_Start_Time']),
@@ -166,14 +178,14 @@ class DoctorScheduleService:
 
     def update_schedule_status(
         self,
-        schedule_id: int,
+        schedule_uuid: str,
         is_active: bool
     ) -> Dict[str, any]:
         """
         启用或禁用某个排班规则
 
         Args:
-            schedule_id: 排班ID
+            schedule_uuid: 排班UUID
             is_active: 是否启用
 
         Returns:
@@ -181,19 +193,19 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             sql = """
                 UPDATE doctor_working_schedule
                 SET Is_Active = %s, Updated_At = CURRENT_TIMESTAMP
-                WHERE Schedule_ID = %s
+                WHERE Schedule_UUID = %s
             """
-            cursor.execute(sql, (is_active, schedule_id))
+            cursor.execute(sql, (is_active, schedule_uuid))
             conn.commit()
 
             status = "启用" if is_active else "禁用"
-            return {"success": True, "message": f"已{status}排班规则 ID {schedule_id}"}
+            return {"success": True, "message": f"已{status}排班规则 UUID {schedule_uuid}"}
 
         except Exception as e:
             if conn:
@@ -203,29 +215,29 @@ class DoctorScheduleService:
             if conn:
                 conn.close()
 
-    def delete_schedule(self, schedule_id: int) -> Dict[str, any]:
+    def delete_schedule(self, schedule_uuid: str) -> Dict[str, any]:
         """
         删除某个排班规则
 
         Args:
-            schedule_id: 排班ID
+            schedule_uuid: 排班UUID
 
         Returns:
             {"success": bool, "message": str}
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
-            sql = "DELETE FROM doctor_working_schedule WHERE Schedule_ID = %s"
-            cursor.execute(sql, (schedule_id,))
+            sql = "DELETE FROM doctor_working_schedule WHERE Schedule_UUID = %s"
+            cursor.execute(sql, (schedule_uuid,))
             conn.commit()
 
             if cursor.rowcount > 0:
-                return {"success": True, "message": f"已删除排班规则 ID {schedule_id}"}
+                return {"success": True, "message": f"已删除排班规则 UUID {schedule_uuid}"}
             else:
-                return {"success": False, "message": f"排班规则 ID {schedule_id} 不存在"}
+                return {"success": False, "message": f"排班规则 UUID {schedule_uuid} 不存在"}
 
         except Exception as e:
             if conn:
@@ -241,7 +253,7 @@ class DoctorScheduleService:
 
     def add_schedule_exception(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         exception_date: date,
         exception_type: str,
         is_full_day: bool = True,
@@ -253,7 +265,7 @@ class DoctorScheduleService:
         添加排班例外（请假、节假日、临时调整）
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             exception_date: 例外日期
             exception_type: 类型（"请假"/"节假日"/"临时调整"）
             is_full_day: 是否全天
@@ -262,37 +274,38 @@ class DoctorScheduleService:
             reason: 原因说明
 
         Returns:
-            {"success": bool, "message": str, "exception_id": int}
+            {"success": bool, "message": str, "exception_uuid": str}
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             # 验证医生是否存在
-            cursor.execute("SELECT Name FROM doctor WHERE Doctor_ID = %s", (doctor_id,))
+            cursor.execute("SELECT Name FROM doctor WHERE Doctor_UUID = %s", (doctor_uuid,))
             doctor = cursor.fetchone()
             if not doctor:
-                return {"success": False, "message": f"医生ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生UUID {doctor_uuid} 不存在"}
+
+            # 生成Exception_UUID
+            exception_uuid = self.generate_uuid()
 
             sql = """
                 INSERT INTO doctor_schedule_exceptions
-                (Doctor_ID, Exception_Date, Exception_Type, Is_Full_Day,
+                (Exception_UUID, Doctor_UUID, Exception_Date, Exception_Type, Is_Full_Day,
                  Start_Time, End_Time, Reason)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
             cursor.execute(sql, (
-                doctor_id, exception_date, exception_type, is_full_day,
+                exception_uuid, doctor_uuid, exception_date, exception_type, is_full_day,
                 start_time, end_time, reason
             ))
             conn.commit()
 
-            exception_id = cursor.lastrowid
-
             return {
                 "success": True,
                 "message": f"已为医生 {doctor['Name']} 添加 {exception_type}",
-                "exception_id": exception_id
+                "exception_uuid": exception_uuid
             }
 
         except Exception as e:
@@ -305,7 +318,7 @@ class DoctorScheduleService:
 
     def get_schedule_exceptions(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None
     ) -> Dict[str, any]:
@@ -313,7 +326,7 @@ class DoctorScheduleService:
         查询医生的排班例外
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             start_date: 查询起始日期（可选）
             end_date: 查询结束日期（可选）
 
@@ -322,16 +335,16 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             sql = """
-                SELECT Exception_ID, Exception_Date, Exception_Type, Is_Full_Day,
+                SELECT Exception_UUID, Exception_Date, Exception_Type, Is_Full_Day,
                        Start_Time, End_Time, Reason
                 FROM doctor_schedule_exceptions
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
             """
-            params = [doctor_id]
+            params = [doctor_uuid]
 
             if start_date:
                 sql += " AND Exception_Date >= %s"
@@ -349,7 +362,7 @@ class DoctorScheduleService:
             exceptions = []
             for row in rows:
                 exceptions.append({
-                    "exception_id": row['Exception_ID'],
+                    "exception_uuid": row['Exception_UUID'],
                     "exception_date": str(row['Exception_Date']),
                     "exception_type": row['Exception_Type'],
                     "is_full_day": bool(row['Is_Full_Day']),
@@ -366,21 +379,21 @@ class DoctorScheduleService:
             if conn:
                 conn.close()
 
-    def delete_schedule_exception(self, exception_id: int) -> Dict[str, any]:
+    def delete_schedule_exception(self, exception_uuid: str) -> Dict[str, any]:
         """删除排班例外"""
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
-            sql = "DELETE FROM doctor_schedule_exceptions WHERE Exception_ID = %s"
-            cursor.execute(sql, (exception_id,))
+            sql = "DELETE FROM doctor_schedule_exceptions WHERE Exception_UUID = %s"
+            cursor.execute(sql, (exception_uuid,))
             conn.commit()
 
             if cursor.rowcount > 0:
-                return {"success": True, "message": f"已删除例外记录 ID {exception_id}"}
+                return {"success": True, "message": f"已删除例外记录 UUID {exception_uuid}"}
             else:
-                return {"success": False, "message": f"例外记录 ID {exception_id} 不存在"}
+                return {"success": False, "message": f"例外记录 UUID {exception_uuid} 不存在"}
 
         except Exception as e:
             if conn:
@@ -396,14 +409,14 @@ class DoctorScheduleService:
 
     def update_doctor_capacity(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         max_patients_per_slot: int
     ) -> Dict[str, any]:
         """
         更新医生每时段接诊人数上限
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             max_patients_per_slot: 每时段最大患者数
 
         Returns:
@@ -411,7 +424,7 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             if max_patients_per_slot <= 0:
@@ -421,18 +434,18 @@ class DoctorScheduleService:
                 UPDATE doctor
                 SET default_max_patients_per_slot = %s,
                     Updated_At = CURRENT_TIMESTAMP
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
             """
-            cursor.execute(sql, (max_patients_per_slot, doctor_id))
+            cursor.execute(sql, (max_patients_per_slot, doctor_uuid))
             conn.commit()
 
             if cursor.rowcount > 0:
                 return {
                     "success": True,
-                    "message": f"已更新医生 ID {doctor_id} 的接诊人数为 {max_patients_per_slot} 人/时段"
+                    "message": f"已更新医生 UUID {doctor_uuid} 的接诊人数为 {max_patients_per_slot} 人/时段"
                 }
             else:
-                return {"success": False, "message": f"医生 ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生 UUID {doctor_uuid} 不存在"}
 
         except Exception as e:
             if conn:
@@ -444,14 +457,14 @@ class DoctorScheduleService:
 
     def update_slot_duration(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         duration_minutes: int
     ) -> Dict[str, any]:
         """
         更新医生的时间段时长
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             duration_minutes: 时间段时长（分钟）
 
         Returns:
@@ -459,7 +472,7 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             if duration_minutes not in [30, 60, 90, 120]:
@@ -469,18 +482,18 @@ class DoctorScheduleService:
                 UPDATE doctor
                 SET default_slot_duration_minutes = %s,
                     Updated_At = CURRENT_TIMESTAMP
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
             """
-            cursor.execute(sql, (duration_minutes, doctor_id))
+            cursor.execute(sql, (duration_minutes, doctor_uuid))
             conn.commit()
 
             if cursor.rowcount > 0:
                 return {
                     "success": True,
-                    "message": f"已更新医生 ID {doctor_id} 的时间段时长为 {duration_minutes} 分钟"
+                    "message": f"已更新医生 UUID {doctor_uuid} 的时间段时长为 {duration_minutes} 分钟"
                 }
             else:
-                return {"success": False, "message": f"医生 ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生 UUID {doctor_uuid} 不存在"}
 
         except Exception as e:
             if conn:
@@ -492,14 +505,14 @@ class DoctorScheduleService:
 
     def update_booking_window(
         self,
-        doctor_id: int,
+        doctor_uuid: str,
         window_days: int
     ) -> Dict[str, any]:
         """
         更新医生的预约开放天数
 
         Args:
-            doctor_id: 医生ID
+            doctor_uuid: 医生UUID
             window_days: 预约开放天数（今天起往后几天）
 
         Returns:
@@ -507,7 +520,7 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             if window_days < 1 or window_days > 30:
@@ -517,18 +530,18 @@ class DoctorScheduleService:
                 UPDATE doctor
                 SET booking_window_days = %s,
                     Updated_At = CURRENT_TIMESTAMP
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
             """
-            cursor.execute(sql, (window_days, doctor_id))
+            cursor.execute(sql, (window_days, doctor_uuid))
             conn.commit()
 
             if cursor.rowcount > 0:
                 return {
                     "success": True,
-                    "message": f"已更新医生 ID {doctor_id} 的预约开放天数为 {window_days} 天"
+                    "message": f"已更新医生 UUID {doctor_uuid} 的预约开放天数为 {window_days} 天"
                 }
             else:
-                return {"success": False, "message": f"医生 ID {doctor_id} 不存在"}
+                return {"success": False, "message": f"医生 UUID {doctor_uuid} 不存在"}
 
         except Exception as e:
             if conn:
@@ -542,13 +555,13 @@ class DoctorScheduleService:
     # 4. 辅助方法
     # ========================================
 
-    def get_doctor_config(self, doctor_id: int) -> Optional[Dict[str, any]]:
+    def get_doctor_config(self, doctor_uuid: str) -> Optional[Dict[str, any]]:
         """
         获取医生的配置信息
 
         Returns:
             {
-                "doctor_id": int,
+                "doctor_uuid": str,
                 "name": str,
                 "specialty": str,
                 "slot_duration": int,  # 分钟
@@ -559,24 +572,24 @@ class DoctorScheduleService:
         """
         conn = None
         try:
-            conn = get_db_connection()
+            conn = self.db.get_connection()
             cursor = conn.cursor()
 
             sql = """
-                SELECT Doctor_ID, Name, Specialty, Title,
+                SELECT Doctor_UUID, Name, Specialty, Title,
                        default_slot_duration_minutes, default_max_patients_per_slot,
                        booking_window_days, is_active
                 FROM doctor
-                WHERE Doctor_ID = %s
+                WHERE Doctor_UUID = %s
             """
-            cursor.execute(sql, (doctor_id,))
+            cursor.execute(sql, (doctor_uuid,))
             row = cursor.fetchone()
 
             if not row:
                 return None
 
             return {
-                "doctor_id": row['Doctor_ID'],
+                "doctor_uuid": row['Doctor_UUID'],
                 "name": row['Name'],
                 "specialty": row['Specialty'],
                 "title": row['Title'],

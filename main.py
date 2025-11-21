@@ -147,7 +147,7 @@ async def chat(message: ChatMessage):
                 "created_at": None,
                 "role": role,
                 "current_agent": None,
-                "chat_id": None  # 数据库中的Chat_ID
+                "chat_id": None  # 数据库中的Chat_UUID
             }
 
             # 在数据库中创建对话会话 (支持UUID)
@@ -166,8 +166,8 @@ async def chat(message: ChatMessage):
                         if not patient_id and message.phone_number:
                             user_info = user_service.get_user_by_phone(message.phone_number)
                             if user_info:
-                                # 优先使用Patient_UUID，如果没有则使用Patient_ID
-                                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+                                # 使用Patient_UUID
+                                patient_id = user_info.get('Patient_UUID')
 
                     elif role == "doctor":
                         # 查询医生信息
@@ -175,8 +175,8 @@ async def chat(message: ChatMessage):
                         if not doctor_id and message.phone_number:
                             doctor_info = user_service.get_doctor_by_phone(message.phone_number)
                             if doctor_info:
-                                # 优先使用Doctor_UUID，如果没有则使用Doctor_ID
-                                doctor_id = doctor_info.get('Doctor_UUID') or normalize_id(doctor_info['Doctor_ID'])
+                                # 使用Doctor_UUID
+                                doctor_id = doctor_info.get('Doctor_UUID')
 
                     # 根据角色创建对话
                     if role == "patient" and patient_id:
@@ -188,7 +188,7 @@ async def chat(message: ChatMessage):
                         )
                         if chat_id:
                             sessions[session_id]["chat_id"] = chat_id
-                            print(f"[对话历史] 创建患者对话: Chat_ID={chat_id}, Patient_ID={patient_id}")
+                            print(f"[对话历史] 创建患者对话: Chat_UUID={chat_id}, Patient_UUID={patient_id}")
 
                     elif role == "doctor" and doctor_id:
                         chat_id = chat_service.create_chat_for_doctor(
@@ -199,7 +199,7 @@ async def chat(message: ChatMessage):
                         )
                         if chat_id:
                             sessions[session_id]["chat_id"] = chat_id
-                            print(f"[对话历史] 创建医生对话: Chat_ID={chat_id}, Doctor_ID={doctor_id}")
+                            print(f"[对话历史] 创建医生对话: Chat_UUID={chat_id}, Doctor_UUID={doctor_id}")
 
                     else:
                         print(f"[对话历史] 无法创建对话: role={role}, patient_id={patient_id}, doctor_id={doctor_id}")
@@ -303,6 +303,22 @@ async def chat(message: ChatMessage):
             response = agent.chat(message.message)
             is_completed = agent.is_completed()
             stage = agent.stage.value
+
+            # 🔥 最终防线：再次检查并清理过早的预约确认（第三层保护）
+            if hasattr(agent, 'needs_appointment') and agent.needs_appointment:
+                if hasattr(agent, 'appointment_confirmed') and not agent.appointment_confirmed:
+                    import re
+                    premature_patterns = [
+                        (r'(?:您的)?预约已经?安排好(?:了)?', '我正在为您安排预约'),
+                        (r'预约成功', '正在为您安排预约'),
+                        (r'预约已完成', '正在为您处理预约'),
+                        (r'(?:已为您|为您)安排好预约', '正在为您安排预约'),
+                    ]
+                    for pattern, replacement in premature_patterns:
+                        if re.search(pattern, response):
+                            print(f"[main.py 最终防线] 检测到过早预约确认，正在清理: {pattern}")
+                            response = re.sub(pattern, replacement, response)
+
         elif agent_type == "reminder":
             response, is_completed = agent.chat(message.message)
             stage = agent.stage.value
@@ -354,11 +370,11 @@ async def chat(message: ChatMessage):
                 if chat_info and not chat_info.get('AI_Agent'):
                     from database.db_connection import DatabaseConnection
                     db = DatabaseConnection()
-                    # 支持UUID和INT ID查询
+                    # 只使用UUID查询
                     chat_id_for_update = normalize_id(chat_id)
                     db.execute_update(
-                        "UPDATE chat_conversation SET AI_Agent = %s WHERE Chat_UUID = %s OR CAST(Chat_ID AS CHAR) = %s",
-                        (f'agent_{agent_type}', chat_id_for_update, chat_id_for_update)
+                        "UPDATE chat_conversation SET AI_Agent = %s WHERE Chat_UUID = %s",
+                        (f'agent_{agent_type}', chat_id_for_update)
                     )
                     db.close()
 
@@ -369,7 +385,7 @@ async def chat(message: ChatMessage):
                     chat_service.update_chat_title(chat_id, title)
                     print(f"[对话历史] 更新对话标题: {title}")
 
-                print(f"[对话历史] 消息已保存到数据库: Chat_ID={chat_id}")
+                print(f"[对话历史] 消息已保存到数据库: Chat_UUID={chat_id}")
 
             except Exception as e:
                 print(f"[对话历史] 保存消息失败: {e}")
@@ -378,68 +394,111 @@ async def chat(message: ChatMessage):
 
         print(f"[主程序] 对话完成状态: {is_completed}")
 
-        # 3. 对于health agent,在信息收集完成后(APPOINTMENT_BOOKING阶段)尝试预约
-        # 关键改变:不等到完全completed才处理预约,而是在预约阶段就处理
+        # 3. 对于health agent,在信息收集完成后尝试预约
+        # 【修复】不依赖严格的阶段匹配，而是检查是否收集了足够的预约信息
         if agent_type == "health" and hasattr(agent, 'needs_appointment') and agent.needs_appointment:
-            # 【修复】必须在APPOINTMENT_BOOKING阶段才能执行预约,确保信息已收集完整
-            if (hasattr(agent, 'appointment_confirmed') and not agent.appointment_confirmed 
-                and stage == "appointment_booking"):  # 添加阶段检查
-                try:
-                    print("[调试] 检测到需要预约且尚未确认,且已到预约阶段,开始处理预约...")
+            # 检查是否已确认预约
+            if hasattr(agent, 'appointment_confirmed') and not agent.appointment_confirmed:
+                # 获取患者数据检查是否有足够信息
+                patient_data = agent.get_patient_data()
 
-                    # 获取患者数据
-                    patient_data = agent.get_patient_data()
+                # 检查关键预约信息是否齐全
+                patient_info = patient_data.get('patient_info', {})
+                has_basic_info = all([
+                    patient_info.get('name'),
+                    patient_info.get('age'),
+                    patient_info.get('gender'),
+                    patient_info.get('contact')
+                ])
+                has_appointment_time = bool(patient_data.get('appointment', {}).get('preferred_time'))
 
-                    print(f"[调试] 患者数据: {json.dumps(patient_data, ensure_ascii=False)}")
+                # 如果基本信息和预约时间都有，就处理预约（不再限制阶段）
+                if has_basic_info and has_appointment_time:
+                    print(f"[调试] 检测到足够的预约信息 - 基本信息: {has_basic_info}, 预约时间: {has_appointment_time}, 当前阶段: {stage}")
+                    print("[调试] 开始处理预约...")
 
-                    # 调用预约服务
-                    db_result = appointment_service.process_appointment(patient_data)
+                    try:
+                        print(f"[调试] 患者数据: {json.dumps(patient_data, ensure_ascii=False)}")
 
-                    print(f"[数据库] 预约处理结果: {db_result}")
+                        # 调用预约服务
+                        db_result = appointment_service.process_appointment(patient_data)
 
-                    # 关键:将预约结果反馈给agent
-                    agent.set_appointment_result(
-                        success=db_result['success'],
-                        message=db_result['message'],
-                        appointment_info=db_result if db_result['success'] else None
-                    )
+                        print(f"[数据库] 预约处理结果: {db_result}")
 
-                    if db_result['success']:
-                        # 预约成功
-                        sessions[session_id]["appointment_result"] = db_result
+                        # 关键:将预约结果反馈给agent
+                        agent.set_appointment_result(
+                            success=db_result['success'],
+                            message=db_result['message'],
+                            appointment_info=db_result if db_result['success'] else None
+                        )
 
-                        # 【修复】使用正确的键路径访问patient_id
-                        # 在响应中添加预约成功信息
-                        response += f"\n\n✅ {db_result['message']}"
-                        response += f"\n预约ID：{db_result['appointment_id']}"
-                        if 'appointment_details' in db_result and 'patient_id' in db_result['appointment_details']:
-                            response += f"\n患者ID：{db_result['appointment_details']['patient_id']}"
+                        if db_result['success']:
+                            # 预约成功
+                            sessions[session_id]["appointment_result"] = db_result
 
-                        # 预约成功后,重新检查完成状态(agent可能已经转入COMPLETED)
-                        is_completed = agent.is_completed()
-                        print(f"[主程序] 预约成功后,对话完成状态: {is_completed}")
-                    else:
-                        # 预约失败,agent会保持在APPOINTMENT_BOOKING阶段
-                        # 获取失败响应并追加到回复中
-                        failure_response = agent.get_appointment_failure_response()
-                        if failure_response:
-                            response = failure_response
+                            # 【修复】使用正确的键路径访问patient_id
+                            # 在响应中添加预约成功信息
+                            response += f"\n\n✅ {db_result['message']}"
+                            response += f"\n预约ID：{db_result['appointment_id']}"
+                            if 'appointment_details' in db_result and 'patient_id' in db_result['appointment_details']:
+                                response += f"\n患者ID：{db_result['appointment_details']['patient_id']}"
 
-                        # 确保对话未完成,继续收集信息
+                            # 【新增】自动创建预约提醒
+                            try:
+                                from datetime import datetime
+                                appointment_details = db_result.get('appointment_details', {})
+                                patient_uuid = appointment_details.get('patient_id')
+                                appointment_uuid = db_result.get('appointment_id')
+                                appointment_time_str = appointment_details.get('appointment_time')
+
+                                if patient_uuid and appointment_uuid and appointment_time_str:
+                                    # 解析预约时间
+                                    appointment_time = datetime.strptime(appointment_time_str, '%Y-%m-%d %H:%M')
+
+                                    # 创建预约提醒（提前1天）
+                                    reminder_result = reminder_service.create_appointment_reminder(
+                                        patient_uuid=patient_uuid,
+                                        appointment_uuid=appointment_uuid,
+                                        appointment_time=appointment_time,
+                                        advance_days=1
+                                    )
+
+                                    if reminder_result['success']:
+                                        print(f"[提醒服务] 预约提醒创建成功: {reminder_result.get('reminder_uuid')}")
+                                    else:
+                                        print(f"[提醒服务] 预约提醒创建失败: {reminder_result.get('message')}")
+                            except Exception as e:
+                                print(f"[提醒服务] 创建预约提醒时出错: {str(e)}")
+                                import traceback
+                                traceback.print_exc()
+
+                            # 预约成功后,重新检查完成状态(agent可能已经转入COMPLETED)
+                            is_completed = agent.is_completed()
+                            print(f"[主程序] 预约成功后,对话完成状态: {is_completed}")
+                        else:
+                            # 预约失败,agent会保持在APPOINTMENT_BOOKING阶段
+                            # 获取失败响应并追加到回复中
+                            failure_response = agent.get_appointment_failure_response()
+                            if failure_response:
+                                response = failure_response
+
+                            # 确保对话未完成,继续收集信息
+                            is_completed = False
+                            print(f"[主程序] 预约失败,对话继续: {db_result['message']}")
+
+                    except Exception as e:
+                        import traceback
+                        print(f"[数据库错误] 预约处理失败: {str(e)}")
+                        traceback.print_exc()
+
+                        # 通知agent预约失败
+                        if hasattr(agent, 'set_appointment_result'):
+                            agent.set_appointment_result(success=False, message=f"系统错误: {str(e)}")
+
+                        response += f"\n\n⚠️ 预约处理失败: {str(e)},请稍后重试。"
                         is_completed = False
-                        print(f"[主程序] 预约失败,对话继续: {db_result['message']}")
-
-                except Exception as e:
-                    import traceback
-                    print(f"[数据库错误] 预约处理失败: {str(e)}")
-                    traceback.print_exc()
-
-                    # 通知agent预约失败
-                    if hasattr(agent, 'set_appointment_result'):
-                        agent.set_appointment_result(success=False, message=f"系统错误: {str(e)}")
-
-                    response += f"\n\n⚠️ 预约处理失败: {str(e)},请稍后重试。"
-                    is_completed = False
+                else:
+                    print(f"[调试] 预约信息不足 - 基本信息: {has_basic_info}, 预约时间: {has_appointment_time}, 当前阶段: {stage}")
         
         # 返回响应
         return ChatResponse(
@@ -531,20 +590,31 @@ async def get_stats():
 @app.get("/api/appointments")
 async def get_appointments():
     """
-    获取所有预约记录（用于验证数据库操作）
+    获取所有预约记录（用于验证数据库操作）- 使用UUID
     """
     try:
         query = """
-            SELECT 
-                a.Appointment_ID,
+            SELECT
+                a.Appointment_UUID,
+                a.Patient_UUID,
+                a.Doctor_UUID,
                 a.Patient_Name,
                 a.Appointment_Time,
                 a.Appointment_Status,
+                a.Appointment_Category,
+                a.Severity_Level,
                 d.Name as Doctor_Name,
-                d.Title as Doctor_Title
+                d.Title as Doctor_Title,
+                d.Specialty as Doctor_Specialty,
+                p.Name as Patient_Full_Name,
+                p.Phone_Number as Patient_Phone,
+                a.Created_At,
+                a.Updated_At
             FROM appointment a
-            LEFT JOIN doctor d ON a.Doctor_ID = d.Doctor_ID
-            ORDER BY a.Appointment_ID DESC
+            LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID
+            LEFT JOIN patient p ON a.Patient_UUID = p.Patient_UUID
+            WHERE a.Deleted = 0
+            ORDER BY a.Appointment_Time DESC
             LIMIT 50
         """
         appointments = appointment_service.db.execute_query(query)
@@ -554,27 +624,31 @@ async def get_appointments():
             "appointments": appointments
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"查询预约记录失败: {str(e)}")
 
 
 @app.get("/api/patients")
 async def get_patients():
     """
-    获取所有患者记录（用于验证数据库操作）
+    获取所有患者记录（用于验证数据库操作）- 使用UUID
     """
     try:
         query = """
-            SELECT 
-                Patient_ID,
-                Visit_Card_Number,
+            SELECT
+                Patient_UUID,
                 Name,
                 Gender,
                 Age,
                 Phone_Number,
-                Chief_Complaint,
-                Visit_Date
+                Email,
+                Address,
+                Created_At,
+                Updated_At
             FROM patient
-            ORDER BY Patient_ID DESC
+            WHERE Deleted = 0
+            ORDER BY Created_At DESC
             LIMIT 50
         """
         patients = appointment_service.db.execute_query(query)
@@ -584,6 +658,8 @@ async def get_patients():
             "patients": patients
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"查询患者记录失败: {str(e)}")
 
 
@@ -591,25 +667,55 @@ async def get_patients():
 async def get_users():
     """
     获取可用的用户列表（用于前端模拟不同用户）
+    包括患者和医生，使用UUID
     """
     try:
-        query = """
-            SELECT DISTINCT
-                Patient_ID,
+        # 查询患者列表（使用UUID）
+        patients_query = """
+            SELECT
+                Patient_UUID as user_id,
                 Name,
                 Phone_Number,
                 Gender,
-                Age
+                Age,
+                'patient' as user_type
             FROM patient
-            ORDER BY Patient_ID DESC
-            LIMIT 20
+            WHERE Deleted = 0
+            ORDER BY Created_At DESC
+            LIMIT 10
         """
-        users = appointment_service.db.execute_query(query)
+        patients = appointment_service.db.execute_query(patients_query)
+
+        # 查询医生列表（使用UUID）
+        doctors_query = """
+            SELECT
+                Doctor_UUID as user_id,
+                Name,
+                Phone_Number,
+                Gender,
+                Age,
+                'doctor' as user_type,
+                Title,
+                Specialty
+            FROM doctor
+            WHERE is_active = 1 AND Deleted = 0
+            ORDER BY Doctor_UUID DESC
+            LIMIT 10
+        """
+        doctors = appointment_service.db.execute_query(doctors_query)
+
+        # 合并患者和医生列表
+        users = patients + doctors
+
         return {
             "success": True,
-            "users": users
+            "users": users,
+            "patient_count": len(patients),
+            "doctor_count": len(doctors)
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"查询用户列表失败: {str(e)}")
 
 
@@ -676,12 +782,12 @@ async def generate_report(request: ReportRequest):
 
         if not patient_id and request.phone_number:
             user_info = report_service.db.execute_one(
-                "SELECT Patient_UUID, Patient_ID FROM patient WHERE Phone_Number = %s",
+                "SELECT Patient_UUID FROM patient WHERE Phone_Number = %s",
                 (request.phone_number,)
             )
             if user_info:
-                # 优先使用UUID
-                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+                # 使用UUID
+                patient_id = user_info.get('Patient_UUID')
 
         if not patient_id:
             raise HTTPException(status_code=400, detail="未提供有效的患者信息")
@@ -784,11 +890,11 @@ async def analyze_reports(request: AnalysisRequest):
 
         if not patient_id and request.phone_number:
             user_info = report_service.db.execute_one(
-                "SELECT Patient_UUID, Patient_ID FROM patient WHERE Phone_Number = %s",
+                "SELECT Patient_UUID FROM patient WHERE Phone_Number = %s",
                 (request.phone_number,)
             )
             if user_info:
-                patient_id = user_info.get('Patient_UUID') or normalize_id(user_info['Patient_ID'])
+                patient_id = user_info.get('Patient_UUID')
 
         if not patient_id:
             raise HTTPException(status_code=400, detail="未提供有效的患者信息")
@@ -991,7 +1097,7 @@ async def get_prescription_list(patient_id: str, limit: int = 50):
         except ValueError:
             raise HTTPException(status_code=400, detail=f"无效的患者ID格式: {patient_id}")
 
-        print(f"[处方API] 查询患者处方列表: Patient_ID={patient_id_normalized}")
+        print(f"[处方API] 查询患者处方列表: Patient_UUID={patient_id_normalized}")
 
         prescriptions = prescription_service.get_prescriptions_by_patient(patient_id_normalized, limit)
 
@@ -1338,11 +1444,11 @@ async def get_chat_history_by_phone(phone_number: str, status: Optional[str] = N
         if not user_info:
             raise HTTPException(status_code=404, detail="未找到该手机号对应的用户")
 
-        patient_id = user_info['Patient_ID']
+        patient_uuid = user_info['Patient_UUID']
 
         chats = chat_service.get_user_chats(
             user_type='patient',
-            user_id=patient_id,
+            user_id=patient_uuid,
             status=status,
             limit=limit
         )
@@ -1350,7 +1456,7 @@ async def get_chat_history_by_phone(phone_number: str, status: Optional[str] = N
         return {
             "success": True,
             "phone_number": phone_number,
-            "patient_id": patient_id,
+            "patient_uuid": patient_uuid,
             "count": len(chats),
             "chats": chats
         }

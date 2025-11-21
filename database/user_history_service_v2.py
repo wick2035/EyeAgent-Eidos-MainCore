@@ -46,13 +46,13 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             # 规范化ID(兼容INT和UUID)
             patient_id_normalized = normalize_id(patient_id)
 
-            # 优先使用UUID查询,兼容INT ID (仅查询未删除的记录)
+            # 只使用UUID查询 (仅查询未删除的记录)
             query = """
                 SELECT * FROM patient
-                WHERE (Patient_UUID = %s OR CAST(Patient_ID AS CHAR) = %s)
+                WHERE Patient_UUID = %s
                   AND Deleted = 0
             """
-            result = self.db.execute_one(query, (patient_id_normalized, patient_id_normalized))
+            result = self.db.execute_one(query, (patient_id_normalized,))
 
             if result:
                 logger.info(f"成功查询到用户信息: ID={patient_id}, 姓名={result.get('Name')}, UUID={result.get('Patient_UUID')}")
@@ -104,13 +104,13 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
             # 规范化ID(兼容INT和UUID)
             doctor_id_normalized = normalize_id(doctor_id)
 
-            # 优先使用UUID查询,兼容INT ID (仅查询未删除的记录)
+            # 只使用UUID查询 (仅查询未删除的记录)
             query = """
                 SELECT * FROM doctor
-                WHERE (Doctor_UUID = %s OR CAST(Doctor_ID AS CHAR) = %s)
+                WHERE Doctor_UUID = %s
                   AND Deleted = 0
             """
-            result = self.db.execute_one(query, (doctor_id_normalized, doctor_id_normalized))
+            result = self.db.execute_one(query, (doctor_id_normalized,))
 
             if result:
                 logger.info(f"成功查询到医生信息: ID={doctor_id}, 姓名={result.get('Name')}, UUID={result.get('Doctor_UUID')}")
@@ -153,7 +153,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         查询用户的所有病例记录
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
             limit: 返回记录的最大数量（默认10条）
 
         Returns:
@@ -164,7 +164,6 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
 
             query = """
                 SELECT
-                    mr.Medical_Record_ID,
                     mr.Medical_Record_UUID,
                     mr.Visit_Card_Number,
                     mr.Visit_Date,
@@ -177,14 +176,14 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                     mr.Treatment_Plan
                 FROM medical_record mr
                 INNER JOIN patient p ON mr.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
-                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                WHERE p.Patient_UUID = %s
                   AND mr.Deleted = 0
                 ORDER BY mr.Visit_Date DESC
                 LIMIT %s
             """
-            results = self.db.execute_query(query, (patient_id_normalized, patient_id_normalized, limit))
+            results = self.db.execute_query(query, (patient_id_normalized, limit))
 
-            logger.info(f"查询到 {len(results)} 条病例记录 (Patient_ID: {patient_id})")
+            logger.info(f"查询到 {len(results)} 条病例记录 (Patient_UUID: {patient_id})")
             return results
         except Exception as e:
             logger.error(f"查询病例记录失败: {e}")
@@ -204,7 +203,6 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         try:
             query = """
                 SELECT
-                    mr.Medical_Record_ID,
                     mr.Medical_Record_UUID,
                     mr.Visit_Card_Number,
                     mr.Visit_Date,
@@ -237,7 +235,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         查询用户的所有预约记录
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
             limit: 返回记录的最大数量（默认10条）
 
         Returns:
@@ -248,9 +246,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
 
             query = """
                 SELECT
-                    a.Appointment_ID,
                     a.Appointment_UUID,
-                    a.Medical_Record_ID,
                     a.Medical_Record_UUID,
                     a.Appointment_Time,
                     a.Appointment_Category,
@@ -266,14 +262,14 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                 INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
                 LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
                 LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
-                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                WHERE p.Patient_UUID = %s
                   AND a.Deleted = 0
                 ORDER BY a.Appointment_Time DESC
                 LIMIT %s
             """
-            results = self.db.execute_query(query, (patient_id_normalized, patient_id_normalized, limit))
+            results = self.db.execute_query(query, (patient_id_normalized, limit))
 
-            logger.info(f"查询到 {len(results)} 条预约记录 (Patient_ID: {patient_id})")
+            logger.info(f"查询到 {len(results)} 条预约记录 (Patient_UUID: {patient_id})")
             return results
         except Exception as e:
             logger.error(f"查询预约记录失败: {e}")
@@ -284,7 +280,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         查询用户的历史预约记录（今天之前的预约）
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
             limit: 返回记录的最大数量（默认10条）
 
         Returns:
@@ -295,9 +291,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
 
             query = """
                 SELECT
-                    a.Appointment_ID,
                     a.Appointment_UUID,
-                    a.Medical_Record_ID,
                     a.Medical_Record_UUID,
                     a.Appointment_Time,
                     a.Appointment_Category,
@@ -312,15 +306,15 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                 INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
                 LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
                 LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
-                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                WHERE p.Patient_UUID = %s
                   AND DATE(a.Appointment_Time) < CURDATE()
                   AND a.Deleted = 0
                 ORDER BY a.Appointment_Time DESC
                 LIMIT %s
             """
-            results = self.db.execute_query(query, (patient_id_normalized, patient_id_normalized, limit))
+            results = self.db.execute_query(query, (patient_id_normalized, limit))
 
-            logger.info(f"查询到 {len(results)} 条历史预约记录（今天之前） (Patient_ID: {patient_id})")
+            logger.info(f"查询到 {len(results)} 条历史预约记录（今天之前） (Patient_UUID: {patient_id})")
             return results
         except Exception as e:
             logger.error(f"查询历史预约失败: {e}")
@@ -331,7 +325,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         查询用户的当前和未来预约记录（今天及以后的预约）
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
             limit: 返回记录的最大数量（默认10条）
 
         Returns:
@@ -342,9 +336,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
 
             query = """
                 SELECT
-                    a.Appointment_ID,
                     a.Appointment_UUID,
-                    a.Medical_Record_ID,
                     a.Medical_Record_UUID,
                     a.Appointment_Time,
                     a.Appointment_Category,
@@ -359,15 +351,15 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                 INNER JOIN patient p ON a.Patient_UUID = p.Patient_UUID AND p.Deleted = 0
                 LEFT JOIN doctor d ON a.Doctor_UUID = d.Doctor_UUID AND d.Deleted = 0
                 LEFT JOIN medical_record mr ON a.Medical_Record_UUID = mr.Medical_Record_UUID AND mr.Deleted = 0
-                WHERE (p.Patient_UUID = %s OR CAST(p.Patient_ID AS CHAR) = %s)
+                WHERE p.Patient_UUID = %s
                   AND DATE(a.Appointment_Time) >= CURDATE()
                   AND a.Deleted = 0
                 ORDER BY a.Appointment_Time ASC
                 LIMIT %s
             """
-            results = self.db.execute_query(query, (patient_id_normalized, patient_id_normalized, limit))
+            results = self.db.execute_query(query, (patient_id_normalized, limit))
 
-            logger.info(f"查询到 {len(results)} 条当前/未来预约记录（今天及以后） (Patient_ID: {patient_id})")
+            logger.info(f"查询到 {len(results)} 条当前/未来预约记录（今天及以后） (Patient_UUID: {patient_id})")
             return results
         except Exception as e:
             logger.error(f"查询当前/未来预约失败: {e}")
@@ -380,7 +372,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         综合查询用户的完整历史信息
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
 
         Returns:
             包含用户基本信息、病例记录和预约记录的完整字典
@@ -440,28 +432,28 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
                 "has_history": False
             }
         
-        patient_id = basic_info['Patient_ID']
-        
+        patient_uuid = basic_info['Patient_UUID']
+
         # 查询病例记录
-        medical_records = self.get_medical_records_by_patient_id(patient_id)
-        
+        medical_records = self.get_medical_records_by_patient_id(patient_uuid)
+
         # 查询历史预约
-        historical_appointments = self.get_historical_appointments(patient_id)
+        historical_appointments = self.get_historical_appointments(patient_uuid)
         
         # 查询当前和未来预约
-        current_future_appointments = self.get_current_future_appointments(patient_id)
+        current_future_appointments = self.get_current_future_appointments(patient_uuid)
         
         complete_info = {
             "phone_number": phone_number,
-            "patient_id": patient_id,
+            "patient_id": patient_uuid,
             "basic_info": basic_info,
             "medical_records": medical_records,
             "historical_appointments": historical_appointments,
             "current_future_appointments": current_future_appointments,
             "has_history": bool(basic_info)  # 修复：基于patient表是否有记录判断，而非就诊记录
         }
-        
-        logger.info(f"用户完整信息查询完成: Patient_ID={patient_id}, "
+
+        logger.info(f"用户完整信息查询完成: Patient_UUID={patient_uuid}, "
                    f"病例={len(medical_records)}条, 历史预约={len(historical_appointments)}条, "
                    f"当前/未来预约={len(current_future_appointments)}条")
         
@@ -474,7 +466,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         将用户历史信息格式化为易读的文本
 
         Args:
-            patient_id: 用户ID（支持Patient_ID或Patient_UUID）
+            patient_id: 用户UUID
 
         Returns:
             格式化的用户历史信息文本
@@ -490,7 +482,7 @@ class UserHistoryServiceV2(BaseServiceWithUUID):
         basic_info = complete_info["basic_info"]
         if basic_info:
             text_parts.append("【用户基本信息】")
-            text_parts.append(f"用户ID: {basic_info.get('Patient_ID')}")
+            text_parts.append(f"用户UUID: {basic_info.get('Patient_UUID')[:8]}...")
             text_parts.append(f"姓名: {basic_info.get('Name', '未知')}")
             text_parts.append(f"性别: {basic_info.get('Gender', '未知')}")
             text_parts.append(f"年龄: {basic_info.get('Age', '未知')}")

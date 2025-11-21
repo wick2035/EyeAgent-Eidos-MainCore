@@ -475,7 +475,8 @@
             let html = '';
             chats.forEach(chat => {
                 const statusClass = `status-${chat.Status || 'active'}`;
-                const title = chat.Title || `对话 #${chat.Chat_ID}`;
+                const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
+                const title = chat.Title || `对话 #${chatId}`;
                 const summary = chat.Summary || '暂无摘要';
                 const agent = chat.AI_Agent || '-';
                 const type = chat.Conversation_Type || 'general';
@@ -483,7 +484,7 @@
                 const time = formatDateTime(chat.Created_At);
 
                 html += `
-                    <div class="chat-item" onclick="loadChatMessages(${chat.Chat_ID})">
+                    <div class="chat-item" onclick="loadChatMessages('${chatId}')"
                         <div class="chat-item-header">
                             <span class="chat-title">${title}</span>
                             <span class="chat-status ${statusClass}">${chat.Status || 'active'}</span>
@@ -545,8 +546,9 @@
             const messages = data.messages || [];
 
             // 更新头部信息
+            const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
             document.getElementById('contentHeader').style.display = 'block';
-            document.getElementById('chatTitle').textContent = chat.Title || `对话 #${chat.Chat_ID}`;
+            document.getElementById('chatTitle').textContent = chat.Title || `对话 #${chatId}`;
             document.getElementById('chatAgent').textContent = `Agent: ${chat.AI_Agent || '-'}`;
             document.getElementById('chatType').textContent = `类型: ${chat.Conversation_Type || 'general'}`;
             document.getElementById('chatMessages').textContent = `消息数: ${chat.Total_Messages || 0}`;
