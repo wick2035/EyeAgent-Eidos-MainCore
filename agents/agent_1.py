@@ -173,6 +173,8 @@ class HealthAgent:
 
 当前对话阶段：{stage}
 
+{appointment_status}
+
 {user_history}
 
 你的职责：
@@ -204,6 +206,22 @@ class HealthAgent:
 - 家族史：家族中是否有眼科疾病或遗传病（已有patient记录的用户可参考历史）
 - 预约信息：期望就诊时间、医生偏好、紧急程度
 
+【⚠️ 严格规则：预约确认时机】
+必须严格遵守上方的【系统状态】提示！
+
+1. 如果系统状态显示"预约尚未提交到系统"：
+   - 绝对禁止说："预约已安排好"、"预约成功"、"预约已完成"、"您的预约已确认"
+   - 只能说："好的，我正在为您安排预约"、"让我帮您确认一下预约信息"、"稍等，我为您处理预约"
+   - 如果信息不全，继续询问缺失的信息
+
+2. 如果系统状态显示"预约已在系统中成功确认"：
+   - 此时才可以说："您的预约已经安排好了"、"预约成功"
+   - 不要编造预约ID或患者ID，系统会自动添加这些信息
+
+3. 用户说"好的"、"可以"、"行"等确认词时：
+   - 这只是用户确认信息，不代表预约已完成
+   - 必须等待系统状态确认后才能说预约完成
+
 对话指南：
 - 语气温和、专业、有同理心
 - 逐步引导患者描述症状，每次询问1-2个相关问题
@@ -211,7 +229,6 @@ class HealthAgent:
 - 在收集信息时要有针对性，结合患者回答追问细节
 - 对于缺失的重要信息，要主动询问
 - 已有patient记录的用户对话应该更加自然和个性化，可以提及历史就诊情况（如有）
-- 确保收集完整的信息后再完成预约
 
 已收集的信息字段：{collected_fields}
 缺失的关键信息：{missing_fields}
@@ -223,7 +240,7 @@ class HealthAgent:
 助手："""
         
         prompt = PromptTemplate(
-            input_variables=["stage", "user_history", "collected_fields", "missing_fields", "history", "input"],
+            input_variables=["stage", "appointment_status", "user_history", "collected_fields", "missing_fields", "history", "input"],
             template=template
         )
         
@@ -692,7 +709,43 @@ AI刚刚的问题：{recent_question}
                     self.stage = ConversationStage.COMPLETED
                 else:
                     print(f"[调试] 检测到用户告别意图，但预约尚未确认，保持当前阶段")
-    
+
+    def _clean_premature_confirmation(self, response: str) -> str:
+        """
+        清理响应中的过早预约确认语句（双重保险机制）
+
+        如果预约尚未确认，移除响应中任何预约成功的表述
+        这是第二层防护，防止LLM忽略提示词中的规则
+        """
+        if self.needs_appointment and not self.appointment_confirmed:
+            import re
+
+            # 定义需要检测和替换的过早确认短语
+            premature_patterns = [
+                (r'(?:您的)?预约已经?安排好(?:了)?', '我正在为您安排预约'),
+                (r'预约成功', '正在为您安排预约'),
+                (r'预约已完成', '正在为您处理预约'),
+                (r'(?:已为您|为您)安排好预约', '正在为您安排预约'),
+                (r'预约确认完成', '正在确认预约信息'),
+                (r'预约已确认', '正在为您确认预约'),
+                (r'已经帮您预约好', '正在为您安排预约'),
+            ]
+
+            cleaned = False
+            original_response = response
+
+            for pattern, replacement in premature_patterns:
+                if re.search(pattern, response):
+                    response = re.sub(pattern, replacement, response)
+                    cleaned = True
+
+            if cleaned:
+                print(f"[响应清理] 检测到过早确认语句，已自动清理")
+                print(f"[响应清理] 原始: {original_response[:100]}...")
+                print(f"[响应清理] 清理后: {response[:100]}...")
+
+        return response
+
     def chat(self, user_input: str) -> str:
         """处理用户输入并返回响应"""
         print(f"\n[调试] ========== 开始处理用户输入 ==========")
@@ -734,10 +787,21 @@ AI刚刚的问题：{recent_question}
         for msg in self.conversation_history[:-1]:  # 不包括当前用户输入
             role = "患者" if msg["role"] == "user" else "助手"
             history_text += f"{role}：{msg['content']}\n"
-        
+
+        # 🔥 构建预约状态提示 - 让LLM知道真实的预约状态
+        appointment_status_hint = ""
+        if self.needs_appointment:
+            if self.appointment_confirmed:
+                appointment_status_hint = "【系统状态】✅ 预约已在系统中成功确认，可以告知用户预约完成。"
+            else:
+                appointment_status_hint = "【系统状态】⚠️ 预约尚未提交到系统，正在收集信息。绝对不要说预约已完成！请继续收集缺失信息或说'正在为您安排预约'。"
+
+        print(f"[调试] 预约状态提示: {appointment_status_hint}")
+
         # 调用LLMChain
         response = self.conversation_chain.run(
             stage=stage_desc,
+            appointment_status=appointment_status_hint,
             user_history=self.user_history_text,
             collected_fields=collected,
             missing_fields=missing_desc,
@@ -753,11 +817,14 @@ AI刚刚的问题：{recent_question}
         
         # 更新阶段
         self._update_stage(user_input, response)
-        
+
         # 如果完成，生成最终诊断建议
         if self.stage == ConversationStage.COMPLETED and self.needs_appointment:
             self._generate_diagnosis_suggestion()
-        
+
+        # 🔥 清理响应中的过早预约确认（双重保险）
+        response = self._clean_premature_confirmation(response)
+
         return response
     
     def _generate_diagnosis_suggestion(self):

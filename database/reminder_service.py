@@ -1,29 +1,34 @@
 """
 提醒服务 - 管理复诊提醒、预约提醒、用药提醒等功能
+
+Version: UUID Only (迁移后版本)
+所有ID参数使用UUID格式
 """
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from database.db_connection import DatabaseConnection
+from database.base_service import BaseServiceWithUUID
 
 
-class ReminderService:
-    """提醒服务类"""
+class ReminderService(BaseServiceWithUUID):
+    """提醒服务类 - UUID版本"""
 
     def __init__(self):
+        super().__init__()
         self.db = DatabaseConnection()
 
     def create_reminder(
         self,
-        patient_id: int,
+        patient_uuid: str,
         reminder_type: str,
         reminder_title: str,
         reminder_content: str,
         scheduled_time: datetime,
         advance_days: int = 1,
         priority: str = 'normal',
-        medical_record_id: Optional[int] = None,
-        appointment_id: Optional[int] = None,
-        prescription_id: Optional[int] = None,
+        medical_record_uuid: Optional[str] = None,
+        appointment_uuid: Optional[str] = None,
+        prescription_uuid: Optional[str] = None,
         repeat_type: str = 'once',
         max_repeat_count: int = 1,
         created_by: str = 'system',
@@ -33,48 +38,51 @@ class ReminderService:
         创建新提醒
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
             reminder_type: 提醒类型 (follow_up/appointment/medication/checkup/custom)
             reminder_title: 提醒标题
             reminder_content: 提醒内容
             scheduled_time: 计划提醒时间
             advance_days: 提前提醒天数
             priority: 优先级 (low/normal/high/urgent)
-            medical_record_id: 关联病例ID（可选）
-            appointment_id: 关联预约ID（可选）
-            prescription_id: 关联处方ID（可选）
+            medical_record_uuid: 关联病例UUID（可选）
+            appointment_uuid: 关联预约UUID（可选）
+            prescription_uuid: 关联处方UUID（可选）
             repeat_type: 重复类型 (once/daily/weekly/monthly/custom)
             max_repeat_count: 最大重复次数
             created_by: 创建者
             notes: 备注
 
         Returns:
-            包含成功状态和提醒ID的字典
+            包含成功状态和提醒UUID的字典
         """
         try:
+            # 生成Reminder UUID
+            reminder_uuid = self.generate_uuid()
+
             query = """
                 INSERT INTO reminder (
-                    Patient_ID, Medical_Record_ID, Appointment_ID, Prescription_ID,
+                    Reminder_UUID, Patient_UUID, Medical_Record_UUID, Appointment_UUID, Prescription_UUID,
                     Reminder_Type, Reminder_Title, Reminder_Content,
                     Scheduled_Time, Advance_Days, Priority,
                     Repeat_Type, Max_Repeat_Count, Created_By, Notes
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
-            reminder_id = self.db.execute_insert(
+            self.db.execute_insert(
                 query,
-                (patient_id, medical_record_id, appointment_id, prescription_id,
+                (reminder_uuid, patient_uuid, medical_record_uuid, appointment_uuid, prescription_uuid,
                  reminder_type, reminder_title, reminder_content,
                  scheduled_time, advance_days, priority,
                  repeat_type, max_repeat_count, created_by, notes)
             )
 
             # 记录历史
-            self._add_history(reminder_id, 'created', created_by, f'创建提醒: {reminder_title}')
+            self._add_history(reminder_uuid, 'created', created_by, f'创建提醒: {reminder_title}')
 
             return {
                 'success': True,
-                'reminder_id': reminder_id,
+                'reminder_uuid': reminder_uuid,
                 'message': '提醒创建成功'
             }
 
@@ -87,7 +95,7 @@ class ReminderService:
 
     def get_reminders_by_patient(
         self,
-        patient_id: int,
+        patient_uuid: str,
         status: Optional[str] = None,
         reminder_type: Optional[str] = None,
         limit: int = 50
@@ -96,7 +104,7 @@ class ReminderService:
         获取患者的提醒列表
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
             status: 状态过滤 (pending/sent/completed/cancelled/expired)
             reminder_type: 类型过滤 (follow_up/appointment/medication/checkup/custom)
             limit: 返回数量限制
@@ -114,14 +122,14 @@ class ReminderService:
                     a.Appointment_Time,
                     pr.Prescription_Number
                 FROM reminder r
-                LEFT JOIN patient p ON r.Patient_ID = p.Patient_ID
-                LEFT JOIN medical_record mr ON r.Medical_Record_ID = mr.Medical_Record_ID
-                LEFT JOIN appointment a ON r.Appointment_ID = a.Appointment_ID
-                LEFT JOIN prescription pr ON r.Prescription_ID = pr.Prescription_ID
-                WHERE r.Patient_ID = %s
+                LEFT JOIN patient p ON r.Patient_UUID = p.Patient_UUID
+                LEFT JOIN medical_record mr ON r.Medical_Record_UUID = mr.Medical_Record_UUID
+                LEFT JOIN appointment a ON r.Appointment_UUID = a.Appointment_UUID
+                LEFT JOIN prescription pr ON r.Prescription_UUID = pr.Prescription_UUID
+                WHERE r.Patient_UUID = %s
             """
 
-            params = [patient_id]
+            params = [patient_uuid]
 
             if status:
                 query += " AND r.Status = %s"
@@ -160,9 +168,9 @@ class ReminderService:
             提醒列表
         """
         try:
-            # 先获取患者ID
+            # 先获取患者UUID
             patient = self.db.execute_one(
-                "SELECT Patient_ID FROM patient WHERE Phone_Number = %s",
+                "SELECT Patient_UUID FROM patient WHERE Phone_Number = %s",
                 (phone_number,)
             )
 
@@ -170,7 +178,7 @@ class ReminderService:
                 return []
 
             return self.get_reminders_by_patient(
-                patient['Patient_ID'],
+                patient['Patient_UUID'],
                 status=status,
                 reminder_type=reminder_type,
                 limit=limit
@@ -208,8 +216,8 @@ class ReminderService:
                     rc.Quiet_Hours_Start,
                     rc.Quiet_Hours_End
                 FROM reminder r
-                LEFT JOIN patient p ON r.Patient_ID = p.Patient_ID
-                LEFT JOIN reminder_config rc ON r.Patient_ID = rc.Patient_ID
+                LEFT JOIN patient p ON r.Patient_UUID = p.Patient_UUID
+                LEFT JOIN reminder_config rc ON r.Patient_UUID = rc.Patient_UUID
                 WHERE r.Status = 'pending'
                 AND DATE_SUB(r.Scheduled_Time, INTERVAL r.Advance_Days DAY) <= %s
                 ORDER BY r.Priority DESC, r.Scheduled_Time ASC
@@ -224,7 +232,7 @@ class ReminderService:
 
     def update_reminder_status(
         self,
-        reminder_id: int,
+        reminder_uuid: str,
         status: str,
         action_by: str = 'system',
         notes: Optional[str] = None
@@ -233,7 +241,7 @@ class ReminderService:
         更新提醒状态
 
         Args:
-            reminder_id: 提醒ID
+            reminder_uuid: 提醒UUID
             status: 新状态 (sent/completed/cancelled/expired)
             action_by: 操作者
             notes: 备注
@@ -255,16 +263,16 @@ class ReminderService:
                 query = f"""
                     UPDATE reminder
                     SET Status = %s, {time_field} = %s, Notes = COALESCE(%s, Notes)
-                    WHERE Reminder_ID = %s
+                    WHERE Reminder_UUID = %s
                 """
-                self.db.execute_update(query, (status, datetime.now(), notes, reminder_id))
+                self.db.execute_update(query, (status, datetime.now(), notes, reminder_uuid))
             else:
-                query = "UPDATE reminder SET Status = %s WHERE Reminder_ID = %s"
-                self.db.execute_update(query, (status, reminder_id))
+                query = "UPDATE reminder SET Status = %s WHERE Reminder_UUID = %s"
+                self.db.execute_update(query, (status, reminder_uuid))
 
             # 记录历史
             action_details = notes if notes else f'状态更新为: {status}'
-            self._add_history(reminder_id, status, action_by, action_details)
+            self._add_history(reminder_uuid, status, action_by, action_details)
 
             return {
                 'success': True,
@@ -280,7 +288,7 @@ class ReminderService:
 
     def reschedule_reminder(
         self,
-        reminder_id: int,
+        reminder_uuid: str,
         new_scheduled_time: datetime,
         action_by: str = 'patient',
         reason: Optional[str] = None
@@ -289,7 +297,7 @@ class ReminderService:
         重新安排提醒时间
 
         Args:
-            reminder_id: 提醒ID
+            reminder_uuid: 提醒UUID
             new_scheduled_time: 新的计划时间
             action_by: 操作者
             reason: 原因
@@ -301,14 +309,14 @@ class ReminderService:
             query = """
                 UPDATE reminder
                 SET Scheduled_Time = %s, Status = 'pending', Notes = CONCAT(COALESCE(Notes, ''), '\n重新安排: ', %s)
-                WHERE Reminder_ID = %s
+                WHERE Reminder_UUID = %s
             """
 
             note = reason if reason else f'改期至 {new_scheduled_time}'
-            self.db.execute_update(query, (new_scheduled_time, note, reminder_id))
+            self.db.execute_update(query, (new_scheduled_time, note, reminder_uuid))
 
             # 记录历史
-            self._add_history(reminder_id, 'rescheduled', action_by, f'改期至: {new_scheduled_time}')
+            self._add_history(reminder_uuid, 'rescheduled', action_by, f'改期至: {new_scheduled_time}')
 
             return {
                 'success': True,
@@ -324,9 +332,9 @@ class ReminderService:
 
     def create_follow_up_reminder(
         self,
-        patient_id: int,
+        patient_uuid: str,
         follow_up_date: datetime,
-        medical_record_id: Optional[int] = None,
+        medical_record_uuid: Optional[str] = None,
         advance_days: int = 3,
         notes: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -334,9 +342,9 @@ class ReminderService:
         便捷方法：创建复诊提醒
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
             follow_up_date: 复诊日期
-            medical_record_id: 关联病例ID
+            medical_record_uuid: 关联病例UUID
             advance_days: 提前天数
             notes: 备注
 
@@ -348,22 +356,22 @@ class ReminderService:
             content += f"\n医生建议：{notes}"
 
         return self.create_reminder(
-            patient_id=patient_id,
+            patient_uuid=patient_uuid,
             reminder_type='follow_up',
             reminder_title='复诊提醒',
             reminder_content=content,
             scheduled_time=follow_up_date,
             advance_days=advance_days,
             priority='high',
-            medical_record_id=medical_record_id,
+            medical_record_uuid=medical_record_uuid,
             created_by='system',
             notes=notes
         )
 
     def create_appointment_reminder(
         self,
-        patient_id: int,
-        appointment_id: int,
+        patient_uuid: str,
+        appointment_uuid: str,
         appointment_time: datetime,
         advance_days: int = 1
     ) -> Dict[str, Any]:
@@ -371,8 +379,8 @@ class ReminderService:
         便捷方法：创建预约提醒
 
         Args:
-            patient_id: 患者ID
-            appointment_id: 预约ID
+            patient_uuid: 患者UUID
+            appointment_uuid: 预约UUID
             appointment_time: 预约时间
             advance_days: 提前天数
 
@@ -382,21 +390,21 @@ class ReminderService:
         content = f"您预约的就诊时间为 {appointment_time.strftime('%Y年%m月%d日 %H:%M')}，请携带就诊卡和医保卡准时就诊。"
 
         return self.create_reminder(
-            patient_id=patient_id,
+            patient_uuid=patient_uuid,
             reminder_type='appointment',
             reminder_title='预约就诊提醒',
             reminder_content=content,
             scheduled_time=appointment_time,
             advance_days=advance_days,
             priority='high',
-            appointment_id=appointment_id,
+            appointment_uuid=appointment_uuid,
             created_by='system'
         )
 
     def create_medication_reminder(
         self,
-        patient_id: int,
-        prescription_id: int,
+        patient_uuid: str,
+        prescription_uuid: str,
         medication_name: str,
         dosage: str,
         duration_days: int = 7
@@ -405,8 +413,8 @@ class ReminderService:
         便捷方法：创建用药提醒
 
         Args:
-            patient_id: 患者ID
-            prescription_id: 处方ID
+            patient_uuid: 患者UUID
+            prescription_uuid: 处方UUID
             medication_name: 药物名称
             dosage: 用法用量
             duration_days: 疗程天数
@@ -417,33 +425,33 @@ class ReminderService:
         content = f"请按时服用 {medication_name}。\n用法用量：{dosage}"
 
         return self.create_reminder(
-            patient_id=patient_id,
+            patient_uuid=patient_uuid,
             reminder_type='medication',
             reminder_title='用药提醒',
             reminder_content=content,
             scheduled_time=datetime.now() + timedelta(days=1),
             advance_days=0,
             priority='normal',
-            prescription_id=prescription_id,
+            prescription_uuid=prescription_uuid,
             repeat_type='daily',
             max_repeat_count=duration_days,
             created_by='doctor'
         )
 
-    def get_reminder_config(self, patient_id: int) -> Optional[Dict[str, Any]]:
+    def get_reminder_config(self, patient_uuid: str) -> Optional[Dict[str, Any]]:
         """
         获取患者的提醒配置
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
 
         Returns:
             配置信息
         """
         try:
             return self.db.execute_one(
-                "SELECT * FROM reminder_config WHERE Patient_ID = %s",
-                (patient_id,)
+                "SELECT * FROM reminder_config WHERE Patient_UUID = %s",
+                (patient_uuid,)
             )
         except Exception as e:
             print(f"[ReminderService] 获取提醒配置失败: {e}")
@@ -451,7 +459,7 @@ class ReminderService:
 
     def update_reminder_config(
         self,
-        patient_id: int,
+        patient_uuid: str,
         enable_follow_up: Optional[bool] = None,
         enable_appointment: Optional[bool] = None,
         enable_medication: Optional[bool] = None,
@@ -462,7 +470,7 @@ class ReminderService:
         更新患者的提醒配置
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
             enable_follow_up: 启用复诊提醒
             enable_appointment: 启用预约提醒
             enable_medication: 启用用药提醒
@@ -500,8 +508,8 @@ class ReminderService:
             if not updates:
                 return {'success': True, 'message': '无需更新'}
 
-            params.append(patient_id)
-            query = f"UPDATE reminder_config SET {', '.join(updates)} WHERE Patient_ID = %s"
+            params.append(patient_uuid)
+            query = f"UPDATE reminder_config SET {', '.join(updates)} WHERE Patient_UUID = %s"
 
             self.db.execute_update(query, tuple(params))
 
@@ -519,7 +527,7 @@ class ReminderService:
 
     def _add_history(
         self,
-        reminder_id: int,
+        reminder_uuid: str,
         action_type: str,
         action_by: str,
         action_details: Optional[str] = None
@@ -528,26 +536,29 @@ class ReminderService:
         添加提醒历史记录（内部方法）
 
         Args:
-            reminder_id: 提醒ID
+            reminder_uuid: 提醒UUID
             action_type: 操作类型
             action_by: 操作者
             action_details: 操作详情
         """
         try:
+            # 生成History UUID
+            history_uuid = self.generate_uuid()
+
             query = """
-                INSERT INTO reminder_history (Reminder_ID, Action_Type, Action_By, Action_Details)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO reminder_history (History_UUID, Reminder_UUID, Action_Type, Action_By, Action_Details)
+                VALUES (%s, %s, %s, %s, %s)
             """
-            self.db.execute_insert(query, (reminder_id, action_type, action_by, action_details))
+            self.db.execute_insert(query, (history_uuid, reminder_uuid, action_type, action_by, action_details))
         except Exception as e:
             print(f"[ReminderService] 添加历史记录失败: {e}")
 
-    def get_reminder_history(self, reminder_id: int) -> List[Dict[str, Any]]:
+    def get_reminder_history(self, reminder_uuid: str) -> List[Dict[str, Any]]:
         """
         获取提醒的历史记录
 
         Args:
-            reminder_id: 提醒ID
+            reminder_uuid: 提醒UUID
 
         Returns:
             历史记录列表
@@ -555,10 +566,10 @@ class ReminderService:
         try:
             query = """
                 SELECT * FROM reminder_history
-                WHERE Reminder_ID = %s
+                WHERE Reminder_UUID = %s
                 ORDER BY Action_Time DESC
             """
-            return self.db.execute_query(query, (reminder_id,))
+            return self.db.execute_query(query, (reminder_uuid,))
         except Exception as e:
             print(f"[ReminderService] 获取历史记录失败: {e}")
             return []

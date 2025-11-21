@@ -344,61 +344,50 @@ class ReportAgent:
         return None
     
     def _extract_report_id(self, text: str) -> Union[str, int, None]:
-        """从文本中提取病例ID (支持UUID)"""
+        """从文本中提取病例UUID (只使用UUID)"""
         import re
 
         # 排除处方相关的请求（避免混淆）
         if any(keyword in text.lower() for keyword in ['处方', 'prescription']):
             print(f"[ReportAgent] 检测到处方关键词，跳过病例ID提取")
             return None
-        
-        # 优先检测明确的病例ID表达
-        id_patterns = [
-            r'medical[_\s]*record[_\s]*id[:\s=]+(\d+)',  # Medical_Record_ID:1
-            r'病[例历][报告]?id[:\s=]+(\d+)',  # 病例ID:1, 病历ID:1
-            r'报告id[:\s=]+(\d+)',  # 报告ID:1
-            r'record[:\s=]+(\d+)',  # Record:1
-        ]
-        
-        for pattern in id_patterns:
-            match = re.search(pattern, text.lower())
-            if match:
-                medical_record_id = int(match.group(1))
-                print(f"[ReportAgent] 提取到明确的 Medical_Record_ID: {medical_record_id}")
-                return medical_record_id
-        
+
+        # 优先检测UUID格式
+        uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        uuid_match = re.search(uuid_pattern, text.lower())
+        if uuid_match:
+            medical_record_uuid = uuid_match.group(0)
+            print(f"[ReportAgent] 提取到明确的 Medical_Record_UUID: {medical_record_uuid}")
+            return medical_record_uuid
+
         # 检测"第X份"或"第X个"
         match = re.search(r'第\s*(\d+)\s*[份个条]', text)
         if match:
             num = int(match.group(1))
             if 1 <= num <= len(self.user_reports):
-                medical_record_id = self.user_reports[num - 1]['Medical_Record_ID']
-                print(f"[ReportAgent] 提取到序号 {num}，对应 Medical_Record_ID: {medical_record_id}")
-                return medical_record_id
-        
+                medical_record_uuid = self.user_reports[num - 1].get('Medical_Record_UUID')
+                print(f"[ReportAgent] 提取到序号 {num}，对应 Medical_Record_UUID: {medical_record_uuid}")
+                return medical_record_uuid
+
         # 尝试从"最新"、"最近"等关键词
         if any(keyword in text for keyword in ['最新', '最近', '最后', '当前']):
             if self.user_reports:
-                medical_record_id = self.user_reports[0]['Medical_Record_ID']
-                print(f"[ReportAgent] 提取到最新报告，Medical_Record_ID: {medical_record_id}")
-                return medical_record_id
-        
-        # 如果明确包含"报告"、"病例"、"病历"等关键词，尝试提取数字
+                medical_record_uuid = self.user_reports[0].get('Medical_Record_UUID')
+                print(f"[ReportAgent] 提取到最新报告，Medical_Record_UUID: {medical_record_uuid}")
+                return medical_record_uuid
+
+        # 如果明确包含"报告"、"病例"、"病历"等关键词，尝试提取数字作为序号
         if any(keyword in text for keyword in ['报告', '病例', '病历', 'report']):
             numbers = re.findall(r'\d+', text)
             if numbers:
                 num = int(numbers[0])
                 # 如果数字较小且在报告列表范围内，视为序号
                 if 1 <= num <= len(self.user_reports):
-                    medical_record_id = self.user_reports[num - 1]['Medical_Record_ID']
-                    print(f"[ReportAgent] 从报告请求中提取到序号 {num}，对应 Medical_Record_ID: {medical_record_id}")
-                    return medical_record_id
-                else:
-                    # 否则视为直接的病例ID
-                    print(f"[ReportAgent] 从报告请求中提取到数字，作为 Medical_Record_ID: {num}")
-                    return num
-        
-        print(f"[ReportAgent] 无法从文本中提取报告ID: {text}")
+                    medical_record_uuid = self.user_reports[num - 1].get('Medical_Record_UUID')
+                    print(f"[ReportAgent] 从报告请求中提取到序号 {num}，对应 Medical_Record_UUID: {medical_record_uuid}")
+                    return medical_record_uuid
+
+        print(f"[ReportAgent] 无法从文本中提取报告UUID: {text}")
         return None
     
     def _extract_prescription_id(self, text: str) -> Union[str, int, None]:
@@ -451,12 +440,11 @@ class ReportAgent:
         ids = []
         for num_str in numbers:
             num = int(num_str)
-            # 如果是序号，转换为实际ID
+            # 如果是序号，转换为实际UUID
             if num <= len(self.user_reports):
-                ids.append(self.user_reports[num - 1]['Medical_Record_ID'])
-            else:
-                ids.append(num)
-        
+                ids.append(self.user_reports[num - 1].get('Medical_Record_UUID'))
+            # 注意: 现在不再支持直接使用INT ID
+
         return ids
     
     def _prepare_context(self) -> Dict[str, str]:
@@ -474,8 +462,8 @@ class ReportAgent:
                 visit_date = report.get('Visit_Date', '未知日期')
                 chief_complaint = report.get('Chief_Complaint', '无主诉')
                 diagnosis = report.get('Diagnosis', '待诊断')
-                record_id = report.get('Medical_Record_ID', '')
-                reports_list.append(f"{idx}. 【ID:{record_id}】{visit_date} - {chief_complaint} ({diagnosis})")
+                record_uuid = report.get('Medical_Record_UUID', '')[0:8]  # 只显示UUID前8位
+                reports_list.append(f"{idx}. 【UUID:{record_uuid}...】{visit_date} - {chief_complaint} ({diagnosis})")
             reports_text = "\n".join(reports_list)
             reports_text += f"\n\n共 {len(self.user_reports)} 份病例报告"
         

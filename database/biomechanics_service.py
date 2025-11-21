@@ -1,42 +1,52 @@
 """
 生物力学检查数据服务
 管理眼科生物力学检查数据的存储和检索
+
+Migration: 已适配UUID主键格式
+Updated: 2025-11-21 (UUID Migration)
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from database.db_connection import DatabaseConnection
+from database.base_service import BaseServiceWithUUID
 
 
-class BiomechanicsService:
-    """生物力学检查数据服务"""
+class BiomechanicsService(BaseServiceWithUUID):
+    """生物力学检查数据服务 - UUID版本"""
 
     def __init__(self):
+        super().__init__()
         self.db = DatabaseConnection()
 
-    def get_latest_scan_by_patient(self, patient_id: int) -> Optional[Dict[str, Any]]:
+    def close(self):
+        """关闭数据库连接"""
+        if hasattr(self, 'db'):
+            self.db.close()
+
+    def get_latest_scan_by_patient(self, patient_uuid: str) -> Optional[Dict[str, Any]]:
         """
         获取患者最新的生物力学检查数据
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
 
         Returns:
             检查数据字典，如果没有返回None
         """
         query = """
         SELECT * FROM biomechanics_scan
-        WHERE Patient_ID = %s
+        WHERE Patient_UUID = %s
         ORDER BY Scan_Date DESC
         LIMIT 1
         """
 
         try:
-            result = self.db.fetch_one(query, (patient_id,))
+            result = self.db.fetch_one(query, (patient_uuid,))
             if result:
                 return self._format_scan_data(result)
             return None
         except Exception as e:
-            print(f"[BiomechanicsService] 查询失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 查询失败: {e}")
             return None
 
     def get_latest_scan_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
@@ -51,7 +61,7 @@ class BiomechanicsService:
         """
         query = """
         SELECT bs.* FROM biomechanics_scan bs
-        INNER JOIN patient p ON bs.Patient_ID = p.Patient_ID
+        INNER JOIN patient p ON bs.Patient_UUID = p.Patient_UUID
         WHERE p.Phone_Number = %s
         ORDER BY bs.Scan_Date DESC
         LIMIT 1
@@ -63,39 +73,39 @@ class BiomechanicsService:
                 return self._format_scan_data(result)
             return None
         except Exception as e:
-            print(f"[BiomechanicsService] 查询失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 查询失败: {e}")
             return None
 
-    def get_scan_by_id(self, scan_id: int) -> Optional[Dict[str, Any]]:
+    def get_scan_by_uuid(self, scan_uuid: str) -> Optional[Dict[str, Any]]:
         """
-        通过扫描ID获取生物力学检查数据
+        通过扫描UUID获取生物力学检查数据
 
         Args:
-            scan_id: 扫描ID
+            scan_uuid: 扫描UUID
 
         Returns:
             检查数据字典，如果没有返回None
         """
         query = """
         SELECT * FROM biomechanics_scan
-        WHERE Scan_ID = %s
+        WHERE Scan_UUID = %s
         """
 
         try:
-            result = self.db.fetch_one(query, (scan_id,))
+            result = self.db.fetch_one(query, (scan_uuid,))
             if result:
                 return self._format_scan_data(result)
             return None
         except Exception as e:
-            print(f"[BiomechanicsService] 查询失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 查询失败: {e}")
             return None
 
-    def get_all_scans_by_patient(self, patient_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_all_scans_by_patient(self, patient_uuid: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         获取患者的所有生物力学检查记录
 
         Args:
-            patient_id: 患者ID
+            patient_uuid: 患者UUID
             limit: 最多返回的记录数
 
         Returns:
@@ -103,16 +113,16 @@ class BiomechanicsService:
         """
         query = """
         SELECT * FROM biomechanics_scan
-        WHERE Patient_ID = %s
+        WHERE Patient_UUID = %s
         ORDER BY Scan_Date DESC
         LIMIT %s
         """
 
         try:
-            results = self.db.fetch_all(query, (patient_id, limit))
+            results = self.db.fetch_all(query, (patient_uuid, limit))
             return [self._format_scan_data(row) for row in results]
         except Exception as e:
-            print(f"[BiomechanicsService] 查询失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 查询失败: {e}")
             return []
 
     def create_scan_record(self, scan_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -123,9 +133,9 @@ class BiomechanicsService:
             scan_data: 包含检查数据的字典
 
         Returns:
-            包含success, scan_id, message的字典
+            包含success, scan_uuid, message的字典
         """
-        required_fields = ['Patient_ID', 'Scan_Date', 'Operator']
+        required_fields = ['Patient_UUID', 'Scan_Date', 'Operator']
 
         # 验证必需字段
         for field in required_fields:
@@ -136,6 +146,10 @@ class BiomechanicsService:
                 }
 
         try:
+            # 生成Scan_UUID
+            scan_uuid = self.generate_uuid()
+            scan_data['Scan_UUID'] = scan_uuid
+
             # 构建插入语句
             columns = ', '.join(scan_data.keys())
             placeholders = ', '.join(['%s'] * len(scan_data))
@@ -146,16 +160,16 @@ class BiomechanicsService:
             VALUES ({placeholders})
             """
 
-            scan_id = self.db.execute(query, values)
+            self.db.execute(query, values)
 
             return {
                 'success': True,
-                'scan_id': scan_id,
+                'scan_uuid': scan_uuid,
                 'message': '检查记录创建成功'
             }
 
         except Exception as e:
-            print(f"[BiomechanicsService] 创建记录失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 创建记录失败: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -163,12 +177,12 @@ class BiomechanicsService:
                 'message': f'创建记录失败: {str(e)}'
             }
 
-    def update_scan_record(self, scan_id: int, update_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_scan_record(self, scan_uuid: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         更新生物力学检查记录
 
         Args:
-            scan_id: 扫描ID
+            scan_uuid: 扫描UUID
             update_data: 要更新的数据
 
         Returns:
@@ -184,12 +198,12 @@ class BiomechanicsService:
             # 构建更新语句
             set_clause = ', '.join([f"{key} = %s" for key in update_data.keys()])
             values = list(update_data.values())
-            values.append(scan_id)
+            values.append(scan_uuid)
 
             query = f"""
             UPDATE biomechanics_scan
             SET {set_clause}, Updated_At = NOW()
-            WHERE Scan_ID = %s
+            WHERE Scan_UUID = %s
             """
 
             self.db.execute(query, tuple(values))
@@ -200,7 +214,7 @@ class BiomechanicsService:
             }
 
         except Exception as e:
-            print(f"[BiomechanicsService] 更新记录失败: {e}")
+            print(f"[BiomechanicsServiceUUID] 更新记录失败: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -253,7 +267,7 @@ class BiomechanicsService:
             '[Name]': scan_data.get('Patient_Name', ''),
             '[Gender]': scan_data.get('Gender', ''),
             '[ScanTime]': str(scan_data.get('Scan_Date', '')),
-            '[ID]': str(scan_data.get('Patient_ID', '')),
+            '[ID]': str(scan_data.get('Patient_UUID', '')),
             '[BirthDay]': str(scan_data.get('Birth_Date', '')),
             '[Operator]': scan_data.get('Operator', ''),
             '[AXL-R]': str(scan_data.get('AXL_R', '')),
@@ -304,7 +318,7 @@ class BiomechanicsService:
             '[Gender]': scan_data.get('Gender', ''),
             '[ScanDate]': str(scan_data.get('Scan_Date', '')),
             '[Age]': str(scan_data.get('Age', '')),
-            '[ID]': str(scan_data.get('Patient_ID', '')),
+            '[ID]': str(scan_data.get('Patient_UUID', '')),
             '[BirthDay]': str(scan_data.get('Birth_Date', '')),
             '[Doctor]': scan_data.get('Operator', ''),
             '[AXL-OD]': str(scan_data.get('AXL_R', '')),
@@ -356,11 +370,11 @@ class BiomechanicsService:
 # 测试函数
 def test_service():
     """测试服务"""
-    service = BiomechanicsService()
+    service = BiomechanicsServiceUUID()
 
     # 测试数据
     test_data = {
-        'Patient_ID': 1,
+        'Patient_UUID': '550e8400-e29b-41d4-a716-446655440000',
         'Scan_Date': '2025-11-18',
         'Operator': '李医生',
         'Patient_Name': '张三',
@@ -397,6 +411,8 @@ def test_service():
     print("格式化后的数据:")
     for k, v in formatted.items():
         print(f"{k}: {v}")
+
+    service.close()
 
 
 if __name__ == "__main__":
