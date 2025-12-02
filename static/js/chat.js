@@ -1,11 +1,15 @@
 // 全局变量
 let sessionId = null;
+let conversationId = null; // 数据库会话ID（用于继续对话）
 let currentStage = 'greeting';
 let currentAgent = null; // 当前使用的agent
 let isProcessing = false;
 let selectedUserId = null; // 选中的用户ID
 let selectedUserPhone = null; // 选中的用户手机号
 let currentRole = 'patient'; // 当前身份：patient 或 doctor
+
+// 测试用医生ID（实际应从登录系统获取）
+const TEST_DOCTOR_ID = "00000000-0000-0000-0000-000000000001";
 
 // DOM元素
 const chatMessages = document.getElementById('chatMessages');
@@ -213,8 +217,14 @@ async function sendMessage() {
             message: message,
             session_id: sessionId,
             patient_id: patientIdStr,  // 发送字符串类型，不是整数
-            role: currentRole
+            role: currentRole,
+            conversation_id: conversationId  // 传递会话ID以继续对话
         };
+
+        // 医生模式下添加 doctor_id
+        if (currentRole === 'doctor') {
+            requestBody.doctor_id = TEST_DOCTOR_ID;
+        }
         
         const response = await fetch('/api/chat', {
             method: 'POST',
@@ -234,6 +244,12 @@ async function sendMessage() {
         if (data.session_id && !sessionId) {
             sessionId = data.session_id;
             sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+        }
+
+        // 保存数据库会话ID（用于后续继续对话）
+        if (data.conversation_id) {
+            conversationId = data.conversation_id;
+            console.log('[Chat] 会话ID:', conversationId);
         }
         
         // 更新当前阶段
@@ -452,6 +468,7 @@ async function resetSessionWithoutConfirm() {
 
         // 重置状态并生成新的session ID
         sessionId = null;
+        conversationId = null;  // 重置数据库会话ID
         currentStage = 'greeting';
         generateSessionId();  // 生成新的UUID
         updateStageDisplay('greeting');
@@ -496,7 +513,7 @@ function toggleHistorySidebar() {
 
 // 加载对话历史列表
 async function loadChatHistory() {
-    if (!selectedUserId && !selectedUserPhone) {
+    if (!selectedUserId) {
         historyList.innerHTML = `
             <div class="empty-history">
                 <div class="empty-icon">👤</div>
@@ -515,22 +532,28 @@ async function loadChatHistory() {
     `;
 
     try {
-        // 判断使用哪个API
-        let endpoint;
-        if (selectedUserPhone) {
-            endpoint = `/api/chat/history/phone/${selectedUserPhone}`;
+        // 根据角色决定查询的 host_id
+        // 患者：用患者自己的ID查询
+        // 医生：用医生自己的ID查询（医生的历史对话）
+        let hostId, userType;
+        if (currentRole === 'doctor') {
+            hostId = TEST_DOCTOR_ID;
+            userType = 'doctor';
         } else {
-            endpoint = `/api/chat/history/${currentRole}/${selectedUserId}`;
+            hostId = selectedUserId;
+            userType = 'patient';
         }
+
+        const endpoint = `/api/conversations?host_id=${hostId}&user_type=${userType}&limit=20&offset=0`;
 
         const response = await fetch(endpoint);
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || '查询失败');
+            throw new Error(data.detail || '查询失败');
         }
 
-        displayChatHistory(data.chats || []);
+        displayChatHistory(data.conversations || []);
     } catch (error) {
         historyList.innerHTML = `
             <div class="empty-history">
@@ -543,8 +566,8 @@ async function loadChatHistory() {
 }
 
 // 显示对话历史列表
-function displayChatHistory(chats) {
-    if (chats.length === 0) {
+function displayChatHistory(conversations) {
+    if (conversations.length === 0) {
         historyList.innerHTML = `
             <div class="empty-history">
                 <div class="empty-icon">💭</div>
@@ -556,27 +579,23 @@ function displayChatHistory(chats) {
     }
 
     let html = '';
-    chats.forEach(chat => {
-        const statusClass = `status-${chat.Status || 'active'}`;
-        const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
-        const title = chat.Title || `对话 #${chatId}`;
-        const agent = chat.AI_Agent || '-';
-        const type = chat.Conversation_Type || 'general';
-        const messageCount = chat.Total_Messages || 0;
-        const time = formatHistoryTime(chat.Created_At);
-        const isCurrent = sessionId && chatId === sessionId;
+    conversations.forEach(conv => {
+        const chatId = conv.id;
+        const title = conv.title || `对话 #${chatId.substring(0, 8)}`;
+        const messageCount = conv.total_messages || 0;
+        const time = formatHistoryTime(conv.create_time);
+        const isCurrent = conversationId && chatId === conversationId;
 
         html += `
             <div class="history-item ${isCurrent ? 'current' : ''}" onclick="loadHistoryChat('${chatId}')">
                 <div class="history-item-header">
                     <span class="history-title">${escapeHtml(title)}</span>
-                    <span class="history-status ${statusClass}">${chat.Status || 'active'}</span>
                 </div>
                 <div class="history-meta">
-                    🤖 ${agent} | 💬 ${messageCount} 条
+                    💬 ${messageCount} 条消息
                 </div>
                 <div class="history-preview">
-                    ${chat.Summary || '暂无摘要'}
+                    ${conv.summary || '暂无摘要'}
                 </div>
                 <div class="history-time">
                     🕐 ${time}
@@ -593,11 +612,12 @@ async function loadHistoryChat(chatId) {
     showLoading();
 
     try {
-        const response = await fetch(`/api/chat/messages/${chatId}`);
+        // 使用新的会话详情API
+        const response = await fetch(`/api/conversations/${chatId}`);
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || '加载失败');
+            throw new Error(data.detail || '加载失败');
         }
 
         // 清空当前对话
@@ -606,26 +626,26 @@ async function loadHistoryChat(chatId) {
         // 加载历史消息
         const messages = data.messages || [];
         messages.forEach(msg => {
-            const messageType = msg.Message_Type === 'user' ? 'user' : 'assistant';
-            addMessageToUI(msg.Message_Content, messageType);
+            const messageType = msg.message_type === 'user' ? 'user' : 'assistant';
+            addMessageToUI(msg.message_content, messageType);
         });
 
-        // 更新UI状态
-        const chat = data.chat;
-        if (chat) {
-            // 可以选择是否更新sessionId为历史对话的ID
-            // sessionId = chatId.toString();
-            // sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+        // 更新UI状态 - 设置conversationId以支持继续对话
+        const conversation = data.conversation;
+        if (conversation) {
+            // 设置会话ID，允许继续对话
+            conversationId = chatId;
+            console.log('[History] 加载会话，设置conversationId:', conversationId);
 
-            if (chat.AI_Agent) {
-                updateAgentDisplay(chat.AI_Agent);
-            }
-
-            addSystemMessage(`📜 已加载历史对话: ${chat.Title || '对话 #' + chatId} (${messages.length} 条消息)`);
+            const title = conversation.title || `对话 #${chatId.substring(0, 8)}`;
+            addSystemMessage(`📜 已加载历史对话: ${title} (${messages.length} 条消息)。您可以继续该对话。`);
         }
 
         // 关闭侧边栏
         historySidebar.classList.remove('active');
+
+        // 滚动到底部
+        scrollToBottom();
 
         // 更新历史列表中的高亮
         loadChatHistory();
