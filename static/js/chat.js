@@ -64,7 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 用户选择事件 - 切换用户时自动重置会话
     userSelect.addEventListener('change', async (e) => {
         const selectedOption = e.target.selectedOptions[0];
-        const newUserId = e.target.value ? parseInt(e.target.value) : null;
+        const newUserId = e.target.value || null;
         const newUserPhone = selectedOption ? selectedOption.getAttribute('data-phone') : null;
         
         // 如果用户选择发生变化，重置会话
@@ -181,38 +181,40 @@ async function loadUserList() {
 // 发送消息
 async function sendMessage() {
     const message = userInput.value.trim();
-    
+
     if (!message || isProcessing) {
         return;
     }
-    
+
+    // 验证是否已选择患者
+    if (!selectedUserId) {
+        addSystemMessage('⚠️ 请先选择患者');
+        return;
+    }
+
     // 添加用户消息到界面
     addMessage(message, 'user');
-    
+
     // 清空输入框
     userInput.value = '';
     userInput.style.height = 'auto';
-    
+
     // 设置处理状态
     isProcessing = true;
     sendBtn.disabled = true;
     showLoading();
-    
+
     try {
+        // 转换patient_id为字符串以确保正确的类型
+        const patientIdStr = String(selectedUserId);
+
         // 发送请求到后端
         const requestBody = {
             message: message,
             session_id: sessionId,
-            role: currentRole  // 添加身份参数
+            patient_id: patientIdStr,  // 发送字符串类型，不是整数
+            role: currentRole
         };
-        
-        // 如果选择了用户，添加 user_id 和 phone_number
-        if (selectedUserId) {
-            requestBody.user_id = selectedUserId;
-        }
-        if (selectedUserPhone) {
-            requestBody.phone_number = selectedUserPhone;
-        }
         
         const response = await fetch('/api/chat', {
             method: 'POST',
@@ -429,12 +431,12 @@ function downloadJson() {
 // 重置会话（不需要确认，供内部调用）
 async function resetSessionWithoutConfirm() {
     showLoading();
-    
+
     try {
-        if (sessionId) {
-            await fetch(`/api/reset/${sessionId}`, { method: 'POST' });
-        }
-        
+        // 方案B：开始新会话（不调用reset API，直接创建新会话）
+        // 不调用 reset API，避免404错误
+        // 旧会话会自动过期（120分钟TTL）
+
         // 清空界面
         chatMessages.innerHTML = `
             <div class="message assistant-message">
@@ -447,13 +449,15 @@ async function resetSessionWithoutConfirm() {
                 </div>
             </div>
         `;
-        
-        // 重置状态
+
+        // 重置状态并生成新的session ID
         sessionId = null;
         currentStage = 'greeting';
-        generateSessionId();
+        generateSessionId();  // 生成新的UUID
         updateStageDisplay('greeting');
-        
+
+        console.log('[Reset] 已创建新会话:', sessionId);
+
     } catch (error) {
         console.error('Error:', error);
         alert('重置会话时出错，请刷新页面重试');
