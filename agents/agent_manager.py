@@ -53,11 +53,37 @@ class AgentManager:
             ValueError: 如果agent_type无效
         """
         logger.info(f"[AgentManager] 创建Agent - session={session_id}, patient={patient_id}, type={agent_type}")
-        
+
         # 确保有patient_id
         if not patient_id:
             raise ValueError("patient_id is required for creating agents")
-        
+
+        # ========== 新增：ID转换逻辑 ==========
+        # 使用ID映射服务将数字ID转换为UUID（如果需要）
+        try:
+            from infrastructure.services.id_mapping_service import get_id_mapping_service
+
+            id_mapping = get_id_mapping_service()
+            original_patient_id = patient_id
+
+            # 尝试获取UUID（如果已经是UUID会直接返回）
+            uuid_patient_id = id_mapping.get_uuid(patient_id)
+
+            if uuid_patient_id:
+                if uuid_patient_id != original_patient_id:
+                    logger.info(f"[AgentManager] ID映射: {original_patient_id} → {uuid_patient_id}")
+                patient_id = uuid_patient_id
+            else:
+                # 映射失败，记录警告但继续使用原ID（让后端API报错）
+                logger.warning(
+                    f"[AgentManager] 无法找到患者ID {original_patient_id} 对应的UUID，"
+                    f"将使用原始ID继续（可能导致后续API调用失败）"
+                )
+        except Exception as e:
+            logger.error(f"[AgentManager] ID映射服务异常: {e}", exc_info=True)
+            # 继续使用原始ID
+        # ======================================
+
         # 创建agent实例
         agent_id = f"{agent_type}_{session_id}"
         
@@ -257,6 +283,18 @@ class AgentManager:
     def get_all_sessions(self) -> list:
         """获取所有会话信息"""
         return list(self.session_manager._sessions.values())
-    
+
+    def get_conversation(self, session_id: str) -> Optional[Any]:
+        """
+        获取用于对话导出的agent
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            Agent实例，如果不存在则返回None
+        """
+        return self.get_agent(session_id)
+
     def __repr__(self) -> str:
         return f"<AgentManager agents={len(self.agents)} sessions={self.get_active_sessions_count()}>"
