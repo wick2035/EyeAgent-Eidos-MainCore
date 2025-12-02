@@ -1,0 +1,325 @@
+"""
+对话持久化服务
+编排对话和消息的持久化操作
+"""
+import uuid
+import json
+import logging
+from typing import Optional, List, Tuple, Dict, Any
+from datetime import datetime
+
+from domain.models.chat_entity import (
+    ChatConversationEntity,
+    ChatMessageEntity,
+    MessageContext
+)
+from infrastructure.repositories.chat_repository_impl import (
+    get_conversation_repository,
+    get_message_repository,
+    ChatConversationRepositoryImpl,
+    ChatMessageRepositoryImpl
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ChatPersistenceService:
+    """
+    对话持久化服务
+
+    职责：
+    - 协调会话和消息的创建、保存、加载
+    - 生成会话标题
+    - 序列化/反序列化上下文
+    """
+
+    def __init__(
+        self,
+        conversation_repo: Optional[ChatConversationRepositoryImpl] = None,
+        message_repo: Optional[ChatMessageRepositoryImpl] = None
+    ):
+        """
+        初始化服务
+
+        Args:
+            conversation_repo: 会话仓储（可选，默认使用单例）
+            message_repo: 消息仓储（可选，默认使用单例）
+        """
+        self.conversation_repo = conversation_repo or get_conversation_repository()
+        self.message_repo = message_repo or get_message_repository()
+        logger.info("[ChatPersistenceService] 初始化完成")
+
+    def create_conversation(
+        self,
+        host_id: str,
+        user_type: str = "patient",
+        title: str = "新对话"
+    ) -> str:
+        """
+        创建新会话
+
+        Args:
+            host_id: 用户ID（患者/医生UUID）
+            user_type: 用户类型 (patient/doctor)
+            title: 初始标题
+
+        Returns:
+            str: 新创建的会话ID
+        """
+        conversation_id = str(uuid.uuid4())
+        now = datetime.now()
+
+        conversation = ChatConversationEntity(
+            id=conversation_id,
+            user_type=user_type,
+            host_id=host_id,
+            title=title,
+            summary=None,
+            total_messages=0,
+            create_time=now,
+            create_by=host_id,
+            update_time=now,
+            update_by=host_id,
+            deleted=False,
+            version=1
+        )
+
+        self.conversation_repo.create(conversation)
+        logger.info(f"[ChatPersistenceService] 创建会话: {conversation_id}")
+        return conversation_id
+
+    def save_message(
+        self,
+        chat_id: str,
+        role: str,
+        content: str,
+        sender_id: Optional[str] = None,
+        context: Optional[MessageContext] = None,
+        token_used: Optional[int] = None
+    ) -> ChatMessageEntity:
+        """
+        保存消息
+
+        Args:
+            chat_id: 会话ID
+            role: 消息角色 (user/assistant/system)
+            content: 消息内容
+            sender_id: 发送者ID
+            context: 上下文信息
+            token_used: 使用的token数
+
+        Returns:
+            ChatMessageEntity: 保存的消息实体
+        """
+        # 获取下一个消息序号
+        latest_order = self.message_repo.get_latest_order(chat_id)
+        message_order = latest_order + 1
+
+        message_id = str(uuid.uuid4())
+        now = datetime.now()
+
+        # 序列化上下文
+        context_json = None
+        if context:
+            context_json = context.to_json()
+
+        message = ChatMessageEntity(
+            id=message_id,
+            chat_id=chat_id,
+            message_order=message_order,
+            message_content=content,
+            message_type=role,
+            sender_id=sender_id,
+            context=context_json,
+            token_used=token_used,
+            create_time=now,
+            create_by=sender_id,
+            update_time=now,
+            update_by=sender_id,
+            deleted=False,
+            version=1
+        )
+
+        self.message_repo.create(message)
+
+        # 更新会话的消息数量
+        total_messages = self.message_repo.count_by_chat_id(chat_id)
+        self.conversation_repo.update_summary_and_count(chat_id, None, total_messages)
+
+        logger.debug(f"[ChatPersistenceService] 保存消息: {message_id}, order={message_order}")
+        return message
+
+    def update_conversation_title(self, chat_id: str, first_user_message: str) -> bool:
+        """
+        根据首条用户消息更新会话标题
+
+        Args:
+            chat_id: 会话ID
+            first_user_message: 首条用户消息
+
+        Returns:
+            bool: 是否更新成功
+        """
+        title = self.generate_title(first_user_message)
+        success = self.conversation_repo.update_title(chat_id, title)
+        if success:
+            logger.info(f"[ChatPersistenceService] 更新会话标题: {chat_id} -> {title}")
+        return success
+
+    def load_conversation(
+        self,
+        chat_id: str
+    ) -> Tuple[Optional[ChatConversationEntity], List[ChatMessageEntity]]:
+        """
+        加载会话和所有消息
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            Tuple[Optional[ChatConversationEntity], List[ChatMessageEntity]]:
+                (会话实体, 消息列表)
+        """
+        conversation = self.conversation_repo.get_by_id(chat_id)
+        if not conversation:
+            logger.warning(f"[ChatPersistenceService] 会话不存在: {chat_id}")
+            return None, []
+
+        messages = self.message_repo.get_by_chat_id(chat_id)
+        logger.info(f"[ChatPersistenceService] 加载会话: {chat_id}, 消息数={len(messages)}")
+        return conversation, messages
+
+    def get_conversation(self, chat_id: str) -> Optional[ChatConversationEntity]:
+        """
+        获取会话信息
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            Optional[ChatConversationEntity]: 会话实体
+        """
+        return self.conversation_repo.get_by_id(chat_id)
+
+    def list_conversations(
+        self,
+        host_id: str,
+        user_type: str = "patient",
+        limit: int = 20,
+        offset: int = 0
+    ) -> Tuple[List[ChatConversationEntity], int, bool]:
+        """
+        获取用户的会话列表
+
+        Args:
+            host_id: 用户ID
+            user_type: 用户类型
+            limit: 返回数量
+            offset: 偏移量
+
+        Returns:
+            Tuple[List[ChatConversationEntity], int, bool]:
+                (会话列表, 总数, 是否还有更多)
+        """
+        conversations = self.conversation_repo.list_by_host(
+            host_id, user_type, limit, offset
+        )
+        total = self.conversation_repo.count_by_host(host_id, user_type)
+        has_more = (offset + len(conversations)) < total
+
+        logger.info(
+            f"[ChatPersistenceService] 获取会话列表: host={host_id}, "
+            f"count={len(conversations)}, total={total}"
+        )
+        return conversations, total, has_more
+
+    def delete_conversation(self, chat_id: str) -> bool:
+        """
+        删除会话及其所有消息
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            bool: 是否删除成功
+        """
+        # 先删除消息
+        self.message_repo.soft_delete_by_chat_id(chat_id)
+        # 再删除会话
+        success = self.conversation_repo.soft_delete(chat_id)
+        if success:
+            logger.info(f"[ChatPersistenceService] 删除会话: {chat_id}")
+        return success
+
+    def generate_title(self, content: str, max_length: int = 20) -> str:
+        """
+        根据消息内容生成会话标题
+
+        规则：
+        1. 去除末尾标点
+        2. 截取前 max_length 个字符
+        3. 超出部分添加 "..."
+        4. 空消息默认 "新对话"
+
+        Args:
+            content: 消息内容
+            max_length: 最大长度
+
+        Returns:
+            str: 生成的标题
+        """
+        if not content or not content.strip():
+            return "新对话"
+
+        # 去除首尾空白
+        content = content.strip()
+
+        # 去除末尾标点
+        punctuation = "。，！？,.!?、；;：:"
+        content = content.rstrip(punctuation)
+
+        if not content:
+            return "新对话"
+
+        if len(content) <= max_length:
+            return content
+
+        return content[:max_length] + "..."
+
+    def build_context(
+        self,
+        patient_info: Optional[Dict[str, Any]] = None,
+        conversation_stage: Optional[str] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> MessageContext:
+        """
+        构建消息上下文
+
+        Args:
+            patient_info: 患者信息
+            conversation_stage: 对话阶段
+            tool_results: 工具调用结果
+            metadata: 其他元数据
+
+        Returns:
+            MessageContext: 上下文对象
+        """
+        return MessageContext(
+            patient_info=patient_info,
+            conversation_stage=conversation_stage,
+            tool_results=tool_results,
+            metadata=metadata
+        )
+
+
+# 单例实例
+_persistence_service: Optional[ChatPersistenceService] = None
+
+
+def get_chat_persistence_service() -> ChatPersistenceService:
+    """获取对话持久化服务单例"""
+    global _persistence_service
+    if _persistence_service is None:
+        _persistence_service = ChatPersistenceService()
+    return _persistence_service
