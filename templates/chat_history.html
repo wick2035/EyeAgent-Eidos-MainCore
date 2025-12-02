@@ -433,20 +433,17 @@
             `;
 
             try {
-                // 判断是手机号还是ID
-                const isPhone = /^1[3-9]\d{9}$/.test(input);
-                const endpoint = isPhone
-                    ? `/api/chat/history/phone/${input}`
-                    : `/api/chat/history/${currentUserType}/${input}`;
+                // 使用新的会话API
+                const endpoint = `/api/conversations?host_id=${input}&user_type=${currentUserType}&limit=50&offset=0`;
 
                 const response = await fetch(endpoint);
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.error || '查询失败');
+                    throw new Error(data.detail || '查询失败');
                 }
 
-                displayChatList(data.chats || []);
+                displayChatList(data.conversations || []);
                 currentUserId = input;
             } catch (error) {
                 chatList.innerHTML = `
@@ -459,10 +456,10 @@
         }
 
         // 显示对话列表
-        function displayChatList(chats) {
+        function displayChatList(conversations) {
             const chatList = document.getElementById('chatList');
 
-            if (chats.length === 0) {
+            if (conversations.length === 0) {
                 chatList.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-icon">📭</div>
@@ -473,24 +470,20 @@
             }
 
             let html = '';
-            chats.forEach(chat => {
-                const statusClass = `status-${chat.Status || 'active'}`;
-                const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
-                const title = chat.Title || `对话 #${chatId}`;
-                const summary = chat.Summary || '暂无摘要';
-                const agent = chat.AI_Agent || '-';
-                const type = chat.Conversation_Type || 'general';
-                const messageCount = chat.Total_Messages || 0;
-                const time = formatDateTime(chat.Created_At);
+            conversations.forEach(conv => {
+                const chatId = conv.id;
+                const title = conv.title || `对话 #${chatId.substring(0, 8)}`;
+                const summary = conv.summary || '暂无摘要';
+                const messageCount = conv.total_messages || 0;
+                const time = formatDateTime(conv.create_time);
 
                 html += `
-                    <div class="chat-item" onclick="loadChatMessages('${chatId}')"
+                    <div class="chat-item" onclick="loadChatMessages('${chatId}')">
                         <div class="chat-item-header">
                             <span class="chat-title">${title}</span>
-                            <span class="chat-status ${statusClass}">${chat.Status || 'active'}</span>
                         </div>
                         <div class="chat-meta">
-                            🤖 ${agent} | 📁 ${type} | 💬 ${messageCount} 条消息
+                            💬 ${messageCount} 条消息
                         </div>
                         <div class="chat-summary">${summary}</div>
                         <div class="chat-meta" style="margin-top: 5px;">
@@ -522,11 +515,12 @@
             `;
 
             try {
-                const response = await fetch(`/api/chat/messages/${chatId}`);
+                // 使用新的会话详情API
+                const response = await fetch(`/api/conversations/${chatId}`);
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.error || '查询失败');
+                    throw new Error(data.detail || '查询失败');
                 }
 
                 displayMessages(data);
@@ -542,17 +536,17 @@
 
         // 显示消息
         function displayMessages(data) {
-            const chat = data.chat;
+            const conversation = data.conversation;
             const messages = data.messages || [];
 
             // 更新头部信息
-            const chatId = chat.Chat_UUID || chat.Chat_ID;  // 支持UUID
+            const chatId = conversation.id;
             document.getElementById('contentHeader').style.display = 'block';
-            document.getElementById('chatTitle').textContent = chat.Title || `对话 #${chatId}`;
-            document.getElementById('chatAgent').textContent = `Agent: ${chat.AI_Agent || '-'}`;
-            document.getElementById('chatType').textContent = `类型: ${chat.Conversation_Type || 'general'}`;
-            document.getElementById('chatMessages').textContent = `消息数: ${chat.Total_Messages || 0}`;
-            document.getElementById('chatTime').textContent = `时间: ${formatDateTime(chat.Created_At)}`;
+            document.getElementById('chatTitle').textContent = conversation.title || `对话 #${chatId.substring(0, 8)}`;
+            document.getElementById('chatAgent').textContent = `用户类型: ${conversation.user_type || '-'}`;
+            document.getElementById('chatType').textContent = `Host: ${(conversation.host_id || '').substring(0, 8)}...`;
+            document.getElementById('chatMessages').textContent = `消息数: ${conversation.total_messages || 0}`;
+            document.getElementById('chatTime').textContent = `时间: ${formatDateTime(conversation.create_time)}`;
 
             // 显示消息
             const container = document.getElementById('messagesContainer');
@@ -569,12 +563,12 @@
 
             let html = '';
             messages.forEach(msg => {
-                const isUser = msg.Message_Type === 'user';
+                const isUser = msg.message_type === 'user';
                 const avatar = isUser ? '👤' : '🤖';
                 const messageClass = isUser ? 'user-message' : 'ai-message';
                 const avatarClass = isUser ? 'user-avatar' : 'ai-avatar';
-                const sender = msg.Sender_Info || (isUser ? '用户' : 'AI助手');
-                const time = formatDateTime(msg.Created_At);
+                const sender = msg.sender_id || (isUser ? '用户' : 'AI助手');
+                const time = formatDateTime(msg.create_time);
 
                 html += `
                     <div class="message ${messageClass}">
@@ -582,9 +576,9 @@
                             <div class="message-avatar ${avatarClass}">${avatar}</div>
                             <span class="message-sender">${sender}</span>
                             <span class="message-time">${time}</span>
-                            <span class="message-order">#${msg.Message_Order}</span>
+                            <span class="message-order">#${msg.message_order}</span>
                         </div>
-                        <div class="message-content">${escapeHtml(msg.Message_Content)}</div>
+                        <div class="message-content">${escapeHtml(msg.message_content)}</div>
                     </div>
                 `;
             });

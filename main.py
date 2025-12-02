@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, agent_router
+from presentation.routers import chat_router, agent_router, conversation_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 
 # 配置日志
@@ -44,6 +44,7 @@ templates = Jinja2Templates(directory="templates")
 # 注册路由
 app.include_router(chat_router.router)
 app.include_router(agent_router.router)
+app.include_router(conversation_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
@@ -187,10 +188,17 @@ async def api_info():
         "endpoints": {
             "chat": "/api/chat",
             "users": "/api/users",
+            "conversations": "/api/conversations",
+            "conversation_detail": "/api/conversations/{conversation_id}",
             "agent_status": "/api/agents/sessions/{session_id}",
             "list_sessions": "/api/agents/sessions",
             "cleanup": "/api/agents/cleanup",
             "stats": "/api/agents/stats",
+        },
+        "new_features": {
+            "conversation_persistence": "对话历史自动保存到数据库",
+            "conversation_list": "GET /api/conversations 获取历史会话列表",
+            "continue_conversation": "POST /api/chat 传入 conversation_id 继续对话",
         },
         "breaking_changes": {
             "patient_id": "现在必需，且必须是UUID格式",
@@ -201,6 +209,7 @@ async def api_info():
 
 
 if __name__ == "__main__":
+    print("http://127.0.0.1:8000")
     import uvicorn
     uvicorn.run(
         "main:app",
@@ -209,3 +218,4 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+

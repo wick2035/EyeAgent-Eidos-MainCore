@@ -1,8 +1,9 @@
 """
 智能体管理器 - 重构版
 基于清洁架构和Session管理器
+支持对话历史持久化
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 import logging
 
 from domain.enums.agent_type import AgentType
@@ -10,6 +11,9 @@ from agents.health.health_agent import HealthAgent
 from agents.report.report_agent import ReportAgent
 from agents.reminder.reminder_agent import ReminderAgent
 from infrastructure.session.session_manager import get_session_manager
+
+if TYPE_CHECKING:
+    from application.services.chat_persistence_service import ChatPersistenceService
 
 logger = logging.getLogger(__name__)
 
@@ -31,28 +35,32 @@ class AgentManager:
         logger.info("[AgentManager] 初始化完成")
     
     def create_agent(
-        self, 
+        self,
         session_id: str,
         patient_id: str,
         agent_type: str = "health",
-        role: str = "patient"
+        role: str = "patient",
+        conversation_id: Optional[str] = None,
+        persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
         """
         创建新的智能体实例
-        
+
         Args:
             session_id: 会话ID
             patient_id: 患者UUID（必需）
             agent_type: Agent类型 (health/report/reminder)
             role: 用户角色 (patient/doctor)
-        
+            conversation_id: 数据库会话ID（用于继续对话）
+            persistence_service: 持久化服务
+
         Returns:
             创建的Agent实例
-        
+
         Raises:
             ValueError: 如果agent_type无效
         """
-        logger.info(f"[AgentManager] 创建Agent - session={session_id}, patient={patient_id}, type={agent_type}")
+        logger.info(f"[AgentManager] 创建Agent - session={session_id}, patient={patient_id}, type={agent_type}, conversation_id={conversation_id}")
 
         # 确保有patient_id
         if not patient_id:
@@ -89,13 +97,31 @@ class AgentManager:
         
         try:
             agent_type_enum = AgentType.from_string(agent_type)
-            
+
             if agent_type_enum == AgentType.HEALTH:
-                agent = HealthAgent(patient_id=patient_id, session_id=session_id, role=role)
+                agent = HealthAgent(
+                    patient_id=patient_id,
+                    session_id=session_id,
+                    role=role,
+                    conversation_id=conversation_id,
+                    persistence_service=persistence_service
+                )
             elif agent_type_enum == AgentType.REPORT:
-                agent = ReportAgent(patient_id=patient_id, session_id=session_id, role=role)
+                agent = ReportAgent(
+                    patient_id=patient_id,
+                    session_id=session_id,
+                    role=role,
+                    conversation_id=conversation_id,
+                    persistence_service=persistence_service
+                )
             elif agent_type_enum == AgentType.REMINDER:
-                agent = ReminderAgent(patient_id=patient_id, session_id=session_id, role=role)
+                agent = ReminderAgent(
+                    patient_id=patient_id,
+                    session_id=session_id,
+                    role=role,
+                    conversation_id=conversation_id,
+                    persistence_service=persistence_service
+                )
             else:
                 raise ValueError(f"未知的智能体类型: {agent_type}")
             
@@ -151,36 +177,45 @@ class AgentManager:
         session_id: str,
         patient_id: str,
         agent_type: str = "health",
-        role: str = "patient"
+        role: str = "patient",
+        conversation_id: Optional[str] = None,
+        persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
         """
         获取或创建会话对应的智能体
-        
+
         Args:
             session_id: 会话ID
             patient_id: 患者UUID
             agent_type: Agent类型 (health/report/reminder)
             role: 用户角色 (patient/doctor)
-        
+            conversation_id: 数据库会话ID（用于继续对话）
+            persistence_service: 持久化服务
+
         Returns:
             Agent实例
         """
-        logger.debug(f"[AgentManager] get_or_create_agent - session={session_id}")
-        
+        logger.debug(f"[AgentManager] get_or_create_agent - session={session_id}, conversation_id={conversation_id}")
+
         # 尝试获取现有agent
         agent = self.get_agent(session_id)
-        
+
         if agent:
             logger.debug(f"[AgentManager] 返回已存在的Agent")
+            # 如果有持久化服务但agent还没设置，则设置
+            if persistence_service and conversation_id and not agent.db_conversation_id:
+                agent.set_persistence(persistence_service, conversation_id)
             return agent
-        
+
         # 创建新agent
         logger.debug(f"[AgentManager] 创建新Agent")
         return self.create_agent(
             session_id=session_id,
             patient_id=patient_id,
             agent_type=agent_type,
-            role=role
+            role=role,
+            conversation_id=conversation_id,
+            persistence_service=persistence_service
         )
     
     def remove_agent(self, session_id: str) -> bool:
