@@ -31,6 +31,15 @@ class ConversationStage(str, Enum):
     CONFIG_SETTINGS = "config_settings"  # 配置设置
     GENERATE_BIOMECHANICS_REPORT = "generate_biomechanics_report"  # 生成生物力学报告
     
+    # ========== Research Agent 阶段 ==========
+    RESEARCH_INIT = "research_init"  # 初始化，了解研究需求
+    DATA_QUERY = "data_query"  # 机构数据查询
+    WEB_SEARCH = "web_search"  # 网页搜索
+    STATISTICAL_ANALYSIS = "statistical_analysis"  # 统计分析
+    LITERATURE_REVIEW = "literature_review"  # 文献综述
+    RESEARCH_DESIGN = "research_design"  # 研究方案设计
+    PAPER_WRITING = "paper_writing"  # 论文写作
+
     # ========== 通用阶段 ==========
     COMPLETED = "completed"  # 完成
     
@@ -84,4 +93,18 @@ class ConversationStage(str, Enum):
             self.GENERATE_BIOMECHANICS_REPORT,
         ]
         return self in reminder_stages
+
+    def is_research_stage(self) -> bool:
+        """是否是科研智能体的阶段"""
+        research_stages = [
+            self.GREETING,
+            self.RESEARCH_INIT,
+            self.DATA_QUERY,
+            self.WEB_SEARCH,
+            self.STATISTICAL_ANALYSIS,
+            self.LITERATURE_REVIEW,
+            self.RESEARCH_DESIGN,
+            self.PAPER_WRITING,
+        ]
+        return self in research_stages
 
