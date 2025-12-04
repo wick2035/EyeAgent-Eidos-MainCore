@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, agent_router, conversation_router
+from presentation.routers import chat_router, agent_router, conversation_router, research_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 
 # 配置日志
@@ -45,10 +45,12 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(chat_router.router)
 app.include_router(agent_router.router)
 app.include_router(conversation_router.router)
+app.include_router(research_router.router)  # 医问通科研Agent路由
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
 logger.info("架构版本: 2.0.0 (清洁架构)")
+logger.info("已启用: ResearchAgent (医问通科研Agent)")
 logger.info("=" * 80)
 
 
@@ -56,6 +58,13 @@ logger.info("=" * 80)
 async def index(request: Request):
     """返回聊天界面"""
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/research-test", response_class=HTMLResponse)
+async def research_test_page():
+    """返回科研Agent测试页面"""
+    with open("static/research_test.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/health")
@@ -194,11 +203,17 @@ async def api_info():
             "list_sessions": "/api/agents/sessions",
             "cleanup": "/api/agents/cleanup",
             "stats": "/api/agents/stats",
+            "research_chat": "/api/research/chat",
+            "research_chat_stream": "/api/research/chat/stream",
+            "research_conversations": "/api/research/conversations",
+            "research_health": "/api/research/health",
         },
         "new_features": {
             "conversation_persistence": "对话历史自动保存到数据库",
             "conversation_list": "GET /api/conversations 获取历史会话列表",
             "continue_conversation": "POST /api/chat 传入 conversation_id 继续对话",
+            "research_agent": "医问通科研Agent，支持文献搜索和机构数据分析",
+            "sse_streaming": "科研Agent支持SSE流式响应",
         },
         "breaking_changes": {
             "patient_id": "现在必需，且必须是UUID格式",
