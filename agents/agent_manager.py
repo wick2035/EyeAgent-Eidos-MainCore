@@ -10,6 +10,7 @@ from domain.enums.agent_type import AgentType
 from agents.health.health_agent import HealthAgent
 from agents.report.report_agent import ReportAgent
 from agents.reminder.reminder_agent import ReminderAgent
+from agents.research.research_agent import ResearchAgent
 from infrastructure.session.session_manager import get_session_manager
 
 if TYPE_CHECKING:
@@ -119,6 +120,14 @@ class AgentManager:
                     patient_id=patient_id,
                     session_id=session_id,
                     role=role,
+                    conversation_id=conversation_id,
+                    persistence_service=persistence_service
+                )
+            elif agent_type_enum == AgentType.RESEARCH:
+                # ResearchAgent: patient_id实际上是doctor_id
+                agent = ResearchAgent(
+                    doctor_id=patient_id,  # 对于ResearchAgent，这里传入的是doctor_id
+                    session_id=session_id,
                     conversation_id=conversation_id,
                     persistence_service=persistence_service
                 )
