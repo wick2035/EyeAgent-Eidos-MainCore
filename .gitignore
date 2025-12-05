@@ -1,2 +1,39 @@
-/.env
-/.idea
+# 环境配置
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 日志
+*.log
+logs/
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 构建
+build/
+dist/
+*.egg-info/
+
+# 临时文件
+*.tmp
+*.temp
+nul
