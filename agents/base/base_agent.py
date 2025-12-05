@@ -387,8 +387,12 @@ class BaseAgent(ABC):
             # 4. 调用 Agent Executor 或简单 LLM
             if self.agent_executor:
                 # 使用支持工具调用的 Agent
+                # 传递所有可能需要的参数，支持系统提示词中的占位符
                 result = self.agent_executor.invoke({
                     "input": enhanced_input,
+                    "stage": stage_prompt,
+                    "history": history_text,
+                    "additional_context": additional_context,
                 })
                 response = result.get("output", "")
                 logger.info(f"[{self.__class__.__name__}] Agent 执行完成，工具调用情况已记录")
