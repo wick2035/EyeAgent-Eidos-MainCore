@@ -217,6 +217,8 @@ def web_search_medical(
 # ========== 继承自现有Agent的工具（排除报告生成）==========
 
 from agents.tools.agent_tools import (
+    # 通用工具
+    get_current_time,
     # Agent 1 工具
     get_patient_prescription,
     get_doctor_free_time,
@@ -264,6 +266,8 @@ from agents.tools.research_tools_v3 import (
 
 # 继承的工具列表（排除报告生成）
 INHERITED_TOOLS = [
+    # 通用工具
+    get_current_time,
     # Agent 1 - 预约相关
     get_patient_prescription,
     get_doctor_free_time,
