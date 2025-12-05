@@ -8,6 +8,7 @@ Author: Claude Code
 
 import json
 import logging
+from datetime import datetime
 from langchain.tools import tool
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 
@@ -553,15 +554,57 @@ def create_reminder(
         return error_msg
 
 
+# ========== 通用工具 ==========
+
+@tool
+def get_current_time() -> str:
+    """
+    获取当前系统时间。
+
+    Returns:
+        包含当前日期和时间的JSON字符串，格式：
+        {
+            "datetime": "2025-12-05T14:30:00",
+            "date": "2025-12-05",
+            "time": "14:30:00",
+            "weekday": "星期四",
+            "timestamp": 1733391000
+        }
+
+    使用场景：
+    - 预约时需要知道当前日期，判断用户请求的是哪一天
+    - 创建提醒时需要确认时间的合理性
+    - 用户询问"今天"、"明天"等相对时间时进行转换
+    """
+    now = datetime.now()
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+    result = {
+        "datetime": now.strftime("%Y-%m-%dT%H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+        "weekday": weekdays[now.weekday()],
+        "timestamp": int(now.timestamp())
+    }
+
+    logger.info(f"[Tool] get_current_time: {result['datetime']}")
+    return json.dumps(result, ensure_ascii=False)
+
+
 # ========== 工具列表（按 Agent 分类）==========
 
-AGENT_1_TOOLS = [
+# 通用工具（所有 Agent 共享）
+COMMON_TOOLS = [
+    get_current_time,
+]
+
+AGENT_1_TOOLS = COMMON_TOOLS + [
     get_patient_prescription,
     get_doctor_free_time,
     reserve_doctor,
 ]
 
-AGENT_2_TOOLS = [
+AGENT_2_TOOLS = COMMON_TOOLS + [
     get_patient_prescription_limit,
     get_patient_prescription_detail,
     get_patient_scan_data,
@@ -569,7 +612,7 @@ AGENT_2_TOOLS = [
     generate_prescription_pdf,
 ]
 
-AGENT_3_TOOLS = [
+AGENT_3_TOOLS = COMMON_TOOLS + [
     get_patient_reminder,
     get_patient_reminder_config,
     init_patient_reminder_config,
