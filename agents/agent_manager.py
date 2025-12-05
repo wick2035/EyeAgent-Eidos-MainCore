@@ -279,31 +279,37 @@ class AgentManager:
         session_id: str,
         new_agent_type: str,
         patient_id: str,
-        role: str = "patient"
+        role: str = "patient",
+        conversation_id: Optional[str] = None,
+        persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
         """
         切换智能体类型（热切换）
-        
+
         Args:
             session_id: 会话ID
             new_agent_type: 新的Agent类型
             patient_id: 患者UUID
             role: 用户角色
-        
+            conversation_id: 数据库会话ID（用于继续对话）
+            persistence_service: 持久化服务
+
         Returns:
             新的Agent实例
         """
         logger.info(f"[AgentManager] 切换Agent类型: {session_id} -> {new_agent_type}")
-        
+
         # 删除旧agent
         self.remove_agent(session_id)
-        
+
         # 创建新agent
         return self.create_agent(
             session_id=session_id,
             patient_id=patient_id,
             agent_type=new_agent_type,
-            role=role
+            role=role,
+            conversation_id=conversation_id,
+            persistence_service=persistence_service
         )
     
     def get_active_sessions_count(self) -> int:

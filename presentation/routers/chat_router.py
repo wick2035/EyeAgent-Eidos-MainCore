@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, status
 from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
 from agents.agent_manager import AgentManager
 from application.services.chat_persistence_service import get_chat_persistence_service
+from utils.hybrid_intent_router import get_hybrid_router
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +72,58 @@ async def chat(request: ChatRequest) -> ChatResponse:
             )
             logger.info(f"[ChatRouter] 创建新会话: {conversation_id}, host_id={host_id}")
 
-        # 获取或创建agent（带持久化支持）
-        agent = agent_manager.get_or_create_agent(
-            session_id=session_id,
-            patient_id=request.patient_id,
-            agent_type=request.agent_type,
-            role=request.role,
-            conversation_id=conversation_id,
-            persistence_service=persistence_service
-        )
+        # === 意图检测与自动路由 ===
+        # 如果请求没有明确指定agent_type，或使用默认值，则进行意图检测
+        effective_agent_type = request.agent_type or "health"
+        need_switch = False  # 是否需要切换Agent
+
+        if request.role != "doctor":  # 仅患者端启用自动路由
+            try:
+                hybrid_router = get_hybrid_router()
+
+                intent_result = hybrid_router.route(
+                    message=request.message,
+                    role=request.role or "patient",
+                    current_agent=effective_agent_type
+                )
+
+                # 如果检测到不同的意图且置信度足够高，使用检测到的agent类型
+                if hybrid_router.should_switch_agent(
+                    current_agent=effective_agent_type,
+                    detected_intent=intent_result,
+                    threshold=0.7
+                ):
+                    detected_type = intent_result.get('agent_type')
+                    logger.info(
+                        f"[ChatRouter] 意图检测: '{request.message}' -> {detected_type} "
+                        f"(置信度: {intent_result.get('confidence', 0):.2f})"
+                    )
+                    effective_agent_type = detected_type
+                    need_switch = True  # 标记需要切换Agent
+            except Exception as e:
+                logger.warning(f"[ChatRouter] 意图检测失败，使用默认agent_type: {e}")
+
+        # 根据是否需要切换选择不同的方法
+        if need_switch:
+            # 切换到新的Agent类型（删除旧Agent，创建新Agent）
+            agent = agent_manager.switch_agent_type(
+                session_id=session_id,
+                new_agent_type=effective_agent_type,
+                patient_id=request.patient_id,
+                role=request.role,
+                conversation_id=conversation_id,
+                persistence_service=persistence_service
+            )
+        else:
+            # 获取或创建agent（带持久化支持）
+            agent = agent_manager.get_or_create_agent(
+                session_id=session_id,
+                patient_id=request.patient_id,
+                agent_type=effective_agent_type,
+                role=request.role,
+                conversation_id=conversation_id,
+                persistence_service=persistence_service
+            )
 
         # 调用agent处理消息
         response_text = agent.chat(request.message)
