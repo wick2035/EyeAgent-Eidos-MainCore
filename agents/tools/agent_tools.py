@@ -491,7 +491,7 @@ def create_reminder(
 
     Args:
         patient_id: 患者UUID
-        reminder_type: 提醒类型，可选值：FOLLOW_UP(复诊)/APPOINTMENT(预约)/MEDICATION(用药)
+        reminder_type: 提醒类型，可选值：RESERVE(预约/复诊/看病)/MEDICATION(用药)
         reminder_title: 提醒标题
         reminder_content: 提醒内容
         scheduled_time: 计划提醒时间，格式 yyyy-MM-ddTHH:mm:ss（如 "2025-12-10T09:00:00"）
@@ -513,17 +513,26 @@ def create_reminder(
     - 设置用药提醒、复诊提醒、预约提醒等
 
     示例：
-    - 复诊提醒：reminder_type="FOLLOW_UP", scheduled_time="2025-12-15T09:00:00"
+    - 预约/复诊提醒：reminder_type="RESERVE", scheduled_time="2025-12-15T09:00:00"
     - 用药提醒：reminder_type="MEDICATION", repeat_type="DAILY", max_repeat_count=7
     """
     try:
         logger.info(f"[Tool] create_reminder: patient_id={patient_id}, type={reminder_type}, scheduled={scheduled_time}")
 
-        # 转换枚举值为大写（API 期望大写格式：FOLLOW_UP/APPOINTMENT/MEDICATION 等）
+        # 转换枚举值为大写
         reminder_type = reminder_type.upper()
         priority = priority.upper()
         repeat_type = repeat_type.upper()
         notification_method = notification_method.upper()
+
+        # 提醒类型映射（API 只接受 RESERVE/MEDICATION/SYSTEM，患者只能创建前两种）
+        TYPE_MAPPING = {
+            "FOLLOW_UP": "RESERVE",      # 复诊 → 预约
+            "APPOINTMENT": "RESERVE",    # 预约 → 预约
+            "RESERVE": "RESERVE",        # 预约 → 预约
+            "MEDICATION": "MEDICATION",  # 用药 → 用药
+        }
+        reminder_type = TYPE_MAPPING.get(reminder_type, "RESERVE")
 
         reminder_data = {
             "reminderType": reminder_type,
