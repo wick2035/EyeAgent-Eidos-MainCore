@@ -519,6 +519,12 @@ def create_reminder(
     try:
         logger.info(f"[Tool] create_reminder: patient_id={patient_id}, type={reminder_type}, scheduled={scheduled_time}")
 
+        # 转换枚举值为大写（API 期望大写格式：FOLLOW_UP/APPOINTMENT/MEDICATION 等）
+        reminder_type = reminder_type.upper()
+        priority = priority.upper()
+        repeat_type = repeat_type.upper()
+        notification_method = notification_method.upper()
+
         reminder_data = {
             "reminderType": reminder_type,
             "reminderTitle": reminder_title,
