@@ -3,22 +3,24 @@ BaseAgent - 所有智能体的抽象基类
 消除40%代码重复，提供统一的对话管理和工具集成框架
 支持 LangChain Agent 工具调用
 支持对话历史持久化
+支持流式输出 (astream_events)
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, TYPE_CHECKING, AsyncGenerator
 from langchain.chat_models.base import BaseChatModel
 from langchain.tools import Tool
 from langchain.agents import initialize_agent, AgentType as LangChainAgentType, AgentExecutor
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import logging
+import asyncio
 
 from domain.models.conversation import Conversation
 from domain.enums.agent_type import AgentType
 from domain.enums.conversation_stage import ConversationStage
 from domain.models.chat_entity import MessageContext
 from agents.base.conversation_manager import ConversationManager
-from utils.llm_config import get_llm
+from utils.llm_config import get_llm, get_streaming_llm
 
 if TYPE_CHECKING:
     from application.services.chat_persistence_service import ChatPersistenceService
@@ -418,6 +420,141 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"[{self.__class__.__name__}] chat异常: {e}", exc_info=True)
             return f"抱歉，处理您的请求时出现了问题：{str(e)}"
+
+    async def chat_stream(self, user_input: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式处理用户输入，实时返回事件
+
+        使用 LangChain astream_events() API 实现真正的流式输出
+
+        事件类型:
+        - {"event": "token", "content": "..."}  # LLM 输出的 token
+        - {"event": "tool_start", "tool": "...", "input": {...}}  # 工具调用开始
+        - {"event": "tool_end", "tool": "...", "output": "..."}  # 工具调用结束
+        - {"event": "error", "message": "..."}  # 错误
+        - {"event": "done", "response": "..."}  # 完成
+
+        Args:
+            user_input: 用户输入
+
+        Yields:
+            事件字典
+        """
+        full_response = ""
+
+        try:
+            logger.info(f"[{self.__class__.__name__}] 收到流式请求: {user_input[:50]}...")
+
+            # 1. 添加用户消息到历史
+            self.conversation_manager.add_user_message(user_input)
+
+            # 2. 提取信息并构建增强输入
+            extracted_info = self._extract_info_from_input(user_input)
+            additional_context = self._build_additional_context(extracted_info)
+            stage_prompt = self._get_stage_prompt()
+            history_text = self._get_conversation_history_text()
+
+            enhanced_input = f"""【当前上下文】
+{additional_context}
+
+当前阶段: {stage_prompt}
+
+【对话历史】
+{history_text}
+
+【用户当前消息】
+{user_input}"""
+
+            # 3. 创建流式 Agent Executor
+            if self.tools:
+                streaming_llm = get_streaming_llm()
+                system_prompt = self._create_system_prompt()
+                tools_description = self._build_tools_description()
+                full_prefix = system_prompt + "\n\n" + tools_description
+
+                streaming_agent = initialize_agent(
+                    tools=self.tools,
+                    llm=streaming_llm,
+                    agent=LangChainAgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+                    verbose=False,  # 流式模式下关闭 verbose
+                    handle_parsing_errors=True,
+                    max_iterations=5,
+                    agent_kwargs={
+                        "prefix": full_prefix,
+                    }
+                )
+
+                # 4. 使用 astream_events 获取流式事件
+                async for event in streaming_agent.astream_events(
+                    {"input": enhanced_input},
+                    version="v1"
+                ):
+                    event_kind = event.get("event")
+
+                    # LLM 输出 token
+                    if event_kind == "on_chat_model_stream":
+                        chunk = event.get("data", {}).get("chunk")
+                        if chunk and hasattr(chunk, "content") and chunk.content:
+                            content = chunk.content
+                            full_response += content
+                            yield {"event": "token", "content": content}
+
+                    # 工具调用开始
+                    elif event_kind == "on_tool_start":
+                        tool_name = event.get("name", "unknown")
+                        tool_input = event.get("data", {}).get("input", {})
+                        logger.info(f"[{self.__class__.__name__}] 工具调用开始: {tool_name}")
+                        yield {
+                            "event": "tool_start",
+                            "tool": tool_name,
+                            "input": tool_input
+                        }
+
+                    # 工具调用结束
+                    elif event_kind == "on_tool_end":
+                        tool_name = event.get("name", "unknown")
+                        tool_output = event.get("data", {}).get("output", "")
+                        logger.info(f"[{self.__class__.__name__}] 工具调用结束: {tool_name}")
+                        yield {
+                            "event": "tool_end",
+                            "tool": tool_name,
+                            "output": str(tool_output)[:500]  # 限制输出长度
+                        }
+
+                    # 链错误
+                    elif event_kind == "on_chain_error":
+                        error_msg = str(event.get("data", {}).get("error", "未知错误"))
+                        logger.error(f"[{self.__class__.__name__}] 链错误: {error_msg}")
+                        yield {"event": "error", "message": error_msg}
+
+            else:
+                # 无工具时，使用简单的流式 LLM 调用
+                streaming_llm = get_streaming_llm()
+                system_prompt = self._create_system_prompt()
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=enhanced_input)
+                ]
+
+                async for chunk in streaming_llm.astream(messages):
+                    if chunk.content:
+                        full_response += chunk.content
+                        yield {"event": "token", "content": chunk.content}
+
+            # 5. 添加AI响应到历史
+            if full_response:
+                self.conversation_manager.add_assistant_message(full_response)
+                # 处理阶段转换
+                self._handle_stage_transition(user_input, full_response)
+
+            # 6. 发送完成事件
+            yield {"event": "done", "response": full_response}
+
+            logger.info(f"[{self.__class__.__name__}] 流式响应完成，长度: {len(full_response)}")
+
+        except Exception as e:
+            logger.error(f"[{self.__class__.__name__}] chat_stream异常: {e}", exc_info=True)
+            yield {"event": "error", "message": str(e)}
 
     def _get_conversation_history_text(self) -> str:
         """获取对话历史文本"""
