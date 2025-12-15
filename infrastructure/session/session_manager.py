@@ -21,12 +21,12 @@ class SessionManager:
     注意：当前实现使用内存字典，生产环境应使用Redis或后端API
     """
     
-    def __init__(self, ttl_minutes: int = 120):
+    def __init__(self, ttl_minutes: int = 30):
         """
         初始化SessionManager
 
         Args:
-            ttl_minutes: 会话过期时间（分钟），默认120分钟（2小时）
+            ttl_minutes: 会话过期时间（分钟），默认30分钟
         """
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._ttl = timedelta(minutes=ttl_minutes)
