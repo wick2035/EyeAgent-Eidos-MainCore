@@ -276,6 +276,79 @@
             text-align: center;
         }
 
+        /* 工具调用指示器样式 */
+        .tool-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
+            border-radius: 8px;
+            font-size: 13px;
+            color: #5c6bc0;
+            margin-bottom: 8px;
+            border-left: 3px solid #667eea;
+        }
+
+        .tool-indicator.loading {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .tool-indicator.completed {
+            background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+            border-left-color: #4caf50;
+            color: #2e7d32;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .tool-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #667eea;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .tool-icon {
+            font-size: 14px;
+        }
+
+        .tool-name {
+            font-weight: 500;
+        }
+
+        .tool-status {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        .message-wrapper {
+            display: flex;
+            flex-direction: column;
+            max-width: 80%;
+        }
+
+        #toolIndicators {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        #toolIndicators:empty {
+            display: none;
+            margin-bottom: 0;
+        }
+
         .chat-input-area {
             padding: 15px 20px;
             background: white;
@@ -707,6 +780,31 @@
         let currentConversationId = null;
         let isStreaming = false;
 
+        // 工具名称友好化映射
+        const TOOL_NAME_MAP = {
+            'web_search_medical': { name: '医学文献搜索', icon: '🔍' },
+            'get_institution_research_data': { name: '机构数据查询', icon: '🏥' },
+            'statistical_analysis': { name: '统计分析', icon: '📊' },
+            'summarize_medical_literature': { name: '文献处理', icon: '📄' },
+            'generate_research_visualization': { name: '数据可视化', icon: '📈' },
+            'design_research_protocol': { name: '研究方案设计', icon: '📋' },
+            'assist_paper_writing': { name: '论文写作助手', icon: '✍️' },
+            'search_clinical_guidelines': { name: '临床指南查询', icon: '📖' },
+            'check_drug_interactions': { name: '药物相互作用检查', icon: '💊' },
+            'find_similar_cases': { name: '相似病例匹配', icon: '🔎' },
+            'ethics_review_assistant': { name: '伦理审查助手', icon: '⚖️' },
+            'export_research_data': { name: '数据导出', icon: '💾' },
+            'get_patient_prescription': { name: '查询处方', icon: '💊' },
+            'get_patient_scan_data': { name: '查询扫描数据', icon: '🩻' },
+            'reserve_doctor': { name: '预约医生', icon: '📅' },
+            'get_doctor_free_time': { name: '查询医生空闲时间', icon: '🕐' }
+        };
+
+        // 获取工具友好名称
+        function getToolDisplayInfo(toolName) {
+            return TOOL_NAME_MAP[toolName] || { name: toolName, icon: '🔧' };
+        }
+
         // 初始化
         document.addEventListener('DOMContentLoaded', function() {
             // 网页搜索开关联动
@@ -943,6 +1041,7 @@
             const decoder = new TextDecoder();
             let fullResponse = '';
             let responseData = null;
+            const activeTools = new Map(); // 跟踪活动的工具调用
 
             // 移除加载指示器，添加空消息
             removeTypingIndicator();
@@ -950,7 +1049,10 @@
             msgDiv.className = 'message assistant';
             msgDiv.innerHTML = `
                 <div class="message-avatar">AI</div>
-                <div class="message-content" id="streamContent"></div>
+                <div class="message-wrapper">
+                    <div id="toolIndicators"></div>
+                    <div class="message-content" id="streamContent"></div>
+                </div>
             `;
             document.getElementById('chatMessages').appendChild(msgDiv);
 
@@ -971,11 +1073,55 @@
                                 case 'start':
                                     log('info', `SSE开始: session=${data.session_id}`);
                                     break;
+
+                                case 'tool_call':
+                                    const toolInfo = getToolDisplayInfo(data.tool);
+                                    const toolId = `tool-${data.tool}`;
+                                    const indicatorContainer = document.getElementById('toolIndicators');
+
+                                    if (data.status === 'start') {
+                                        // 工具调用开始 - 添加加载指示器
+                                        activeTools.set(data.tool, true);
+                                        const indicator = document.createElement('div');
+                                        indicator.id = toolId;
+                                        indicator.className = 'tool-indicator loading';
+                                        indicator.innerHTML = `
+                                            <div class="tool-spinner"></div>
+                                            <span class="tool-icon">${toolInfo.icon}</span>
+                                            <span class="tool-name">${toolInfo.name}</span>
+                                            <span class="tool-status">正在执行...</span>
+                                        `;
+                                        indicatorContainer.appendChild(indicator);
+                                        log('info', `工具调用: ${toolInfo.name} 开始`);
+                                    } else if (data.status === 'end') {
+                                        // 工具调用结束 - 更新指示器状态
+                                        activeTools.delete(data.tool);
+                                        const indicator = document.getElementById(toolId);
+                                        if (indicator) {
+                                            indicator.className = 'tool-indicator completed';
+                                            indicator.innerHTML = `
+                                                <span class="tool-icon">✓</span>
+                                                <span class="tool-name">${toolInfo.name}</span>
+                                                <span class="tool-status">已完成</span>
+                                            `;
+                                            // 2秒后淡出移除
+                                            setTimeout(() => {
+                                                indicator.style.opacity = '0';
+                                                indicator.style.transition = 'opacity 0.3s';
+                                                setTimeout(() => indicator.remove(), 300);
+                                            }, 2000);
+                                        }
+                                        log('success', `工具调用: ${toolInfo.name} 完成`);
+                                    }
+                                    document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+                                    break;
+
                                 case 'chunk':
                                     fullResponse += data.content;
                                     document.getElementById('streamContent').innerText = fullResponse;
                                     document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
                                     break;
+
                                 case 'done':
                                     responseData = data;
                                     currentConversationId = data.conversation_id;
@@ -984,8 +1130,22 @@
                                     document.getElementById('responseViewer').innerHTML = formatJSON(data);
                                     log('success', `SSE完成: ${data.response.length}字符`);
                                     break;
+
                                 case 'error':
                                     log('error', `SSE错误: ${data.message}`);
+                                    // 清除所有活动工具指示器
+                                    activeTools.forEach((_, tool) => {
+                                        const indicator = document.getElementById(`tool-${tool}`);
+                                        if (indicator) {
+                                            indicator.className = 'tool-indicator';
+                                            indicator.style.borderLeftColor = '#f44336';
+                                            indicator.innerHTML = `
+                                                <span class="tool-icon">❌</span>
+                                                <span class="tool-name">${getToolDisplayInfo(tool).name}</span>
+                                                <span class="tool-status">执行失败</span>
+                                            `;
+                                        }
+                                    });
                                     break;
                             }
                         } catch (e) {

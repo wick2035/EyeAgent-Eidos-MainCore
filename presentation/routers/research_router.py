@@ -54,12 +54,17 @@ async def generate_sse_response(
     conversation_id: str
 ) -> AsyncGenerator[str, None]:
     """
-    生成SSE流式响应
+    生成SSE流式响应（真流式）
+
+    使用 agent.chat_stream() 实现真正的流式输出，包括：
+    - LLM token 实时输出
+    - 工具调用开始/结束事件
+    - 错误事件
 
     SSE消息格式:
     - start: 开始处理
-    - chunk: 内容块
-    - tool_call: 工具调用通知
+    - chunk: LLM输出的内容块（实时）
+    - tool_call: 工具调用通知（开始/结束）
     - done: 完成，包含摘要信息
     - error: 错误信息
 
@@ -71,6 +76,9 @@ async def generate_sse_response(
     Yields:
         SSE格式的消息
     """
+    full_response = ""
+    chunk_index = 0
+
     try:
         # 发送开始事件
         start_data = {
@@ -81,23 +89,53 @@ async def generate_sse_response(
         }
         yield f"data: {json.dumps(start_data, ensure_ascii=False)}\n\n"
 
-        # 调用agent处理消息（在线程池中运行以避免阻塞）
-        loop = asyncio.get_event_loop()
-        response_text = await loop.run_in_executor(None, agent.chat, message)
+        # 使用流式方法处理消息
+        async for event in agent.chat_stream(message):
+            event_type = event.get("event")
 
-        # 流式输出响应（分块发送）
-        # 按句子或段落分割，模拟流式效果
-        chunks = split_response_into_chunks(response_text)
+            if event_type == "token":
+                # LLM 输出 token - 实时发送
+                content = event.get("content", "")
+                full_response += content
+                chunk_data = {
+                    "event": "chunk",
+                    "index": chunk_index,
+                    "content": content
+                }
+                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+                chunk_index += 1
 
-        for i, chunk in enumerate(chunks):
-            chunk_data = {
-                "event": "chunk",
-                "index": i,
-                "content": chunk,
-                "is_last": i == len(chunks) - 1
-            }
-            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.03)  # 短暂延迟，模拟打字效果
+            elif event_type == "tool_start":
+                # 工具调用开始
+                tool_call_data = {
+                    "event": "tool_call",
+                    "tool": event.get("tool", "unknown"),
+                    "status": "start",
+                    "input": event.get("input", {})
+                }
+                yield f"data: {json.dumps(tool_call_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "tool_end":
+                # 工具调用结束
+                tool_call_data = {
+                    "event": "tool_call",
+                    "tool": event.get("tool", "unknown"),
+                    "status": "end",
+                    "output": event.get("output", "")
+                }
+                yield f"data: {json.dumps(tool_call_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "error":
+                # 错误事件
+                error_data = {
+                    "event": "error",
+                    "message": event.get("message", "未知错误")
+                }
+                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "done":
+                # 完成事件 - 从 chat_stream 获取完整响应
+                full_response = event.get("response", full_response)
 
         # 获取对话摘要
         summary = agent.get_conversation_summary()
@@ -105,7 +143,7 @@ async def generate_sse_response(
         # 发送完成事件
         done_data = {
             "event": "done",
-            "response": response_text,  # 完整响应
+            "response": full_response,
             "session_id": agent.session_id,
             "conversation_id": conversation_id,
             "is_completed": summary["is_completed"],
