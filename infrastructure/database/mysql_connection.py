@@ -1,13 +1,18 @@
 """
 MySQL 数据库连接管理模块
-使用 pymysql 实现数据库连接，支持单例模式和连接池
+使用 DBUtils.PooledDB 实现线程安全的连接池
 """
 import os
+import time
+import random
 import logging
+import functools
 from typing import Optional, Any, List, Dict, Tuple
 from contextlib import contextmanager
+
 import pymysql
 from pymysql.cursors import DictCursor
+from dbutils.pooled_db import PooledDB
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -26,85 +31,229 @@ class ConnectionError(Exception):
     pass
 
 
-class MySQLConnection:
-    """
-    MySQL 数据库连接管理器
+# ===== 可重试错误码定义 =====
+RETRYABLE_ERRORS = {
+    2006,   # MySQL server has gone away
+    2013,   # Lost connection to MySQL server during query
+    2003,   # Can't connect to MySQL server (暂时性)
+    1213,   # Deadlock found when trying to get lock
+    1205,   # Lock wait timeout exceeded
+    0,      # 空错误码（某些连接断开情况）
+}
 
-    功能：
-    - 管理数据库连接
-    - 提供连接上下文管理器
-    - 支持事务操作
+# 不可重试错误码
+NON_RETRYABLE_ERRORS = {
+    1045,   # Access denied
+    1064,   # SQL syntax error
+    1146,   # Table doesn't exist
+    1054,   # Unknown column
+    1062,   # Duplicate entry
+    1452,   # Foreign key constraint fails
+}
+
+
+def is_retryable_error(error: Exception) -> bool:
+    """
+    判断是否是可重试错误
+
+    Args:
+        error: 异常对象
+
+    Returns:
+        是否可重试
+    """
+    if isinstance(error, pymysql.Error):
+        error_code = error.args[0] if error.args else 0
+
+        # 明确不可重试
+        if error_code in NON_RETRYABLE_ERRORS:
+            return False
+
+        # 明确可重试
+        if error_code in RETRYABLE_ERRORS:
+            return True
+
+        # 检查错误消息中的特征
+        error_msg = str(error).lower()
+        retryable_patterns = [
+            'lost connection',
+            'gone away',
+            'packet sequence',
+            'connection reset',
+            'broken pipe',
+            'deadlock',
+            'lock wait timeout',
+        ]
+        return any(pattern in error_msg for pattern in retryable_patterns)
+
+    # 检查消息中的特征（针对非 pymysql 错误）
+    error_msg = str(error).lower()
+    return 'connection' in error_msg or 'timeout' in error_msg
+
+
+def retry_on_connection_error(max_retries: int = 3, base_delay: float = 0.5, max_delay: float = 10.0):
+    """
+    连接错误重试装饰器
+
+    使用指数退避策略：delay = base_delay * (2 ** attempt) + random_jitter
+
+    Args:
+        max_retries: 最大重试次数
+        base_delay: 基础延迟（秒）
+        max_delay: 最大延迟（秒）
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            last_error = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as e:
+                    last_error = e
+
+                    # 检查是否可重试
+                    if not is_retryable_error(e):
+                        logger.error(f"[MySQLPool] 不可重试错误: {e}")
+                        raise
+
+                    # 最后一次尝试，不再重试
+                    if attempt >= max_retries:
+                        logger.error(
+                            f"[MySQLPool] 重试{max_retries}次后仍失败: {e}"
+                        )
+                        raise
+
+                    # 计算延迟（指数退避 + 随机抖动）
+                    delay = min(
+                        base_delay * (2 ** attempt) + random.uniform(0, 0.5),
+                        max_delay
+                    )
+
+                    logger.warning(
+                        f"[MySQLPool] 操作失败，{delay:.2f}秒后重试 "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(delay)
+
+            # 理论上不会到这里
+            raise last_error
+
+        return wrapper
+    return decorator
+
+
+class MySQLConnectionPool:
+    """
+    MySQL 连接池管理器
+
+    使用 DBUtils.PooledDB 实现线程安全的连接池。
+
+    特性：
+    - 线程安全：每个操作获取独立连接
+    - 自动重连：ping 检测失效连接
+    - 重试机制：可重试错误自动重试
+    - 连接复用：使用完毕自动归还池
     """
 
     def __init__(self):
-        """初始化数据库连接配置"""
-        self.config = {
+        """初始化连接池配置"""
+        self._pool: Optional[PooledDB] = None
+        self._config = {
             "host": os.getenv("DB_HOST", "localhost"),
             "port": int(os.getenv("DB_PORT", 3306)),
             "user": os.getenv("DB_USER", "root"),
             "password": os.getenv("DB_PASSWORD", ""),
             "database": os.getenv("DB_NAME", "eye_agent_db"),
             "charset": os.getenv("DB_CHARSET", "utf8mb4"),
-            "autocommit": os.getenv("DB_AUTOCOMMIT", "False").lower() == "true",
-            "cursorclass": DictCursor
+            "cursorclass": DictCursor,
         }
-        self._connection: Optional[pymysql.Connection] = None
-        logger.info(f"[MySQLConnection] 初始化完成 - host={self.config['host']}:{self.config['port']}")
+
+        # 连接池配置
+        self._pool_config = {
+            "mincached": int(os.getenv("DB_POOL_MIN", 5)),      # 最小空闲连接
+            "maxcached": int(os.getenv("DB_POOL_MAX", 20)),     # 最大空闲连接
+            "maxconnections": int(os.getenv("DB_POOL_MAX_CONN", 30)),  # 最大连接数
+            "blocking": True,          # 连接数达上限时阻塞等待
+            "maxusage": 1000,          # 单连接最大重用次数
+            "ping": 1,                 # 每次使用前 ping 检查
+        }
+
+        self._init_pool()
+
+    def _init_pool(self):
+        """初始化连接池"""
+        try:
+            self._pool = PooledDB(
+                creator=pymysql,
+                **self._pool_config,
+                **self._config,
+            )
+            logger.info(
+                f"[MySQLPool] 连接池初始化完成 - "
+                f"host={self._config['host']}:{self._config['port']}, "
+                f"min={self._pool_config['mincached']}, "
+                f"max={self._pool_config['maxconnections']}"
+            )
+        except Exception as e:
+            logger.error(f"[MySQLPool] 连接池初始化失败: {e}")
+            raise ConnectionError(f"数据库连接池初始化失败: {str(e)}")
 
     def _get_connection(self) -> pymysql.Connection:
         """
-        获取数据库连接（内部方法）
-
-        如果连接不存在或已断开，会自动重新连接
+        从连接池获取连接
 
         Returns:
-            pymysql.Connection: 数据库连接对象
-
-        Raises:
-            ConnectionError: 连接失败时抛出
+            数据库连接对象
         """
-        try:
-            if self._connection is None or not self._connection.open:
-                logger.debug("[MySQLConnection] 创建新连接")
-                self._connection = pymysql.connect(**self.config)
-            else:
-                # 检查连接是否有效
-                self._connection.ping(reconnect=True)
-            return self._connection
-        except pymysql.Error as e:
-            logger.error(f"[MySQLConnection] 连接失败: {e}")
-            raise ConnectionError(f"数据库连接失败: {str(e)}")
+        if self._pool is None:
+            self._init_pool()
+        return self._pool.connection()
 
     @contextmanager
     def get_cursor(self):
         """
         获取数据库游标的上下文管理器
 
-        自动处理连接获取和事务提交/回滚
+        自动处理连接获取、归还和事务提交/回滚。
 
         Yields:
             DictCursor: 字典游标对象
-
-        Example:
-            with db.get_cursor() as cursor:
-                cursor.execute("SELECT * FROM users")
-                result = cursor.fetchall()
         """
-        connection = self._get_connection()
-        cursor = connection.cursor()
+        connection = None
+        cursor = None
         try:
+            connection = self._get_connection()
+            cursor = connection.cursor()
             yield cursor
             connection.commit()
         except Exception as e:
-            connection.rollback()
-            logger.error(f"[MySQLConnection] 事务回滚: {e}")
+            if connection:
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
+            logger.error(f"[MySQLPool] 事务回滚: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if connection:
+                try:
+                    connection.close()  # 归还到池，不是真正关闭
+                except Exception:
+                    pass
 
+    @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def execute(self, sql: str, params: Tuple = None) -> int:
         """
         执行 SQL 语句（INSERT/UPDATE/DELETE）
+
+        带自动重试机制。
 
         Args:
             sql: SQL 语句
@@ -112,126 +261,119 @@ class MySQLConnection:
 
         Returns:
             int: 受影响的行数
-
-        Raises:
-            DatabaseError: 执行失败时抛出
         """
         try:
             with self.get_cursor() as cursor:
                 affected_rows = cursor.execute(sql, params)
-                logger.debug(f"[MySQLConnection] 执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
+                logger.debug(f"[MySQLPool] 执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
                 return affected_rows
         except pymysql.Error as e:
-            logger.error(f"[MySQLConnection] SQL执行失败: {e}")
+            # 重试装饰器会处理可重试错误
+            logger.error(f"[MySQLPool] SQL执行失败: {e}")
             raise DatabaseError(f"SQL执行失败: {str(e)}")
 
+    @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def execute_many(self, sql: str, params_list: List[Tuple]) -> int:
         """
         批量执行 SQL 语句
 
-        Args:
-            sql: SQL 语句
-            params_list: 参数元组列表
-
-        Returns:
-            int: 受影响的总行数
+        带自动重试机制。
         """
         try:
             with self.get_cursor() as cursor:
                 affected_rows = cursor.executemany(sql, params_list)
-                logger.debug(f"[MySQLConnection] 批量执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
+                logger.debug(f"[MySQLPool] 批量执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
                 return affected_rows
         except pymysql.Error as e:
-            logger.error(f"[MySQLConnection] 批量SQL执行失败: {e}")
+            logger.error(f"[MySQLPool] 批量SQL执行失败: {e}")
             raise DatabaseError(f"批量SQL执行失败: {str(e)}")
 
+    @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def fetch_one(self, sql: str, params: Tuple = None) -> Optional[Dict[str, Any]]:
         """
         查询单条记录
 
-        Args:
-            sql: SQL 查询语句
-            params: 参数元组
-
-        Returns:
-            Optional[Dict]: 查询结果字典，无结果返回 None
+        带自动重试机制。
         """
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(sql, params)
                 result = cursor.fetchone()
-                logger.debug(f"[MySQLConnection] 查询单条: {sql[:100]}...")
+                logger.debug(f"[MySQLPool] 查询单条: {sql[:100]}...")
                 return result
         except pymysql.Error as e:
-            logger.error(f"[MySQLConnection] 查询失败: {e}")
+            logger.error(f"[MySQLPool] 查询失败: {e}")
             raise DatabaseError(f"查询失败: {str(e)}")
 
+    @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def fetch_all(self, sql: str, params: Tuple = None) -> List[Dict[str, Any]]:
         """
         查询多条记录
 
-        Args:
-            sql: SQL 查询语句
-            params: 参数元组
-
-        Returns:
-            List[Dict]: 查询结果列表
+        带自动重试机制。
         """
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(sql, params)
                 results = cursor.fetchall()
-                logger.debug(f"[MySQLConnection] 查询多条: {sql[:100]}... 结果数: {len(results)}")
+                logger.debug(f"[MySQLPool] 查询多条: {sql[:100]}... 结果数: {len(results)}")
                 return results
         except pymysql.Error as e:
-            logger.error(f"[MySQLConnection] 查询失败: {e}")
+            logger.error(f"[MySQLPool] 查询失败: {e}")
             raise DatabaseError(f"查询失败: {str(e)}")
 
     def fetch_count(self, sql: str, params: Tuple = None) -> int:
         """
         查询记录数量
-
-        Args:
-            sql: SQL COUNT 查询语句
-            params: 参数元组
-
-        Returns:
-            int: 记录数量
         """
         result = self.fetch_one(sql, params)
         if result:
-            # 获取第一个值（COUNT结果）
             return list(result.values())[0]
         return 0
 
     def close(self):
-        """关闭数据库连接"""
-        if self._connection and self._connection.open:
-            self._connection.close()
-            self._connection = None
-            logger.info("[MySQLConnection] 连接已关闭")
+        """关闭连接池"""
+        if self._pool:
+            try:
+                self._pool.close()
+            except Exception:
+                pass
+            self._pool = None
+            logger.info("[MySQLPool] 连接池已关闭")
 
     def __del__(self):
-        """析构时关闭连接"""
+        """析构时关闭连接池"""
         self.close()
 
 
+# 保持向后兼容的别名
+MySQLConnection = MySQLConnectionPool
+
+
 # 单例实例
-_db_connection: Optional[MySQLConnection] = None
+_db_pool: Optional[MySQLConnectionPool] = None
 
 
-def get_db_connection() -> MySQLConnection:
+def get_db_connection() -> MySQLConnectionPool:
     """
-    获取全局数据库连接实例（单例模式）
+    获取全局数据库连接池实例（单例模式）
 
     Returns:
-        MySQLConnection: 数据库连接实例
-
-    Example:
-        db = get_db_connection()
-        result = db.fetch_one("SELECT * FROM users WHERE id = %s", (user_id,))
+        MySQLConnectionPool: 数据库连接池实例
     """
-    global _db_connection
-    if _db_connection is None:
-        _db_connection = MySQLConnection()
-    return _db_connection
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = MySQLConnectionPool()
+    return _db_pool
+
+
+def close_db_connection():
+    """
+    关闭全局数据库连接池
+
+    应在应用关闭时调用。
+    """
+    global _db_pool
+    if _db_pool:
+        _db_pool.close()
+        _db_pool = None

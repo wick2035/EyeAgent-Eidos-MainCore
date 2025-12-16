@@ -1,16 +1,18 @@
 """
-FastAPI主应用 - 智能医疗咨询系统（重构版）
-基于清洁架构，精简到 < 100行
+FastAPI主应用 - 智能医疗咨询系统
+基于 LangGraph 架构
 """
 import logging
-from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, agent_router, conversation_router, research_router
+from presentation.routers import chat_router, conversation_router, research_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
+from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
 
 # 配置日志
 logging.basicConfig(
@@ -19,11 +21,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时：初始化数据库连接池
+    logger.info("[Startup] 初始化数据库连接池...")
+    try:
+        db = get_db_connection()
+        logger.info("[Startup] 数据库连接池初始化成功")
+    except Exception as e:
+        logger.error(f"[Startup] 数据库连接池初始化失败: {e}")
+        # 不阻止启动，让应用可以处理不需要数据库的请求
+
+    yield  # 应用运行中
+
+    # 关闭时：清理数据库连接池
+    logger.info("[Shutdown] 关闭数据库连接池...")
+    close_db_connection()
+    logger.info("[Shutdown] 数据库连接池已关闭")
+
+
 # 创建FastAPI应用
 app = FastAPI(
     title="智能医疗咨询系统",
-    description="基于LangChain的多Agent智能医疗咨询平台（重构版）",
-    version="2.0.0"
+    description="基于LangGraph的多Agent智能医疗咨询平台",
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
 # 配置CORS
@@ -43,14 +67,13 @@ templates = Jinja2Templates(directory="templates")
 
 # 注册路由
 app.include_router(chat_router.router)
-app.include_router(agent_router.router)
 app.include_router(conversation_router.router)
-app.include_router(research_router.router)  # 医问通科研Agent路由
+app.include_router(research_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
-logger.info("架构版本: 2.0.0 (清洁架构)")
-logger.info("已启用: ResearchAgent (医问通科研Agent)")
+logger.info("架构版本: 3.0.0 (LangGraph)")
+logger.info("已启用: 健康咨询、报告、提醒、科研 Agent")
 logger.info("=" * 80)
 
 
@@ -70,14 +93,10 @@ async def research_test_page():
 @app.get("/health")
 async def health_check():
     """健康检查"""
-    from agents.agent_manager import AgentManager
-    from presentation.routers.chat_router import agent_manager
-    
     return {
         "status": "healthy",
-        "version": "2.0.0",
-        "architecture": "clean_architecture",
-        "active_sessions": agent_manager.get_active_sessions_count(),
+        "version": "3.0.0",
+        "architecture": "langgraph",
     }
 
 
@@ -92,7 +111,7 @@ async def get_users():
         client = get_api_client()
         patients = client.get_all_patients()
 
-        # 刷新ID映射缓存（新增）
+        # 刷新ID映射缓存
         try:
             from infrastructure.services.id_mapping_service import get_id_mapping_service
             id_mapping = get_id_mapping_service()
@@ -138,49 +157,42 @@ async def get_users():
 
 
 @app.get("/api/export/{session_id}")
-async def export_patient_data(session_id: str):
+async def export_patient_data(session_id: str, conversation_id: str = None):
     """
     导出患者对话数据为 JSON
     """
-    from fastapi import HTTPException
-    from presentation.routers.chat_router import agent_manager
+    from agents.graph_manager import get_graph_manager
 
     try:
         logger.info(f"[API] 导出会话数据: {session_id}")
 
-        # 从 agent_manager 获取会话数据
-        conversation = agent_manager.get_conversation(session_id)
+        graph_manager = get_graph_manager()
+        result = graph_manager.get_messages(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
 
-        if not conversation:
+        if not result or result.get("message_count", 0) == 0:
             raise HTTPException(
                 status_code=404,
-                detail=f"会话不存在: {session_id}"
+                detail=f"会话不存在或无消息: {session_id}"
             )
 
         # 构建导出数据
         export_data = {
             "session_id": session_id,
-            "agent_type": conversation.agent_type if hasattr(conversation, 'agent_type') else "unknown",
-            "messages": [
-                {
-                    "role": msg.role,
-                    "content": msg.content,
-                    "timestamp": msg.timestamp.isoformat() if hasattr(msg.timestamp, 'isoformat') else str(msg.timestamp)
-                }
-                for msg in conversation.messages
-            ],
-            "patient_info": conversation.patient_info if hasattr(conversation, 'patient_info') else {},
-            "summary": conversation.summary if hasattr(conversation, 'summary') else ""
+            "conversation_id": conversation_id,
+            "message_count": result["message_count"],
+            "messages": result["messages"],
         }
 
-        logger.info(f"[API] 成功导出会话数据，共 {len(export_data['messages'])} 条消息")
+        logger.info(f"[API] 成功导出会话数据，共 {result['message_count']} 条消息")
         return export_data
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[API] 导出数据失败: {e}")
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=500,
             detail=f"导出数据失败: {str(e)}"
@@ -192,34 +204,27 @@ async def api_info():
     """API信息"""
     return {
         "title": "智能医疗咨询系统 API",
-        "version": "2.0.0",
-        "architecture": "clean_architecture",
+        "version": "3.0.0",
+        "architecture": "langgraph",
         "endpoints": {
             "chat": "/api/chat",
+            "chat_stream": "/api/chat/stream",
+            "session_state": "/api/chat/{session_id}/state",
+            "session_messages": "/api/chat/{session_id}/messages",
+            "session_checkpoints": "/api/chat/{session_id}/checkpoints",
             "users": "/api/users",
             "conversations": "/api/conversations",
             "conversation_detail": "/api/conversations/{conversation_id}",
-            "agent_status": "/api/agents/sessions/{session_id}",
-            "list_sessions": "/api/agents/sessions",
-            "cleanup": "/api/agents/cleanup",
-            "stats": "/api/agents/stats",
             "research_chat": "/api/research/chat",
             "research_chat_stream": "/api/research/chat/stream",
-            "research_conversations": "/api/research/conversations",
-            "research_health": "/api/research/health",
+            "export": "/api/export/{session_id}",
         },
-        "new_features": {
-            "conversation_persistence": "对话历史自动保存到数据库",
-            "conversation_list": "GET /api/conversations 获取历史会话列表",
-            "continue_conversation": "POST /api/chat 传入 conversation_id 继续对话",
-            "research_agent": "医问通科研Agent，支持文献搜索和机构数据分析",
-            "sse_streaming": "科研Agent支持SSE流式响应",
+        "features": {
+            "state_persistence": "MySQL Checkpoint 持久化",
+            "auto_routing": "自动意图路由和 Agent 切换",
+            "streaming": "SSE 流式响应",
+            "conversation_history": "对话历史自动保存",
         },
-        "breaking_changes": {
-            "patient_id": "现在必需，且必须是UUID格式",
-            "user_id": "已弃用，请使用patient_id",
-            "phone_number": "已弃用，前端应先查询获取patient_id",
-        }
     }
 
 
@@ -233,4 +238,3 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
-

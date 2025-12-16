@@ -1,0 +1,239 @@
+"""
+ResearchAgent 节点
+
+科研助手、文献搜索、统计分析功能。
+"""
+import logging
+from typing import Dict, Any
+
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langgraph.prebuilt import create_react_agent
+
+from agents.graph.state import MedicalState
+from agents.prompts.research_prompts import (
+    get_research_system_prompt,
+    get_research_stage_prompt,
+    build_research_context,
+    detect_research_intent,
+)
+from agents.tools.research_tools import RESEARCH_AGENT_TOOLS
+from utils.llm_config import get_llm, get_streaming_llm
+
+logger = logging.getLogger(__name__)
+
+
+def research_agent_node(state: MedicalState) -> Dict[str, Any]:
+    """
+    ResearchAgent 节点 - 处理科研助手、文献搜索、统计分析
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        状态更新字典
+    """
+    role = state.get("role", "doctor")  # 科研模式通常是医生
+    stage = state.get("stage", "greeting")
+    messages = state.get("messages", [])
+    doctor_id = state.get("doctor_id", "")
+
+    # 检查权限
+    enable_institution_data = state.get("enable_institution_data", False)
+    enable_web_search = state.get("enable_web_search", False)
+
+    # 构建系统提示词
+    system_prompt = get_research_system_prompt(role)
+    stage_prompt = get_research_stage_prompt(stage, role)
+    context = build_research_context(state)
+
+    # 添加权限限制提示
+    permission_note = _build_permission_note(enable_institution_data, enable_web_search)
+
+    # 组合完整提示词
+    full_system_prompt = f"""{system_prompt}
+
+【当前阶段】{stage_prompt}
+
+{context}
+
+{permission_note}"""
+
+    logger.debug(f"[ResearchNode] role={role}, stage={stage}, doctor_id={doctor_id}")
+
+    try:
+        # 根据流式标志选择 LLM
+        is_streaming = state.get("is_streaming", False)
+        llm = get_streaming_llm() if is_streaming else get_llm()
+
+        # 根据权限过滤工具
+        available_tools = _filter_tools_by_permission(
+            RESEARCH_AGENT_TOOLS,
+            enable_institution_data,
+            enable_web_search,
+        )
+
+        # 创建 ReAct Agent
+        agent = create_react_agent(
+            model=llm,
+            tools=available_tools,
+        )
+
+        # 准备输入消息
+        input_messages = [SystemMessage(content=full_system_prompt)]
+
+        # 添加对话历史
+        for msg in messages:
+            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+                input_messages.append(msg)
+            elif isinstance(msg, dict):
+                msg_type = msg.get("type", "")
+                content = msg.get("content", "")
+                if msg_type == "human":
+                    input_messages.append(HumanMessage(content=content))
+                elif msg_type == "ai":
+                    input_messages.append(AIMessage(content=content))
+
+        # 调用 Agent
+        result = agent.invoke({"messages": input_messages})
+
+        # 提取响应
+        response_messages = result.get("messages", [])
+        ai_response = ""
+        tool_calls = []
+
+        for msg in response_messages:
+            if isinstance(msg, AIMessage):
+                if msg.content:
+                    ai_response = msg.content
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    tool_calls.extend(msg.tool_calls)
+
+        # 检测新阶段
+        last_user_message = _get_last_user_message(messages)
+        new_stage = _detect_research_stage(state, ai_response, tool_calls, last_user_message)
+
+        logger.info(f"[ResearchNode] 响应生成完成, new_stage={new_stage}")
+
+        # 返回状态更新
+        return {
+            "messages": [AIMessage(content=ai_response)] if ai_response else [],
+            "stage": new_stage,
+            "last_response": ai_response,
+        }
+
+    except Exception as e:
+        logger.error(f"[ResearchNode] 处理失败: {e}", exc_info=True)
+        error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
+        return {
+            "messages": [AIMessage(content=error_response)],
+            "last_response": error_response,
+            "error": str(e),
+        }
+
+
+def _build_permission_note(enable_institution_data: bool, enable_web_search: bool) -> str:
+    """构建权限说明"""
+    notes = ["【权限状态提醒】"]
+
+    if not enable_institution_data:
+        notes.append("- 机构数据库访问: 未开启 (无法使用 get_institution_research_data)")
+    else:
+        notes.append("- 机构数据库访问: 已开启")
+
+    if not enable_web_search:
+        notes.append("- 网页搜索: 未开启 (无法使用 web_search_medical)")
+    else:
+        notes.append("- 网页搜索: 已开启")
+
+    return "\n".join(notes)
+
+
+def _filter_tools_by_permission(
+    tools: list,
+    enable_institution_data: bool,
+    enable_web_search: bool,
+) -> list:
+    """
+    根据权限过滤工具
+
+    Args:
+        tools: 完整工具列表
+        enable_institution_data: 是否启用机构数据
+        enable_web_search: 是否启用网页搜索
+
+    Returns:
+        过滤后的工具列表
+    """
+    filtered = []
+
+    for tool in tools:
+        tool_name = getattr(tool, "name", "")
+
+        # 过滤机构数据工具
+        if tool_name == "get_institution_research_data" and not enable_institution_data:
+            continue
+
+        # 过滤网页搜索工具
+        if tool_name == "web_search_medical" and not enable_web_search:
+            continue
+
+        filtered.append(tool)
+
+    return filtered
+
+
+def _get_last_user_message(messages: list) -> str:
+    """获取最后一条用户消息"""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return msg.content
+        elif isinstance(msg, dict) and msg.get("type") == "human":
+            return msg.get("content", "")
+    return ""
+
+
+def _detect_research_stage(
+    state: MedicalState,
+    ai_response: str,
+    tool_calls: list,
+    user_message: str,
+) -> str:
+    """检测科研相关的阶段变化"""
+    current_stage = state.get("stage", "greeting")
+
+    # 使用提示词模块的意图检测
+    if user_message:
+        intent = detect_research_intent(user_message)
+        if intent != "unknown":
+            # 意图映射到阶段
+            intent_to_stage = {
+                "data_query": "data_query",
+                "web_search": "web_search",
+                "statistical_analysis": "statistical_analysis",
+                "research_design": "research_design",
+                "paper_writing": "paper_writing",
+                "exit": "completed",
+            }
+            if intent in intent_to_stage:
+                return intent_to_stage[intent]
+
+    # 检测工具调用
+    tool_names = [tc.get("name", "") for tc in tool_calls if isinstance(tc, dict)]
+
+    # 根据工具推断阶段
+    if "get_institution_research_data" in tool_names:
+        return "data_query"
+    if "web_search_medical" in tool_names:
+        return "web_search"
+    if "statistical_analysis" in tool_names:
+        return "statistical_analysis"
+    if "design_research_protocol" in tool_names:
+        return "research_design"
+    if "assist_paper_writing" in tool_names:
+        return "paper_writing"
+
+    # 阶段流转
+    if current_stage == "greeting":
+        return "research_init"
+
+    return current_stage

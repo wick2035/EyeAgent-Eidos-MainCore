@@ -95,7 +95,8 @@ class ChatPersistenceService:
         content: str,
         sender_id: Optional[str] = None,
         context: Optional[MessageContext] = None,
-        token_used: Optional[int] = None
+        token_used: Optional[int] = None,
+        status: str = "success",
     ) -> ChatMessageEntity:
         """
         保存消息
@@ -107,6 +108,7 @@ class ChatPersistenceService:
             sender_id: 发送者ID
             context: 上下文信息
             token_used: 使用的token数
+            status: 消息状态 (running/success/failed/cancelled)
 
         Returns:
             ChatMessageEntity: 保存的消息实体
@@ -132,6 +134,8 @@ class ChatPersistenceService:
             sender_id=sender_id,
             context=context_json,
             token_used=token_used,
+            status=status,
+            error_message=None,
             create_time=now,
             create_by=sender_id,
             update_time=now,
@@ -142,11 +146,12 @@ class ChatPersistenceService:
 
         self.message_repo.create(message)
 
-        # 更新会话的消息数量
-        total_messages = self.message_repo.count_by_chat_id(chat_id)
-        self.conversation_repo.update_summary_and_count(chat_id, None, total_messages)
+        # 只有成功的消息才更新会话的消息数量（running 状态不计入）
+        if status == "success":
+            total_messages = self.message_repo.count_by_chat_id(chat_id)
+            self.conversation_repo.update_summary_and_count(chat_id, None, total_messages)
 
-        logger.debug(f"[ChatPersistenceService] 保存消息: {message_id}, order={message_order}")
+        logger.debug(f"[ChatPersistenceService] 保存消息: {message_id}, order={message_order}, status={status}")
         return message
 
     def update_conversation_title(self, chat_id: str, first_user_message: str) -> bool:
@@ -311,6 +316,80 @@ class ChatPersistenceService:
             tool_results=tool_results,
             metadata=metadata
         )
+
+    def update_message(
+        self,
+        message_id: str,
+        content: Optional[str] = None,
+        status: Optional[str] = None,
+        token_used: Optional[int] = None,
+        context: Optional[MessageContext] = None,
+        error_message: Optional[str] = None,
+    ) -> bool:
+        """
+        更新消息（用于两阶段写入）
+
+        Args:
+            message_id: 消息ID
+            content: 消息内容
+            status: 消息状态
+            token_used: Token 消耗
+            context: 上下文信息
+            error_message: 错误信息
+
+        Returns:
+            bool: 是否更新成功
+        """
+        try:
+            # 构建更新字段
+            updates: Dict[str, Any] = {}
+
+            if content is not None:
+                updates["message_content"] = content
+            if status is not None:
+                updates["status"] = status
+            if token_used is not None:
+                updates["token_used"] = token_used
+            if error_message is not None:
+                updates["error_message"] = error_message
+            if context is not None:
+                updates["context"] = context.to_json()
+
+            if not updates:
+                logger.warning(f"[ChatPersistenceService] 更新消息无字段: {message_id}")
+                return False
+
+            success = self.message_repo.update(message_id, updates)
+
+            # 如果状态从 running 变为 success，更新会话的消息数量
+            if success and status == "success":
+                # 获取消息所属的会话ID
+                message = self.message_repo.get_by_id(message_id)
+                if message:
+                    total_messages = self.message_repo.count_by_chat_id(message.chat_id)
+                    self.conversation_repo.update_summary_and_count(
+                        message.chat_id, None, total_messages
+                    )
+
+            logger.debug(f"[ChatPersistenceService] 更新消息: {message_id}, updates={list(updates.keys())}")
+            return success
+
+        except Exception as e:
+            logger.error(f"[ChatPersistenceService] 更新消息失败: {e}", exc_info=True)
+            return False
+
+    def is_first_message(self, chat_id: str) -> bool:
+        """
+        判断是否为会话的首条消息
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            bool: 是否为首条消息
+        """
+        count = self.message_repo.count_by_chat_id(chat_id)
+        return count == 0
 
 
 # 单例实例

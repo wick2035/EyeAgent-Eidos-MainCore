@@ -1,14 +1,11 @@
 """
-Agents - 智能体模块
+Agents - LangGraph 智能体模块
 """
-from agents.health.health_agent import HealthAgent
-from agents.report.report_agent import ReportAgent
-from agents.reminder.reminder_agent import ReminderAgent
-from agents.agent_manager import AgentManager
+from agents.graph_manager import GraphManager, get_graph_manager
+from agents.graph.state import MedicalState
 
 __all__ = [
-    "HealthAgent",
-    "ReportAgent",
-    "ReminderAgent",
-    "AgentManager",
+    "GraphManager",
+    "get_graph_manager",
+    "MedicalState",
 ]
