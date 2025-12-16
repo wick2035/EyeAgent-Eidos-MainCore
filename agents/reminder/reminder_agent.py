@@ -36,6 +36,7 @@ class ReminderAgent(BaseAgent):
         patient_id: str,
         session_id: str = None,
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ):
@@ -46,6 +47,7 @@ class ReminderAgent(BaseAgent):
             patient_id: 患者UUID
             session_id: 会话ID
             role: 用户角色（patient/doctor）
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
         """
@@ -57,6 +59,7 @@ class ReminderAgent(BaseAgent):
             session_id=session_id,
             agent_type=AgentType.REMINDER,
             role=role,
+            doctor_id=doctor_id,
             tools=AGENT_3_TOOLS,
             conversation_id=conversation_id,
             persistence_service=persistence_service
@@ -68,13 +71,17 @@ class ReminderAgent(BaseAgent):
         logger.info(f"[ReminderAgent] 初始化完成: patient={patient_id}")
     
     def _create_system_prompt(self) -> str:
-        """创建系统提示词"""
-        return """你是小Reminder，一位专业的健康提醒助手，负责帮助用户管理复诊提醒、预约提醒和用药提醒。
+        """创建系统提示词（根据角色返回不同版本）"""
+        if self.role == "doctor":
+            return self._create_doctor_mode_prompt()
+        return self._create_patient_mode_prompt()
 
-当前对话阶段：{stage}
+    def _create_patient_mode_prompt(self) -> str:
+        """患者模式提示词"""
+        return """你是小Reminder，一位专业的健康提醒助手，负责帮助患者管理复诊提醒、预约提醒和用药提醒。
 
 你的职责：
-1. 查看用户的所有提醒事项
+1. 查看患者的所有提醒事项
 2. 创建新的提醒（用药提醒、复诊提醒、预约提醒等）
 3. 管理和配置提醒偏好设置
 4. 提供健康管理建议
@@ -88,30 +95,69 @@ class ReminderAgent(BaseAgent):
 【重要提示】
 - 创建提醒时需要明确：提醒类型、时间、内容
 - 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
-- 语气友好亲切，让用户感受到关怀
+- 语气友好亲切，让患者感受到关怀"""
 
-{additional_context}
+    def _create_doctor_mode_prompt(self) -> str:
+        """医生模式提示词"""
+        return """你是小Reminder，一位专业的健康提醒助手，当前正在协助医生管理患者的提醒事项。
 
-对话历史：
-{history}
+【⚠️ 重要】当前使用者是医生，不是患者！
+- 对话历史中标记为"医生"的是医生的提问和指令
+- 你的任务是帮助医生管理【患者信息】中这位患者的提醒
+- 不要把医生当成患者
 
-用户：{input}
-助手："""
+你的职责（医生模式）：
+1. 查看患者的所有提醒事项
+2. 帮助医生为患者创建提醒（用药、复诊、预约等）
+3. 查看和配置患者的提醒设置
+4. 提供提醒管理的专业支持
+
+【提醒类型】
+- appointment: 预约提醒
+- medication: 用药提醒
+- followup: 复诊提醒
+- checkup: 体检提醒
+
+【工具使用】
+- 所有工具中的 patient_id 使用【患者信息】中的患者ID
+- 医生可以为患者创建和管理提醒
+
+【重要提示】
+- 创建提醒时需要明确：提醒类型、时间、内容
+- 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
+
+【交互风格】
+- 专业、高效
+- 直接执行医生的指令
+- 确认关键信息后立即操作"""
     
     def _get_stage_prompt(self) -> str:
-        """获取当前阶段提示"""
+        """获取当前阶段提示（根据角色返回不同版本）"""
         stage = self.conversation.stage
-        
-        stage_prompts = {
-            ConversationStage.GREETING: "问候用户，了解需求",
-            ConversationStage.SELECT_ACTION: "询问用户想要进行什么操作",
-            ConversationStage.VIEW_REMINDERS: "正在查看提醒列表",
-            ConversationStage.CREATE_REMINDER: "正在创建新提醒，收集必要信息",
-            ConversationStage.UPDATE_REMINDER: "正在更新提醒",
-            ConversationStage.CONFIG_SETTINGS: "正在配置提醒设置",
-            ConversationStage.COMPLETED: "操作完成"
-        }
-        
+
+        if self.role == "doctor":
+            # 医生模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "了解医生需要什么帮助",
+                ConversationStage.SELECT_ACTION: "询问医生想要进行什么操作",
+                ConversationStage.VIEW_REMINDERS: "正在查看患者的提醒列表",
+                ConversationStage.CREATE_REMINDER: "正在为患者创建新提醒",
+                ConversationStage.UPDATE_REMINDER: "正在更新患者的提醒",
+                ConversationStage.CONFIG_SETTINGS: "正在配置患者的提醒设置",
+                ConversationStage.COMPLETED: "操作完成"
+            }
+        else:
+            # 患者模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "问候患者，了解需求",
+                ConversationStage.SELECT_ACTION: "询问患者想要进行什么操作",
+                ConversationStage.VIEW_REMINDERS: "正在查看提醒列表",
+                ConversationStage.CREATE_REMINDER: "正在创建新提醒，收集必要信息",
+                ConversationStage.UPDATE_REMINDER: "正在更新提醒",
+                ConversationStage.CONFIG_SETTINGS: "正在配置提醒设置",
+                ConversationStage.COMPLETED: "操作完成"
+            }
+
         return stage_prompts.get(stage, "")
     
     def _handle_stage_transition(self, user_input: str, ai_response: str):

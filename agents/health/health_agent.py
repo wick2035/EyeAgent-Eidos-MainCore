@@ -36,6 +36,7 @@ class HealthAgent(BaseAgent):
         patient_id: str,
         session_id: str = None,
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ):
@@ -46,6 +47,7 @@ class HealthAgent(BaseAgent):
             patient_id: 患者UUID
             session_id: 会话ID（如果为空会自动生成）
             role: 用户角色（patient/doctor）
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
         """
@@ -58,6 +60,7 @@ class HealthAgent(BaseAgent):
             session_id=session_id,
             agent_type=AgentType.HEALTH,
             role=role,
+            doctor_id=doctor_id,
             tools=AGENT_1_TOOLS,
             conversation_id=conversation_id,
             persistence_service=persistence_service
@@ -75,7 +78,13 @@ class HealthAgent(BaseAgent):
         logger.info(f"[HealthAgent] 初始化完成: patient={patient_id}")
     
     def _create_system_prompt(self) -> str:
-        """创建系统提示词"""
+        """创建系统提示词（根据角色返回不同版本）"""
+        if self.role == "doctor":
+            return self._create_doctor_mode_prompt()
+        return self._create_patient_mode_prompt()
+
+    def _create_patient_mode_prompt(self) -> str:
+        """患者模式提示词"""
         return """你叫小Eye，你是一位专业的EyeAgent平台医疗健康咨询助手，专门负责眼科相关的健康咨询和分诊服务。
 
 你的职责：
@@ -119,23 +128,72 @@ class HealthAgent(BaseAgent):
 - 主诉症状：患者的主要不适（必填）- 通常在对话开始时患者就会描述
 - 现病史：症状出现的时间、性质、程度（必填）- 需要追问补充
 - 既往病史、过敏史、家族史：使用系统提供的【患者病史信息】,若为空可询问患者"""
+
+    def _create_doctor_mode_prompt(self) -> str:
+        """医生模式提示词"""
+        return """你叫小Eye，你是一位专业的EyeAgent平台医疗助手，当前正在协助医生分析患者情况。
+
+【⚠️ 重要】当前使用者是医生，不是患者！
+- 对话历史中标记为"医生"的是医生的提问和指令
+- 你的任务是帮助医生分析【患者信息】中的这位患者
+- 绝对不要把医生当成患者，不要问医生"您有什么不适"或"您的症状是什么"
+
+你的职责（医生模式）：
+1. 协助医生分析患者的健康状况和症状
+2. 根据医生要求提供专业的诊断建议和分析
+3. 帮助医生查询患者的病史、处方、预约记录等数据
+4. 协助医生为患者进行预约操作
+5. 回答医生关于患者情况的问题
+
+【工具使用】
+- 所有工具中的 patient_id 使用【患者信息】中提供的患者ID
+- 医生可以指示你查询患者的各项数据
+- 预约时，预约的是【患者信息】中的患者，不是医生
+
+【交互风格】
+- 专业、简洁、高效
+- 直接回答医生的问题，提供有价值的分析
+- 不需要表达过多关怀语句（医生不是患者）
+- 可以使用更专业的医学术语
+
+【预约流程（医生模式）】
+当医生要求为患者预约时：
+1. 确认患者信息（从【患者信息】获取）
+2. 询问医生期望的就诊日期和医院
+3. 调用 get_doctor_free_time 查询可用时段
+4. 医生确认后调用 reserve_doctor 完成预约"""
     
     def _get_stage_prompt(self) -> str:
-        """获取当前阶段提示"""
+        """获取当前阶段提示（根据角色返回不同版本）"""
         stage = self.conversation.stage
-        
-        stage_prompts = {
-            ConversationStage.GREETING: "初次接待，询问患者的健康问题",
-            ConversationStage.HEALTH_CONSULTATION: "正在进行健康咨询，了解患者症状",
-            ConversationStage.SYMPTOM_ASSESSMENT: "评估症状严重程度，判断是否需要就医",
-            ConversationStage.APPOINTMENT_INQUIRY: "询问患者是否需要预约医生",
-            ConversationStage.PATIENT_INFO_COLLECTION: "收集患者基本信息（姓名、年龄、性别、联系方式）",
-            ConversationStage.OPHTHALMOLOGY_TRIAGE: "进行眼科分诊，详细询问症状表现",
-            ConversationStage.MEDICAL_HISTORY: "采集完整病史（既往史、用药史、过敏史、家族史）",
-            ConversationStage.APPOINTMENT_BOOKING: "确认预约详情，询问期望就诊时间",
-            ConversationStage.COMPLETED: "预约已完成，总结信息并告知患者"
-        }
-        
+
+        if self.role == "doctor":
+            # 医生模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "了解医生需要什么帮助",
+                ConversationStage.HEALTH_CONSULTATION: "协助医生分析患者症状",
+                ConversationStage.SYMPTOM_ASSESSMENT: "帮助医生评估患者症状严重程度",
+                ConversationStage.APPOINTMENT_INQUIRY: "询问医生是否需要为患者预约",
+                ConversationStage.PATIENT_INFO_COLLECTION: "确认患者信息是否完整",
+                ConversationStage.OPHTHALMOLOGY_TRIAGE: "协助医生进行眼科分诊分析",
+                ConversationStage.MEDICAL_HISTORY: "帮助医生查看患者病史",
+                ConversationStage.APPOINTMENT_BOOKING: "协助医生为患者预约",
+                ConversationStage.COMPLETED: "操作完成，向医生确认"
+            }
+        else:
+            # 患者模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "初次接待，询问患者的健康问题",
+                ConversationStage.HEALTH_CONSULTATION: "正在进行健康咨询，了解患者症状",
+                ConversationStage.SYMPTOM_ASSESSMENT: "评估症状严重程度，判断是否需要就医",
+                ConversationStage.APPOINTMENT_INQUIRY: "询问患者是否需要预约医生",
+                ConversationStage.PATIENT_INFO_COLLECTION: "收集患者基本信息（姓名、年龄、性别、联系方式）",
+                ConversationStage.OPHTHALMOLOGY_TRIAGE: "进行眼科分诊，详细询问症状表现",
+                ConversationStage.MEDICAL_HISTORY: "采集完整病史（既往史、用药史、过敏史、家族史）",
+                ConversationStage.APPOINTMENT_BOOKING: "确认预约详情，询问期望就诊时间",
+                ConversationStage.COMPLETED: "预约已完成，总结信息并告知患者"
+            }
+
         return stage_prompts.get(stage, "")
     
     def _handle_stage_transition(self, user_input: str, ai_response: str):

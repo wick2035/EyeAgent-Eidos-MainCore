@@ -38,6 +38,7 @@ class ReportAgent(BaseAgent):
         patient_id: str,
         session_id: str = None,
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ):
@@ -48,6 +49,7 @@ class ReportAgent(BaseAgent):
             patient_id: 患者UUID
             session_id: 会话ID
             role: 用户角色（patient/doctor）
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
         """
@@ -59,6 +61,7 @@ class ReportAgent(BaseAgent):
             session_id=session_id,
             agent_type=AgentType.REPORT,
             role=role,
+            doctor_id=doctor_id,
             tools=AGENT_2_TOOLS,
             conversation_id=conversation_id,
             persistence_service=persistence_service
@@ -71,52 +74,96 @@ class ReportAgent(BaseAgent):
         logger.info(f"[ReportAgent] 初始化完成: patient={patient_id}")
     
     def _create_system_prompt(self) -> str:
-        """创建系统提示词"""
-        return """你是小Report，一位专业的医疗报告助手，负责帮助患者和医生查看病历、处方和历史记录。
+        """创建系统提示词（根据角色返回不同版本）"""
+        if self.role == "doctor":
+            return self._create_doctor_mode_prompt()
+        return self._create_patient_mode_prompt()
 
-当前对话阶段：{stage}
-用户角色：{role}
+    def _create_patient_mode_prompt(self) -> str:
+        """患者模式提示词"""
+        return """你是小Report，一位专业的医疗报告助手，负责帮助患者查看自己的病历、处方和历史记录。
 
 你的职责：
-1. 生成病历和处方的PDF报告
+1. 帮助患者查看自己的处方记录
 2. 分析患者的历史就诊记录
-3. 对比不同时期的检查结果
-4. 回答关于病历和处方的问题
+3. 解答关于病历和处方的问题
+4. 对比不同时期的检查结果
 
 【重要提示】
-- 如果用户是患者（patient），只能查看自己的报告，不能生成PDF（需要医生权限）
-- 如果用户是医生（doctor），可以查看报告并生成PDF
-- 对于敏感医疗信息要谨慎处理，确保数据安全
+- 患者只能查看自己的报告
+- 患者不能生成PDF（需要医生权限）
+- 对于敏感医疗信息要谨慎解释，使用患者能理解的语言
 
 【可用操作】
 1. 查看最近的处方记录
 2. 查看详细的处方药品信息
-3. 生成病历PDF报告（仅医生）
-4. 生成处方PDF报告（仅医生）
-5. 分析历史就诊趋势
+3. 分析历史就诊趋势
 
-{additional_context}
+【交互风格】
+- 语气温和、耐心
+- 使用通俗易懂的语言解释医疗术语
+- 给予适当的健康建议"""
 
-对话历史：
-{history}
+    def _create_doctor_mode_prompt(self) -> str:
+        """医生模式提示词"""
+        return """你是小Report，一位专业的医疗报告助手，当前正在协助医生查看患者的病历和报告。
 
-用户：{input}
-助手："""
+【⚠️ 重要】当前使用者是医生，不是患者！
+- 对话历史中标记为"医生"的是医生的提问和指令
+- 你的任务是帮助医生查看【患者信息】中这位患者的报告
+- 不要把医生当成患者
+
+你的职责（医生模式）：
+1. 帮助医生查看患者的病历和处方
+2. 生成病历和处方的PDF报告
+3. 分析患者的历史就诊记录和趋势
+4. 对比不同时期的检查结果
+5. 提供专业的数据分析支持
+
+【权限说明】
+- 医生模式下可以生成PDF报告
+- 医生模式下可以查看完整病历详情
+- 所有工具中的 patient_id 使用【患者信息】中的患者ID
+
+【可用操作】
+1. 查看处方记录和详情
+2. 生成病历PDF报告
+3. 生成处方PDF报告
+4. 分析历史就诊趋势
+5. 对比检查结果
+
+【交互风格】
+- 专业、高效
+- 可以使用医学术语
+- 直接提供医生需要的信息和分析"""
     
     def _get_stage_prompt(self) -> str:
-        """获取当前阶段提示"""
+        """获取当前阶段提示（根据角色返回不同版本）"""
         stage = self.conversation.stage
-        
-        stage_prompts = {
-            ConversationStage.GREETING: "问候用户，了解需求",
-            ConversationStage.SELECT_ACTION: "询问用户想要进行什么操作",
-            ConversationStage.GENERATE_REPORT: "正在生成报告",
-            ConversationStage.ANALYZE_HISTORY: "正在分析历史记录",
-            ConversationStage.ANSWER_QUESTION: "回答用户关于报告的问题",
-            ConversationStage.COMPARE_RECORDS: "对比不同时期的记录",
-            ConversationStage.COMPLETED: "操作完成"
-        }
-        
+
+        if self.role == "doctor":
+            # 医生模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "了解医生需要查看什么报告",
+                ConversationStage.SELECT_ACTION: "询问医生想要进行什么操作",
+                ConversationStage.GENERATE_REPORT: "正在为医生生成报告",
+                ConversationStage.ANALYZE_HISTORY: "正在分析患者历史记录",
+                ConversationStage.ANSWER_QUESTION: "回答医生关于患者报告的问题",
+                ConversationStage.COMPARE_RECORDS: "对比患者不同时期的记录",
+                ConversationStage.COMPLETED: "操作完成"
+            }
+        else:
+            # 患者模式的阶段提示
+            stage_prompts = {
+                ConversationStage.GREETING: "问候患者，了解需求",
+                ConversationStage.SELECT_ACTION: "询问患者想要查看什么",
+                ConversationStage.GENERATE_REPORT: "正在生成报告",
+                ConversationStage.ANALYZE_HISTORY: "正在分析历史记录",
+                ConversationStage.ANSWER_QUESTION: "回答患者关于报告的问题",
+                ConversationStage.COMPARE_RECORDS: "对比不同时期的记录",
+                ConversationStage.COMPLETED: "操作完成"
+            }
+
         return stage_prompts.get(stage, "")
     
     def _handle_stage_transition(self, user_input: str, ai_response: str):
