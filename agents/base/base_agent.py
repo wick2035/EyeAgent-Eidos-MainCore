@@ -51,6 +51,7 @@ class BaseAgent(ABC):
         session_id: str,
         agent_type: AgentType,
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         tools: Optional[List[Tool]] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
@@ -63,6 +64,7 @@ class BaseAgent(ABC):
             session_id: 会话ID
             agent_type: Agent类型
             role: 用户角色（patient/doctor）
+            doctor_id: 医生UUID（医生模式下使用）
             tools: LangChain工具列表
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务（用于保存对话）
@@ -71,6 +73,7 @@ class BaseAgent(ABC):
         self.session_id = session_id
         self.agent_type = agent_type
         self.role = role
+        self.doctor_id = doctor_id
         self.db_conversation_id: Optional[str] = conversation_id
         self.persistence_service = persistence_service
 
@@ -569,7 +572,9 @@ class BaseAgent(ABC):
             role = msg.role
             content = msg.content
             if role == "user":
-                lines.append(f"患者: {content}")
+                # 根据 self.role 动态标记：医生模式显示"医生"，患者模式显示"患者"
+                user_label = "医生" if self.role == "doctor" else "患者"
+                lines.append(f"{user_label}: {content}")
             elif role == "assistant":
                 lines.append(f"助手: {content}")
 
@@ -586,6 +591,15 @@ class BaseAgent(ABC):
             上下文字符串，包含患者基本信息
         """
         context_parts = []
+
+        # 添加操作者身份说明（医生模式下特别说明）
+        if self.role == "doctor":
+            context_parts.append("【当前操作者】")
+            context_parts.append("身份: 医生")
+            if self.doctor_id:
+                context_parts.append(f"医生ID: {self.doctor_id}")
+            context_parts.append("说明: 您正在帮助医生分析以下患者，对话历史中\"医生\"是医生的消息，不是患者")
+            context_parts.append("")
 
         # 添加患者基本信息
         if self.patient_info:
