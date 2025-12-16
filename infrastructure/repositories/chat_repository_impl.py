@@ -4,7 +4,7 @@
 """
 import uuid
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from application.repositories.chat_repository import (
@@ -196,9 +196,9 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
             sql = """
                 INSERT INTO chat_message
                 (id, chat_id, message_order, message_content, message_type,
-                 sender_id, context, token_used, create_time, create_by,
-                 update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 sender_id, context, token_used, status, error_message,
+                 create_time, create_by, update_time, update_by, deleted, version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params = (
                 message.id,
@@ -209,6 +209,8 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
                 message.sender_id,
                 message.context,
                 message.token_used,
+                message.status,
+                message.error_message,
                 message.create_time,
                 message.create_by,
                 message.update_time,
@@ -217,11 +219,75 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
                 message.version
             )
             self.db.execute(sql, params)
-            logger.debug(f"[ChatMessageRepository] 创建消息成功: {message.id}")
+            logger.debug(f"[ChatMessageRepository] 创建消息成功: {message.id}, status={message.status}")
             return message
         except DatabaseError as e:
             logger.error(f"[ChatMessageRepository] 创建消息失败: {e}")
             raise
+
+    def get_by_id(self, message_id: str) -> Optional[ChatMessageEntity]:
+        """根据ID获取消息"""
+        try:
+            sql = """
+                SELECT id, chat_id, message_order, message_content, message_type,
+                       sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_message
+                WHERE id = %s AND deleted = 0
+            """
+            result = self.db.fetch_one(sql, (message_id,))
+            if not result:
+                return None
+            return self._row_to_entity(result)
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 获取消息失败: {e}")
+            return None
+
+    def update(self, message_id: str, updates: Dict[str, Any]) -> bool:
+        """
+        更新消息字段
+
+        Args:
+            message_id: 消息ID
+            updates: 要更新的字段字典
+
+        Returns:
+            bool: 是否更新成功
+        """
+        if not updates:
+            return False
+
+        try:
+            # 动态构建 SET 子句
+            set_clauses = []
+            params = []
+
+            for field, value in updates.items():
+                set_clauses.append(f"{field} = %s")
+                params.append(value)
+
+            # 添加 update_time 和 version
+            set_clauses.append("update_time = %s")
+            params.append(datetime.now())
+            set_clauses.append("version = version + 1")
+
+            # 添加 WHERE 条件参数
+            params.append(message_id)
+
+            sql = f"""
+                UPDATE chat_message
+                SET {', '.join(set_clauses)}
+                WHERE id = %s AND deleted = 0
+            """
+
+            affected = self.db.execute(sql, tuple(params))
+            if affected > 0:
+                logger.debug(f"[ChatMessageRepository] 更新消息成功: {message_id}")
+            return affected > 0
+
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 更新消息失败: {e}")
+            return False
 
     def get_by_chat_id(
         self,
@@ -233,8 +299,8 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 SELECT id, chat_id, message_order, message_content, message_type,
-                       sender_id, context, token_used, create_time, create_by,
-                       update_time, update_by, deleted, version
+                       sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
                 WHERE chat_id = %s AND deleted = 0
                 ORDER BY message_order ASC
@@ -340,6 +406,8 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
             sender_id=row.get("sender_id"),
             context=row.get("context"),
             token_used=row.get("token_used"),
+            status=row.get("status") or "success",
+            error_message=row.get("error_message"),
             create_time=row.get("create_time") or datetime.now(),
             create_by=row.get("create_by"),
             update_time=row.get("update_time") or datetime.now(),

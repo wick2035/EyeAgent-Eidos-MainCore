@@ -65,7 +65,7 @@ class LightweightLLMRouter:
 
         try:
             # 调用轻量级LLM（独立API）
-            response = self.llm.predict(prompt)
+            response = self.llm.invoke(prompt).content
 
             # 解析JSON结果
             result = self._parse_llm_response(response)

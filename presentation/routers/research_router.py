@@ -2,11 +2,10 @@
 科研Agent路由 - 独立API接口
 支持SSE流式响应
 
-Created: 2025-12-03
+基于 LangGraph GraphManager 实现
 """
 import uuid
 import json
-import asyncio
 import logging
 import re
 from typing import AsyncGenerator
@@ -19,13 +18,16 @@ from presentation.schemas.research_schemas import (
     ResearchConversationListResponse,
     ConversationSummary
 )
-from agents.research.research_agent import ResearchAgent
+from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
 
 logger = logging.getLogger(__name__)
 
 # 创建路由
 router = APIRouter(prefix="/api/research", tags=["research"])
+
+# GraphManager 单例
+graph_manager = get_graph_manager()
 
 # UUID格式验证
 UUID_PATTERN = re.compile(
@@ -46,166 +48,6 @@ def verify_doctor_role(doctor_id: str) -> bool:
     目前仅验证UUID格式
     """
     return bool(UUID_PATTERN.match(doctor_id))
-
-
-async def generate_sse_response(
-    agent: ResearchAgent,
-    message: str,
-    conversation_id: str
-) -> AsyncGenerator[str, None]:
-    """
-    生成SSE流式响应（真流式）
-
-    使用 agent.chat_stream() 实现真正的流式输出，包括：
-    - LLM token 实时输出
-    - 工具调用开始/结束事件
-    - 错误事件
-
-    SSE消息格式:
-    - start: 开始处理
-    - chunk: LLM输出的内容块（实时）
-    - tool_call: 工具调用通知（开始/结束）
-    - done: 完成，包含摘要信息
-    - error: 错误信息
-
-    Args:
-        agent: ResearchAgent实例
-        message: 用户消息
-        conversation_id: 会话ID
-
-    Yields:
-        SSE格式的消息
-    """
-    full_response = ""
-    chunk_index = 0
-
-    try:
-        # 发送开始事件
-        start_data = {
-            "event": "start",
-            "session_id": agent.session_id,
-            "conversation_id": conversation_id,
-            "message": "开始处理..."
-        }
-        yield f"data: {json.dumps(start_data, ensure_ascii=False)}\n\n"
-
-        # 使用流式方法处理消息
-        async for event in agent.chat_stream(message):
-            event_type = event.get("event")
-
-            if event_type == "token":
-                # LLM 输出 token - 实时发送
-                content = event.get("content", "")
-                full_response += content
-                chunk_data = {
-                    "event": "chunk",
-                    "index": chunk_index,
-                    "content": content
-                }
-                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-                chunk_index += 1
-
-            elif event_type == "tool_start":
-                # 工具调用开始
-                tool_call_data = {
-                    "event": "tool_call",
-                    "tool": event.get("tool", "unknown"),
-                    "status": "start",
-                    "input": event.get("input", {})
-                }
-                yield f"data: {json.dumps(tool_call_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "tool_end":
-                # 工具调用结束
-                tool_call_data = {
-                    "event": "tool_call",
-                    "tool": event.get("tool", "unknown"),
-                    "status": "end",
-                    "output": event.get("output", "")
-                }
-                yield f"data: {json.dumps(tool_call_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "error":
-                # 错误事件
-                error_data = {
-                    "event": "error",
-                    "message": event.get("message", "未知错误")
-                }
-                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "done":
-                # 完成事件 - 从 chat_stream 获取完整响应
-                full_response = event.get("response", full_response)
-
-        # 获取对话摘要
-        summary = agent.get_conversation_summary()
-
-        # 发送完成事件
-        done_data = {
-            "event": "done",
-            "response": full_response,
-            "session_id": agent.session_id,
-            "conversation_id": conversation_id,
-            "is_completed": summary["is_completed"],
-            "stage": summary["stage"],
-            "agent_type": "research",
-            "metadata": {
-                "doctor_id": agent.doctor_id,
-                "patient_id": agent.target_patient_id,
-                "message_count": summary["message_count"],
-                "enable_institution_data": agent.enable_institution_data,
-                "enable_web_search": agent.enable_web_search
-            }
-        }
-        yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
-
-    except Exception as e:
-        logger.error(f"[ResearchRouter] SSE生成错误: {e}", exc_info=True)
-        error_data = {
-            "event": "error",
-            "message": str(e)
-        }
-        yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-
-
-def split_response_into_chunks(text: str, chunk_size: int = 50) -> list:
-    """
-    将响应文本分割成块
-
-    优先按句子分割，如果句子太长则按字符数分割
-    """
-    if not text:
-        return []
-
-    # 按句子分割（中文和英文标点）
-    sentences = re.split(r'([。！？\n])', text)
-
-    chunks = []
-    current_chunk = ""
-
-    for i in range(0, len(sentences), 2):
-        sentence = sentences[i]
-        # 添加标点（如果有）
-        if i + 1 < len(sentences):
-            sentence += sentences[i + 1]
-
-        if len(current_chunk) + len(sentence) <= chunk_size:
-            current_chunk += sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk)
-            # 如果单个句子太长，按字符分割
-            if len(sentence) > chunk_size:
-                for j in range(0, len(sentence), chunk_size):
-                    chunks.append(sentence[j:j + chunk_size])
-                current_chunk = ""
-            else:
-                current_chunk = sentence
-
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    return chunks if chunks else [text]
 
 
 @router.post("/chat", response_model=ResearchChatResponse)
@@ -249,38 +91,34 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
             )
             logger.info(f"[ResearchRouter] 创建新会话: {conversation_id}")
 
-        # 创建ResearchAgent
-        agent = ResearchAgent(
-            doctor_id=request.doctor_id,
+        # 使用 GraphManager 处理对话
+        result = graph_manager.chat(
+            patient_id=request.patient_id or request.doctor_id,
             session_id=session_id,
-            patient_id=request.patient_id,
+            message=request.message,
+            role="doctor",
+            doctor_id=request.doctor_id,
+            conversation_id=conversation_id,
+            agent_type="research",
             enable_institution_data=request.enable_institution_data,
             enable_web_search=request.enable_web_search,
             web_search_types=request.web_search_types,
-            conversation_id=conversation_id,
-            persistence_service=persistence_service
         )
 
-        # 处理消息
-        response_text = agent.chat(request.message)
-
-        # 获取摘要
-        summary = agent.get_conversation_summary()
-
         return ResearchChatResponse(
-            response=response_text,
+            response=result["response"],
             session_id=session_id,
             conversation_id=conversation_id,
-            is_completed=summary["is_completed"],
-            stage=summary["stage"],
+            is_completed=result["is_completed"],
+            stage=result["stage"],
             agent_type="research",
             metadata={
                 "doctor_id": request.doctor_id,
                 "patient_id": request.patient_id,
-                "message_count": summary["message_count"],
                 "enable_institution_data": request.enable_institution_data,
                 "enable_web_search": request.enable_web_search,
-                "web_search_types": request.web_search_types
+                "web_search_types": request.web_search_types,
+                "thread_id": result.get("thread_id", ""),
             }
         )
 
@@ -309,7 +147,8 @@ async def research_chat_stream(request: ResearchChatRequest):
 
     SSE事件类型:
     - start: 开始处理
-    - chunk: 响应内容块
+    - token: 响应内容块
+    - tool_call: 工具调用通知
     - done: 完成，包含完整响应和元数据
     - error: 错误信息
 
@@ -319,61 +158,103 @@ async def research_chat_stream(request: ResearchChatRequest):
     Returns:
         StreamingResponse: SSE流式响应
     """
+    async def generate_sse() -> AsyncGenerator[str, None]:
+        """生成 SSE 事件流"""
+        try:
+            # 验证医生身份
+            if not verify_doctor_role(request.doctor_id):
+                yield f"data: {json.dumps({'event': 'error', 'message': '仅医生用户可访问科研Agent'})}\n\n"
+                return
+
+            # 生成session_id
+            session_id = request.session_id or f"research_{uuid.uuid4().hex[:16]}"
+
+            # 获取持久化服务
+            persistence_service = get_chat_persistence_service()
+            conversation_id = request.conversation_id
+
+            # 如果没有conversation_id，创建新会话
+            if not conversation_id:
+                conversation_id = persistence_service.create_conversation(
+                    host_id=request.doctor_id,
+                    user_type="doctor",
+                    title="科研对话"
+                )
+
+            # 获取 thread_id
+            from agents.graph.id_mapping import get_thread_config
+            thread_config = get_thread_config(session_id, conversation_id)
+            thread_id = thread_config["configurable"]["thread_id"]
+
+            # 发送开始事件
+            yield f"data: {json.dumps({'event': 'start', 'session_id': session_id, 'conversation_id': conversation_id, 'thread_id': thread_id})}\n\n"
+
+            # 调用异步流式对话（Token 级别）
+            full_response = ""
+            current_stage = "greeting"
+
+            async for chunk in graph_manager.chat_stream_async(
+                patient_id=request.patient_id or request.doctor_id,
+                session_id=session_id,
+                message=request.message,
+                role="doctor",
+                doctor_id=request.doctor_id,
+                conversation_id=conversation_id,
+                agent_type="research",
+                enable_institution_data=request.enable_institution_data,
+                enable_web_search=request.enable_web_search,
+                web_search_types=request.web_search_types,
+            ):
+                event_type = chunk.get("type", "")
+                content = chunk.get("content", "")
+                metadata = chunk.get("metadata", {})
+
+                if event_type == "token":
+                    full_response += content
+                    yield f"data: {json.dumps({'event': 'chunk', 'content': content})}\n\n"
+
+                elif event_type == "node_end":
+                    if metadata.get("stage"):
+                        current_stage = metadata["stage"]
+
+                elif event_type == "tool_start":
+                    yield f"data: {json.dumps({'event': 'tool_call', 'tool': metadata.get('tool', 'unknown'), 'status': 'start', 'input': metadata.get('input', {})})}\n\n"
+
+                elif event_type == "tool_end":
+                    yield f"data: {json.dumps({'event': 'tool_call', 'tool': metadata.get('tool', 'unknown'), 'status': 'end', 'output': metadata.get('output', '')})}\n\n"
+
+                elif event_type == "done":
+                    full_response = content
+                    current_stage = metadata.get("stage", current_stage)
+
+                elif event_type == "error":
+                    yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+
+            # 发送完成事件
+            yield f"data: {json.dumps({'event': 'done', 'response': full_response, 'session_id': session_id, 'conversation_id': conversation_id, 'stage': current_stage, 'agent_type': 'research', 'metadata': {'doctor_id': request.doctor_id, 'patient_id': request.patient_id, 'enable_institution_data': request.enable_institution_data, 'enable_web_search': request.enable_web_search}})}\n\n"
+
+        except Exception as e:
+            logger.error(f"[ResearchRouter] SSE生成错误: {e}", exc_info=True)
+            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
     try:
         logger.info(
             f"[ResearchRouter] 收到SSE请求: doctor={request.doctor_id}, "
             f"patient={request.patient_id}, web_search={request.enable_web_search}"
         )
 
-        # 验证医生身份
-        if not verify_doctor_role(request.doctor_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="仅医生用户可访问科研Agent，请提供有效的doctor_id"
-            )
-
-        # 生成session_id
-        session_id = request.session_id or f"research_{uuid.uuid4().hex[:16]}"
-
-        # 获取持久化服务
-        persistence_service = get_chat_persistence_service()
-        conversation_id = request.conversation_id
-
-        # 如果没有conversation_id，创建新会话
-        if not conversation_id:
-            conversation_id = persistence_service.create_conversation(
-                host_id=request.doctor_id,
-                user_type="doctor",
-                title="科研对话"
-            )
-            logger.info(f"[ResearchRouter] SSE创建新会话: {conversation_id}")
-
-        # 创建ResearchAgent
-        agent = ResearchAgent(
-            doctor_id=request.doctor_id,
-            session_id=session_id,
-            patient_id=request.patient_id,
-            enable_institution_data=request.enable_institution_data,
-            enable_web_search=request.enable_web_search,
-            web_search_types=request.web_search_types,
-            conversation_id=conversation_id,
-            persistence_service=persistence_service
-        )
-
         # 返回SSE流式响应
         return StreamingResponse(
-            generate_sse_response(agent, request.message, conversation_id),
+            generate_sse(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",  # 禁用Nginx缓冲
+                "X-Accel-Buffering": "no",
                 "Access-Control-Allow-Origin": "*"
             }
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"[ResearchRouter] SSE处理失败: {e}", exc_info=True)
         raise HTTPException(
@@ -616,25 +497,17 @@ async def research_health_check():
     return {
         "status": "healthy",
         "agent_type": "research",
-        "version": "2.0.0",  # 阶段二版本
+        "version": "3.0.0",
+        "architecture": "langgraph",
         "features": {
-            # 阶段一功能
-            "institution_data": True,  # 功能已实现，但需要后端接口
+            "institution_data": True,
             "web_search": search_available,
             "sse_streaming": True,
-            # 阶段二功能
             "statistical_analysis": stats_available,
             "data_visualization": viz_available,
             "visualization_storage": minio_available,
-            "literature_review": True,  # 已实现
-            "research_design": True,  # 已实现
-            # 阶段三功能（待实现）
-            "paper_writing": False,
-            "clinical_guidelines": False,
-            "drug_interactions": False,
-            "case_matching": False,
-            "ethics_review": False,
-            "data_export": False
+            "literature_review": True,
+            "research_design": True,
         },
         "dependencies": {
             "search1api": search_available,
@@ -650,10 +523,5 @@ async def research_health_check():
             "GET /api/research/conversations/{id}",
             "DELETE /api/research/conversations/{id}",
             "GET /api/research/health"
-        ],
-        "tools": {
-            "phase1": ["get_institution_research_data", "web_search_medical"],
-            "phase2": ["statistical_analysis", "summarize_medical_literature", "generate_research_visualization", "design_research_protocol"],
-            "inherited": 11
-        }
+        ]
     }

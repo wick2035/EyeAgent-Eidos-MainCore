@@ -64,6 +64,20 @@ def get_doctor_free_time(patient_id: str, date: str, hospital_key: str) -> str:
     """
     try:
         logger.info(f"[Tool] get_doctor_free_time: patient_id={patient_id}, date={date}, hospital={hospital_key}")
+
+        # 日期验证
+        try:
+            query_date = datetime.strptime(date, "%Y-%m-%d")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if query_date < today:
+                error_msg = f"查询日期 {date} 已经过去，请查询今天或未来的日期。今天是 {today.strftime('%Y-%m-%d')}"
+                logger.warning(f"[Tool Warning] {error_msg}")
+                return error_msg
+        except ValueError:
+            error_msg = f"日期格式错误: {date}，请使用格式 yyyy-MM-dd（如 2025-12-17）"
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
+
         client = get_api_client()
         result = client.get_doctor_free_time(patient_id, date, hospital_key)
         return json.dumps(result, ensure_ascii=False)
@@ -115,6 +129,33 @@ def reserve_doctor(
     """
     try:
         logger.info(f"[Tool] reserve_doctor: patient={patient_id}, doctor={doctor_id}, time={reserve_time}")
+
+        # 日期验证
+        try:
+            # 处理可能的时区后缀
+            time_str = reserve_time.replace('Z', '+00:00')
+            if '+' in time_str or time_str.endswith('00:00'):
+                # 有时区信息，使用 fromisoformat
+                reserve_dt = datetime.fromisoformat(time_str.split('+')[0])
+            else:
+                reserve_dt = datetime.fromisoformat(time_str)
+
+            now = datetime.now()
+            if reserve_dt < now:
+                error_msg = f"预约时间 {reserve_time} 已经过去，请选择未来的时间。当前时间是 {now.strftime('%Y-%m-%d %H:%M')}"
+                logger.warning(f"[Tool Warning] {error_msg}")
+                return error_msg
+
+            # 检查是否太远的未来（超过90天）
+            if (reserve_dt - now).days > 90:
+                error_msg = f"预约时间 {reserve_time} 距离当前时间超过3个月，请选择更近的日期"
+                logger.warning(f"[Tool Warning] {error_msg}")
+                return error_msg
+
+        except ValueError as e:
+            error_msg = f"日期格式错误: {reserve_time}，请使用格式 yyyy-MM-ddTHH:mm:ss（如 2025-12-17T10:00:00）"
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
 
         # 只发送 API 文档要求的字段
         request_data = {

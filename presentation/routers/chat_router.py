@@ -1,42 +1,42 @@
 """
 聊天路由 - 处理与Agent的对话交互
-支持对话历史持久化
+基于 LangGraph GraphManager 实现
 """
 import uuid
+import json
 import logging
+from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
-from agents.agent_manager import AgentManager
+from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
-from utils.hybrid_intent_router import get_hybrid_router
 
 logger = logging.getLogger(__name__)
 
 # 创建路由
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# 全局AgentManager实例
-agent_manager = AgentManager()
+# GraphManager 单例
+graph_manager = get_graph_manager()
 
 
 @router.post("", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """
-    与Agent进行对话
+    与Agent进行对话 (基于 LangGraph)
 
-    支持两种模式：
-    1. 新建对话：conversation_id 为空，创建新的数据库会话
-    2. 继续对话：conversation_id 有值，加载历史对话继续
+    使用 LangGraph 框架实现，支持：
+    - 更好的状态管理
+    - MySQL Checkpoint 持久化
+    - 自动路由和 Agent 切换
 
     Args:
         request: 聊天请求
 
     Returns:
-        ChatResponse: 聊天响应（包含 conversation_id 供后续使用）
-
-    Raises:
-        HTTPException: 当出现错误时
+        ChatResponse: 聊天响应
     """
     try:
         logger.info(
@@ -48,18 +48,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # 生成session_id（如果没有提供）
         session_id = request.session_id or f"sess_{uuid.uuid4().hex[:16]}"
 
-        # 获取持久化服务
+        # 获取持久化服务（用于创建 conversation_id）
         persistence_service = get_chat_persistence_service()
         conversation_id = request.conversation_id
 
         # 根据角色决定 host_id
-        # 患者端：host_id = patient_id
-        # 医生端：host_id = doctor_id（医生自己的UUID）
         if request.role == "doctor":
             if not request.doctor_id:
                 raise ValueError("医生端请求必须提供 doctor_id")
             host_id = request.doctor_id
-            logger.info(f"[ChatRouter] 医生端请求: host_id={host_id}, 目标患者={request.patient_id}")
         else:
             host_id = request.patient_id
 
@@ -70,82 +67,32 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 user_type=request.role or "patient",
                 title="新对话"
             )
-            logger.info(f"[ChatRouter] 创建新会话: {conversation_id}, host_id={host_id}")
+            logger.info(f"[ChatRouter] 创建新会话: {conversation_id}")
 
-        # === 意图检测与自动路由 ===
-        # 如果请求没有明确指定agent_type，或使用默认值，则进行意图检测
-        effective_agent_type = request.agent_type or "health"
-        need_switch = False  # 是否需要切换Agent
-
-        # 患者端和医生端都启用意图自动路由
-        # 根据消息内容自动判断使用 health/report/reminder agent
-        try:
-            hybrid_router = get_hybrid_router()
-
-            intent_result = hybrid_router.route(
-                message=request.message,
-                role=request.role or "patient",
-                current_agent=effective_agent_type
-            )
-
-            # 如果检测到不同的意图且置信度足够高，使用检测到的agent类型
-            if hybrid_router.should_switch_agent(
-                current_agent=effective_agent_type,
-                detected_intent=intent_result,
-                threshold=0.7
-            ):
-                detected_type = intent_result.get('agent_type')
-                logger.info(
-                    f"[ChatRouter] 意图检测: '{request.message}' -> {detected_type} "
-                    f"(置信度: {intent_result.get('confidence', 0):.2f})"
-                )
-                effective_agent_type = detected_type
-                need_switch = True  # 标记需要切换Agent
-        except Exception as e:
-            logger.warning(f"[ChatRouter] 意图检测失败，使用默认agent_type: {e}")
-
-        # 根据是否需要切换选择不同的方法
-        if need_switch:
-            # 切换到新的Agent类型（删除旧Agent，创建新Agent）
-            agent = agent_manager.switch_agent_type(
-                session_id=session_id,
-                new_agent_type=effective_agent_type,
-                patient_id=request.patient_id,
-                role=request.role,
-                doctor_id=request.doctor_id,
-                conversation_id=conversation_id,
-                persistence_service=persistence_service
-            )
-        else:
-            # 获取或创建agent（带持久化支持）
-            agent = agent_manager.get_or_create_agent(
-                session_id=session_id,
-                patient_id=request.patient_id,
-                agent_type=effective_agent_type,
-                role=request.role,
-                doctor_id=request.doctor_id,
-                conversation_id=conversation_id,
-                persistence_service=persistence_service
-            )
-
-        # 调用agent处理消息
-        response_text = agent.chat(request.message)
-
-        # 获取对话摘要
-        summary = agent.get_conversation_summary()
+        # 使用 GraphManager 处理对话
+        result = graph_manager.chat(
+            patient_id=request.patient_id,
+            session_id=session_id,
+            message=request.message,
+            role=request.role or "patient",
+            doctor_id=request.doctor_id,
+            conversation_id=conversation_id,
+            agent_type=request.agent_type or "health",
+        )
 
         # 构建响应
         return ChatResponse(
-            response=response_text,
+            response=result["response"],
             session_id=session_id,
-            conversation_id=summary.get("conversation_id") or conversation_id,
-            is_completed=summary["is_completed"],
-            stage=summary["stage"],
-            agent_type=summary["agent_type"],
+            conversation_id=conversation_id,
+            is_completed=result["is_completed"],
+            stage=result["stage"],
+            agent_type=result["agent_type"],
             metadata={
-                "patient_id": summary["patient_id"],
-                "message_count": summary["message_count"],
-                "role": summary["role"],
+                "patient_id": request.patient_id,
+                "role": request.role or "patient",
+                "thread_id": result.get("thread_id", ""),
+                "version": "langgraph",
             }
         )
 
@@ -165,18 +112,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, conversation_id: str = None):
     """
     删除会话
 
     Args:
         session_id: 会话ID
+        conversation_id: 数据库会话ID（可选）
 
     Returns:
         删除结果
     """
     try:
-        success = agent_manager.remove_agent(session_id)
+        success = graph_manager.reset_conversation(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
 
         if not success:
             raise HTTPException(
@@ -196,71 +147,296 @@ async def delete_session(session_id: str):
         )
 
 
-@router.get("/sessions")
-async def get_all_sessions():
+@router.get("/{session_id}/state")
+async def get_session_state(session_id: str, conversation_id: str = None):
     """
-    获取所有活动会话（调试用）
-
-    Returns:
-        活动会话列表
-    """
-    try:
-        from infrastructure.session.session_manager import get_session_manager
-        session_manager = get_session_manager()
-        sessions = session_manager.get_all_sessions()
-
-        return {
-            "total_count": len(sessions),
-            "sessions": sessions
-        }
-
-    except Exception as e:
-        logger.error(f"[ChatRouter] 获取会话列表失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取会话列表失败: {str(e)}"
-        )
-
-
-@router.post("/{session_id}/reset")
-async def reset_session(session_id: str):
-    """
-    重置会话
+    获取会话状态
 
     Args:
         session_id: 会话ID
+        conversation_id: 数据库会话ID（可选）
 
     Returns:
-        重置结果
+        会话状态
     """
     try:
-        # 先检查会话是否存在
-        from infrastructure.session.session_manager import get_session_manager
-        session_manager = get_session_manager()
-        session = session_manager.get_session(session_id)
+        state = graph_manager.get_conversation_state(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
 
-        if not session:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"会话不存在或已过期: {session_id}. 请创建新会话"
-            )
-
-        # 重置agent
-        success = agent_manager.reset_agent(session_id)
-
-        if not success:
+        if state is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"会话不存在: {session_id}"
             )
 
-        return {"message": "会话已重置", "session_id": session_id}
+        # 提取关键状态信息
+        return {
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "current_agent": state.get("current_agent", "health"),
+            "stage": state.get("stage", "greeting"),
+            "is_completed": state.get("is_completed", False),
+            "message_count": len(state.get("messages", [])),
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[ChatRouter] 重置会话失败: {e}")
+        logger.error(f"[ChatRouter] 获取状态失败: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"重置会话失败: {str(e)}"
+            detail=f"获取状态失败: {str(e)}"
         )
+
+
+@router.get("/{session_id}/agent-history")
+async def get_agent_history(session_id: str, conversation_id: str = None):
+    """
+    获取 Agent 切换历史
+
+    用于调试和监控对话过程中 Agent 的切换情况。
+
+    Args:
+        session_id: 会话ID
+        conversation_id: 数据库会话ID（可选）
+
+    Returns:
+        Agent 切换历史列表
+    """
+    try:
+        from agents.graph.id_mapping import get_thread_config
+        thread_config = get_thread_config(session_id, conversation_id)
+        thread_id = thread_config["configurable"]["thread_id"]
+
+        history = graph_manager.get_agent_history(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
+
+        # 格式化时间戳
+        formatted_history = []
+        for item in history:
+            formatted_item = {
+                "agent_type": item.get("agent_type"),
+                "checkpoint_id": item.get("checkpoint_id"),
+                "started_at": item["started_at"].isoformat() if item.get("started_at") else None,
+                "ended_at": item["ended_at"].isoformat() if item.get("ended_at") else None,
+            }
+            formatted_history.append(formatted_item)
+
+        return {
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "history": formatted_history,
+        }
+
+    except Exception as e:
+        logger.error(f"[ChatRouter] 获取 Agent 历史失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取 Agent 历史失败: {str(e)}"
+        )
+
+
+@router.get("/{session_id}/checkpoints")
+async def get_checkpoints(session_id: str, conversation_id: str = None, limit: int = 10):
+    """
+    获取检查点列表
+
+    用于调试和回溯对话状态。
+
+    Args:
+        session_id: 会话ID
+        conversation_id: 数据库会话ID（可选）
+        limit: 返回数量限制，默认 10
+
+    Returns:
+        检查点列表
+    """
+    try:
+        from agents.graph.id_mapping import get_thread_config
+        thread_config = get_thread_config(session_id, conversation_id)
+        thread_id = thread_config["configurable"]["thread_id"]
+
+        checkpoints = graph_manager.get_checkpoints(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+
+        return {
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "count": len(checkpoints),
+            "checkpoints": checkpoints,
+        }
+
+    except Exception as e:
+        logger.error(f"[ChatRouter] 获取检查点列表失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取检查点列表失败: {str(e)}"
+        )
+
+
+@router.get("/{session_id}/messages")
+async def get_messages(session_id: str, conversation_id: str = None):
+    """
+    获取消息历史
+
+    用于调试查看完整的对话消息链。
+
+    Args:
+        session_id: 会话ID
+        conversation_id: 数据库会话ID（可选）
+
+    Returns:
+        消息历史
+    """
+    try:
+        from agents.graph.id_mapping import get_thread_config
+        thread_config = get_thread_config(session_id, conversation_id)
+        thread_id = thread_config["configurable"]["thread_id"]
+
+        result = graph_manager.get_messages(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
+
+        return {
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "message_count": result["message_count"],
+            "messages": result["messages"],
+        }
+
+    except Exception as e:
+        logger.error(f"[ChatRouter] 获取消息历史失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取消息历史失败: {str(e)}"
+        )
+
+
+@router.post("/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    流式对话 (SSE)
+
+    使用 Server-Sent Events 实现流式响应，支持：
+    - 实时 token 输出
+    - Agent 切换通知
+    - 工具调用状态
+
+    Args:
+        request: 聊天请求
+
+    Returns:
+        StreamingResponse: SSE 流式响应
+    """
+    async def generate_sse() -> AsyncGenerator[str, None]:
+        """生成 SSE 事件流"""
+        try:
+            # 生成 session_id
+            session_id = request.session_id or f"sess_{uuid.uuid4().hex[:16]}"
+
+            # 获取持久化服务
+            persistence_service = get_chat_persistence_service()
+            conversation_id = request.conversation_id
+
+            # 根据角色决定 host_id
+            if request.role == "doctor":
+                if not request.doctor_id:
+                    yield f"data: {json.dumps({'event': 'error', 'message': '医生端请求必须提供 doctor_id'})}\n\n"
+                    return
+                host_id = request.doctor_id
+            else:
+                host_id = request.patient_id
+
+            # 创建新会话
+            if not conversation_id:
+                conversation_id = persistence_service.create_conversation(
+                    host_id=host_id,
+                    user_type=request.role or "patient",
+                    title="新对话"
+                )
+
+            # 获取 thread_id
+            from agents.graph.id_mapping import get_thread_config
+            thread_config = get_thread_config(session_id, conversation_id)
+            thread_id = thread_config["configurable"]["thread_id"]
+
+            # 发送开始事件
+            yield f"data: {json.dumps({'event': 'start', 'session_id': session_id, 'conversation_id': conversation_id, 'thread_id': thread_id})}\n\n"
+
+            # 获取当前 Agent（用于检测切换）
+            previous_agent = graph_manager.checkpointer.get_current_agent(thread_id)
+
+            # 调用异步流式对话（Token 级别）
+            full_response = ""
+            current_agent = request.agent_type or "health"
+            current_stage = "greeting"
+
+            async for chunk in graph_manager.chat_stream_async(
+                patient_id=request.patient_id,
+                session_id=session_id,
+                message=request.message,
+                role=request.role or "patient",
+                doctor_id=request.doctor_id,
+                conversation_id=conversation_id,
+                agent_type=request.agent_type or "health",
+            ):
+                event_type = chunk.get("type", "")
+                content = chunk.get("content", "")
+                metadata = chunk.get("metadata", {})
+
+                if event_type == "token":
+                    full_response += content
+                    yield f"data: {json.dumps({'event': 'token', 'content': content})}\n\n"
+
+                elif event_type == "node_start":
+                    # Agent 切换检测
+                    node = metadata.get("node", "")
+                    if node and node != current_agent:
+                        yield f"data: {json.dumps({'event': 'agent_switch', 'from': current_agent, 'to': node})}\n\n"
+                        current_agent = node
+
+                elif event_type == "node_end":
+                    if metadata.get("stage"):
+                        current_stage = metadata["stage"]
+
+                elif event_type == "tool_start":
+                    yield f"data: {json.dumps({'event': 'tool_call', 'tool': metadata.get('tool', 'unknown'), 'status': 'start', 'input': metadata.get('input', {})})}\n\n"
+
+                elif event_type == "tool_end":
+                    yield f"data: {json.dumps({'event': 'tool_call', 'tool': metadata.get('tool', 'unknown'), 'status': 'end', 'output': metadata.get('output', '')})}\n\n"
+
+                elif event_type == "done":
+                    full_response = content
+                    current_agent = metadata.get("agent_type", current_agent)
+                    current_stage = metadata.get("stage", current_stage)
+
+                elif event_type == "error":
+                    yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+
+            # 发送完成事件
+            yield f"data: {json.dumps({'event': 'done', 'response': full_response, 'agent_type': current_agent, 'stage': current_stage, 'session_id': session_id, 'conversation_id': conversation_id})}\n\n"
+
+        except Exception as e:
+            logger.error(f"[ChatRouter] 流式对话失败: {e}", exc_info=True)
+            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )

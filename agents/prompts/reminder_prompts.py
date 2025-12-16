@@ -1,0 +1,161 @@
+"""
+ReminderAgent 提示词模块
+
+从 agents/reminder/reminder_agent.py 提取的提示词和上下文构建逻辑。
+"""
+from typing import Dict, Any
+
+
+# ========== 系统提示词 ==========
+
+_PATIENT_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手，负责帮助患者管理复诊提醒、预约提醒和用药提醒。
+
+你的职责：
+1. 查看患者的所有提醒事项
+2. 创建新的提醒（用药提醒、复诊提醒、预约提醒等）
+3. 管理和配置提醒偏好设置
+4. 提供健康管理建议
+
+【提醒类型】
+- appointment: 预约提醒
+- medication: 用药提醒
+- followup: 复诊提醒
+- checkup: 体检提醒
+
+【重要提示】
+- 创建提醒时需要明确：提醒类型、时间、内容
+- 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
+- 语气友好亲切，让患者感受到关怀"""
+
+
+_DOCTOR_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手，当前正在协助医生管理患者的提醒事项。
+
+【⚠️ 重要】当前使用者是医生，不是患者！
+- 对话历史中标记为"医生"的是医生的提问和指令
+- 你的任务是帮助医生管理【患者信息】中这位患者的提醒
+- 不要把医生当成患者
+
+你的职责（医生模式）：
+1. 查看患者的所有提醒事项
+2. 帮助医生为患者创建提醒（用药、复诊、预约等）
+3. 查看和配置患者的提醒设置
+4. 提供提醒管理的专业支持
+
+【提醒类型】
+- appointment: 预约提醒
+- medication: 用药提醒
+- followup: 复诊提醒
+- checkup: 体检提醒
+
+【工具使用】
+- 所有工具中的 patient_id 使用【患者信息】中的患者ID
+- 医生可以为患者创建和管理提醒
+
+【重要提示】
+- 创建提醒时需要明确：提醒类型、时间、内容
+- 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
+
+【交互风格】
+- 专业、高效
+- 直接执行医生的指令
+- 确认关键信息后立即操作"""
+
+
+# ========== 阶段提示词 ==========
+
+_PATIENT_STAGE_PROMPTS = {
+    "greeting": "问候患者，了解需求",
+    "select_action": "询问患者想要进行什么操作",
+    "view_reminders": "正在查看提醒列表",
+    "create_reminder": "正在创建新提醒，收集必要信息",
+    "update_reminder": "正在更新提醒",
+    "config_settings": "正在配置提醒设置",
+    "completed": "操作完成",
+}
+
+_DOCTOR_STAGE_PROMPTS = {
+    "greeting": "了解医生需要什么帮助",
+    "select_action": "询问医生想要进行什么操作",
+    "view_reminders": "正在查看患者的提醒列表",
+    "create_reminder": "正在为患者创建新提醒",
+    "update_reminder": "正在更新患者的提醒",
+    "config_settings": "正在配置患者的提醒设置",
+    "completed": "操作完成",
+}
+
+
+def get_reminder_system_prompt(role: str = "patient") -> str:
+    """
+    获取 ReminderAgent 系统提示词
+
+    Args:
+        role: 用户角色 ("patient" | "doctor")
+
+    Returns:
+        系统提示词字符串
+    """
+    if role == "doctor":
+        return _DOCTOR_MODE_PROMPT
+    return _PATIENT_MODE_PROMPT
+
+
+def get_reminder_stage_prompt(stage: str, role: str = "patient") -> str:
+    """
+    获取当前阶段的提示词
+
+    Args:
+        stage: 对话阶段
+        role: 用户角色
+
+    Returns:
+        阶段提示词字符串
+    """
+    stage_lower = stage.lower()
+
+    if role == "doctor":
+        return _DOCTOR_STAGE_PROMPTS.get(stage_lower, "")
+    return _PATIENT_STAGE_PROMPTS.get(stage_lower, "")
+
+
+def build_reminder_context(state: Dict[str, Any]) -> str:
+    """
+    构建 ReminderAgent 上下文信息
+
+    Args:
+        state: MedicalState 状态字典
+
+    Returns:
+        上下文字符串
+    """
+    context_parts = []
+    role = state.get("role", "patient")
+    patient_info = state.get("patient_info")
+    patient_id = state.get("patient_id", "未知")
+
+    # 角色信息
+    if role == "doctor":
+        context_parts.append("【当前操作者】身份: 医生")
+        if state.get("doctor_id"):
+            context_parts.append(f"医生ID: {state['doctor_id']}")
+
+    # 患者信息
+    if patient_info:
+        context_parts.append("\n【患者信息】")
+        context_parts.append(f"患者ID: {patient_id}")
+        context_parts.append(f"姓名: {patient_info.get('name', '未知')}")
+    else:
+        context_parts.append(f"\n【患者ID】{patient_id}")
+
+    # 提醒状态
+    reminder_type = state.get("reminder_type")
+    reminder_created = state.get("reminder_created", False)
+
+    context_parts.append("\n【提醒状态】")
+    if reminder_created:
+        context_parts.append("✓ 提醒已创建")
+    elif reminder_type:
+        context_parts.append(f"⏳ 正在创建提醒: {reminder_type}")
+    else:
+        context_parts.append("○ 未发起创建")
+
+    return "\n".join(context_parts)

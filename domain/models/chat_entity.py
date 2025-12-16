@@ -56,6 +56,8 @@ class ChatMessageEntity(BaseModel):
     sender_id: Optional[str] = Field(default=None, description="发送者ID")
     context: Optional[str] = Field(default=None, description="上下文JSON")
     token_used: Optional[int] = Field(default=None, description="使用的token数")
+    status: str = Field(default="success", description="消息状态 (running/success/failed/cancelled)")
+    error_message: Optional[str] = Field(default=None, description="错误信息（失败时）")
     create_time: datetime = Field(default_factory=datetime.now, description="创建时间")
     create_by: Optional[str] = Field(default=None, description="创建者")
     update_time: datetime = Field(default_factory=datetime.now, description="更新时间")
@@ -73,6 +75,8 @@ class ChatMessageEntity(BaseModel):
                 "message_type": "user",
                 "sender_id": "550e8400-e29b-41d4-a716-446655440001",
                 "context": "[{\"patient_info\": {...}}, {\"conversation_stage\": \"health_consultation\"}]",
+                "status": "success",
+                "error_message": None,
                 "create_time": "2025-12-01T10:00:00",
                 "deleted": False,
                 "version": 1

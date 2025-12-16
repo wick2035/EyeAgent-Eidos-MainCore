@@ -1,0 +1,245 @@
+"""
+MySQL 持久化适配器
+
+实现 PersistenceAdapter 接口，将消息持久化到 MySQL 数据库
+"""
+import logging
+from typing import Optional, Dict, Any, List
+
+from agents.graph.persistence_adapter import PersistenceAdapter
+from domain.models.chat_entity import MessageContext
+
+logger = logging.getLogger(__name__)
+
+
+class MySQLPersistenceAdapter(PersistenceAdapter):
+    """
+    MySQL 持久化适配器
+
+    通过 ChatPersistenceService 实现消息持久化
+    """
+
+    def __init__(self, persistence_service):
+        """
+        初始化适配器
+
+        Args:
+            persistence_service: ChatPersistenceService 实例
+        """
+        self.service = persistence_service
+        logger.info("[MySQLPersistenceAdapter] 初始化完成")
+
+    def save_user_message(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> str:
+        """保存用户消息"""
+        try:
+            # 构建 MessageContext
+            msg_context = self._build_user_context(context, is_first_message)
+
+            # 保存消息
+            message = self.service.save_message(
+                chat_id=chat_id,
+                role="user",
+                content=content,
+                sender_id=sender_id,
+                context=msg_context,
+                status="success",
+            )
+
+            # 首条消息更新标题
+            if is_first_message:
+                self.update_conversation_title(chat_id, content)
+
+            logger.debug(
+                f"[MySQLPersistenceAdapter] 保存用户消息: chat_id={chat_id}, "
+                f"message_id={message.id}, is_first={is_first_message}"
+            )
+            return message.id
+
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 保存用户消息失败: {e}", exc_info=True)
+            raise
+
+    def create_assistant_placeholder(
+        self,
+        chat_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """创建 AI 回复占位"""
+        try:
+            msg_context = self._build_assistant_context(context)
+
+            message = self.service.save_message(
+                chat_id=chat_id,
+                role="assistant",
+                content="",  # 占位，后续更新
+                sender_id=None,
+                context=msg_context,
+                status="running",
+            )
+
+            logger.debug(
+                f"[MySQLPersistenceAdapter] 创建 AI 占位: chat_id={chat_id}, "
+                f"message_id={message.id}"
+            )
+            return message.id
+
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 创建 AI 占位失败: {e}", exc_info=True)
+            raise
+
+    def update_assistant_success(
+        self,
+        message_id: str,
+        content: str,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """更新 AI 回复为成功"""
+        try:
+            # 构建更新的上下文
+            updated_context = None
+            if context or tool_results:
+                updated_context = MessageContext(
+                    patient_info=None,
+                    conversation_stage=context.get("stage") if context else None,
+                    tool_results=tool_results if tool_results else None,
+                    metadata={
+                        "agent_type": context.get("agent_type") if context else None,
+                    } if context else None,
+                )
+
+            success = self.service.update_message(
+                message_id=message_id,
+                content=content,
+                status="success",
+                token_used=token_used,
+                context=updated_context,
+            )
+
+            logger.debug(
+                f"[MySQLPersistenceAdapter] 更新 AI 成功: message_id={message_id}, "
+                f"token_used={token_used}"
+            )
+            return success
+
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 成功失败: {e}", exc_info=True)
+            return False
+
+    def update_assistant_failed(
+        self,
+        message_id: str,
+        error_message: str,
+    ) -> bool:
+        """更新 AI 回复为失败"""
+        try:
+            success = self.service.update_message(
+                message_id=message_id,
+                status="failed",
+                error_message=error_message,
+            )
+
+            logger.warning(
+                f"[MySQLPersistenceAdapter] 更新 AI 失败: message_id={message_id}, "
+                f"error={error_message}"
+            )
+            return success
+
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 失败状态失败: {e}", exc_info=True)
+            return False
+
+    def update_conversation_title(
+        self,
+        chat_id: str,
+        first_message: str,
+    ) -> bool:
+        """更新会话标题"""
+        try:
+            success = self.service.update_conversation_title(chat_id, first_message)
+            logger.debug(f"[MySQLPersistenceAdapter] 更新标题: chat_id={chat_id}")
+            return success
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 更新标题失败: {e}", exc_info=True)
+            return False
+
+    def is_first_message(self, chat_id: str) -> bool:
+        """判断是否为首条消息"""
+        try:
+            return self.service.is_first_message(chat_id)
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 判断首条消息失败: {e}", exc_info=True)
+            return False
+
+    def _build_user_context(
+        self,
+        context: Optional[Dict[str, Any]],
+        is_first_message: bool,
+    ) -> Optional[MessageContext]:
+        """
+        构建用户消息的上下文
+
+        Args:
+            context: 原始上下文 {patient_info, stage, agent_type}
+            is_first_message: 是否为首条消息
+
+        Returns:
+            MessageContext 或 None
+        """
+        if not context:
+            return None
+
+        return MessageContext(
+            # patient_info 仅首条消息保存
+            patient_info=context.get("patient_info") if is_first_message else None,
+            conversation_stage=context.get("stage"),
+            tool_results=None,  # 用户消息无 tool_results
+            metadata={
+                "agent_type": context.get("agent_type"),
+            } if context.get("agent_type") else None,
+        )
+
+    def _build_assistant_context(
+        self,
+        context: Optional[Dict[str, Any]],
+    ) -> Optional[MessageContext]:
+        """
+        构建 AI 消息的上下文（占位时）
+
+        Args:
+            context: 原始上下文
+
+        Returns:
+            MessageContext 或 None
+        """
+        if not context:
+            return None
+
+        return MessageContext(
+            patient_info=None,  # AI 消息不保存 patient_info
+            conversation_stage=context.get("stage"),
+            tool_results=None,  # 占位时无结果，成功后更新
+            metadata={
+                "agent_type": context.get("agent_type"),
+            } if context.get("agent_type") else None,
+        )
+
+
+# 工厂函数
+def get_mysql_persistence_adapter():
+    """
+    获取 MySQL 持久化适配器实例
+
+    Returns:
+        MySQLPersistenceAdapter 实例
+    """
+    from application.services.chat_persistence_service import get_chat_persistence_service
+    return MySQLPersistenceAdapter(get_chat_persistence_service())
