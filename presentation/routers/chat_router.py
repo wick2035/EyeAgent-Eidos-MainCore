@@ -77,31 +77,32 @@ async def chat(request: ChatRequest) -> ChatResponse:
         effective_agent_type = request.agent_type or "health"
         need_switch = False  # 是否需要切换Agent
 
-        if request.role != "doctor":  # 仅患者端启用自动路由
-            try:
-                hybrid_router = get_hybrid_router()
+        # 患者端和医生端都启用意图自动路由
+        # 根据消息内容自动判断使用 health/report/reminder agent
+        try:
+            hybrid_router = get_hybrid_router()
 
-                intent_result = hybrid_router.route(
-                    message=request.message,
-                    role=request.role or "patient",
-                    current_agent=effective_agent_type
+            intent_result = hybrid_router.route(
+                message=request.message,
+                role=request.role or "patient",
+                current_agent=effective_agent_type
+            )
+
+            # 如果检测到不同的意图且置信度足够高，使用检测到的agent类型
+            if hybrid_router.should_switch_agent(
+                current_agent=effective_agent_type,
+                detected_intent=intent_result,
+                threshold=0.7
+            ):
+                detected_type = intent_result.get('agent_type')
+                logger.info(
+                    f"[ChatRouter] 意图检测: '{request.message}' -> {detected_type} "
+                    f"(置信度: {intent_result.get('confidence', 0):.2f})"
                 )
-
-                # 如果检测到不同的意图且置信度足够高，使用检测到的agent类型
-                if hybrid_router.should_switch_agent(
-                    current_agent=effective_agent_type,
-                    detected_intent=intent_result,
-                    threshold=0.7
-                ):
-                    detected_type = intent_result.get('agent_type')
-                    logger.info(
-                        f"[ChatRouter] 意图检测: '{request.message}' -> {detected_type} "
-                        f"(置信度: {intent_result.get('confidence', 0):.2f})"
-                    )
-                    effective_agent_type = detected_type
-                    need_switch = True  # 标记需要切换Agent
-            except Exception as e:
-                logger.warning(f"[ChatRouter] 意图检测失败，使用默认agent_type: {e}")
+                effective_agent_type = detected_type
+                need_switch = True  # 标记需要切换Agent
+        except Exception as e:
+            logger.warning(f"[ChatRouter] 意图检测失败，使用默认agent_type: {e}")
 
         # 根据是否需要切换选择不同的方法
         if need_switch:
@@ -111,6 +112,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 new_agent_type=effective_agent_type,
                 patient_id=request.patient_id,
                 role=request.role,
+                doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 persistence_service=persistence_service
             )
@@ -121,6 +123,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 patient_id=request.patient_id,
                 agent_type=effective_agent_type,
                 role=request.role,
+                doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 persistence_service=persistence_service
             )

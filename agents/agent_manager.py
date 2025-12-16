@@ -41,6 +41,7 @@ class AgentManager:
         patient_id: str,
         agent_type: str = "health",
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
@@ -52,6 +53,7 @@ class AgentManager:
             patient_id: 患者UUID（必需）
             agent_type: Agent类型 (health/report/reminder)
             role: 用户角色 (patient/doctor)
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
 
@@ -104,6 +106,7 @@ class AgentManager:
                     patient_id=patient_id,
                     session_id=session_id,
                     role=role,
+                    doctor_id=doctor_id,
                     conversation_id=conversation_id,
                     persistence_service=persistence_service
                 )
@@ -112,6 +115,7 @@ class AgentManager:
                     patient_id=patient_id,
                     session_id=session_id,
                     role=role,
+                    doctor_id=doctor_id,
                     conversation_id=conversation_id,
                     persistence_service=persistence_service
                 )
@@ -120,6 +124,7 @@ class AgentManager:
                     patient_id=patient_id,
                     session_id=session_id,
                     role=role,
+                    doctor_id=doctor_id,
                     conversation_id=conversation_id,
                     persistence_service=persistence_service
                 )
@@ -187,6 +192,7 @@ class AgentManager:
         patient_id: str,
         agent_type: str = "health",
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
@@ -198,6 +204,7 @@ class AgentManager:
             patient_id: 患者UUID
             agent_type: Agent类型 (health/report/reminder)
             role: 用户角色 (patient/doctor)
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
 
@@ -223,6 +230,7 @@ class AgentManager:
             patient_id=patient_id,
             agent_type=agent_type,
             role=role,
+            doctor_id=doctor_id,
             conversation_id=conversation_id,
             persistence_service=persistence_service
         )
@@ -280,6 +288,7 @@ class AgentManager:
         new_agent_type: str,
         patient_id: str,
         role: str = "patient",
+        doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         persistence_service: Optional["ChatPersistenceService"] = None
     ) -> Any:
@@ -291,6 +300,7 @@ class AgentManager:
             new_agent_type: 新的Agent类型
             patient_id: 患者UUID
             role: 用户角色
+            doctor_id: 医生UUID（医生模式下使用）
             conversation_id: 数据库会话ID（用于继续对话）
             persistence_service: 持久化服务
 
@@ -308,6 +318,7 @@ class AgentManager:
             patient_id=patient_id,
             agent_type=new_agent_type,
             role=role,
+            doctor_id=doctor_id,
             conversation_id=conversation_id,
             persistence_service=persistence_service
         )
