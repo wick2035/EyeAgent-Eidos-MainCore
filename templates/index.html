@@ -26,6 +26,14 @@
                         <option value="">新用户（无历史记录）</option>
                     </select>
                 </div>
+                <div class="setting-item">
+                    <label for="streamingToggle">⚡ 流式模式：</label>
+                    <label class="switch">
+                        <input type="checkbox" id="streamingToggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                    <span id="streamingStatus" class="status-text">开启</span>
+                </div>
                 <button id="historyBtn" class="btn-secondary">💬 历史记录</button>
                 <button id="exportBtn" class="btn-secondary">📄 导出病例</button>
                 <button id="resetBtn" class="btn-danger">🔄 重新开始</button>

@@ -68,7 +68,7 @@ class MedicalGraphBuilder:
         graph.add_node("report", report_agent_node)
         graph.add_node("reminder", reminder_agent_node)
         graph.add_node("research", research_agent_node)
-        graph.add_node("response", response_node)
+        graph.add_node("output_handler", response_node)  # 避免与状态键 response 冲突
 
         # 添加入口边
         graph.add_edge(START, "router")
@@ -85,18 +85,18 @@ class MedicalGraphBuilder:
             }
         )
 
-        # 添加 Agent -> response 边
-        graph.add_edge("health", "response")
-        graph.add_edge("report", "response")
-        graph.add_edge("reminder", "response")
-        graph.add_edge("research", "response")
+        # 添加 Agent -> output_handler 边
+        graph.add_edge("health", "output_handler")
+        graph.add_edge("report", "output_handler")
+        graph.add_edge("reminder", "output_handler")
+        graph.add_edge("research", "output_handler")
 
-        # 添加响应节点条件边 (response -> router 或 END)
+        # 添加响应节点条件边 (output_handler -> router 或 END)
         graph.add_conditional_edges(
-            "response",
+            "output_handler",
             should_continue_or_end,
             {
-                "response": "router",  # 继续对话，重新路由
+                "continue": "router",  # 继续对话，重新路由
                 "__end__": END,  # 结束
             }
         )
