@@ -7,6 +7,7 @@ let isProcessing = false;
 let selectedUserId = null; // 选中的用户ID
 let selectedUserPhone = null; // 选中的用户手机号
 let currentRole = 'patient'; // 当前身份：patient 或 doctor
+let useStreaming = true; // 是否使用流式模式
 
 // 测试用医生ID（实际应从登录系统获取）
 const TEST_DOCTOR_ID = "00000000-0000-0000-0000-000000000001";
@@ -104,6 +105,18 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 初始化身份UI
     updateRoleUI();
+
+    // 流式模式切换
+    const streamingToggle = document.getElementById('streamingToggle');
+    const streamingStatus = document.getElementById('streamingStatus');
+
+    if (streamingToggle && streamingStatus) {
+        streamingToggle.addEventListener('change', (e) => {
+            useStreaming = e.target.checked;
+            streamingStatus.textContent = useStreaming ? '开启' : '关闭';
+            console.log('[Chat] 流式模式:', useStreaming ? '开启' : '关闭');
+        });
+    }
 });
 
 // 更新身份UI
@@ -216,62 +229,23 @@ async function sendMessage() {
         const requestBody = {
             message: message,
             session_id: sessionId,
-            patient_id: patientIdStr,  // 发送字符串类型，不是整数
+            patient_id: patientIdStr,
             role: currentRole,
-            conversation_id: conversationId  // 传递会话ID以继续对话
+            conversation_id: conversationId
         };
 
         // 医生模式下添加 doctor_id
         if (currentRole === 'doctor') {
             requestBody.doctor_id = TEST_DOCTOR_ID;
         }
-        
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody)
-        });
-        
-        if (!response.ok) {
-            throw new Error('网络请求失败');
-        }
-        
-        const data = await response.json();
-        
-        // 更新会话ID
-        if (data.session_id && !sessionId) {
-            sessionId = data.session_id;
-            sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+
+        // 根据开关选择接口
+        if (useStreaming) {
+            await sendMessageStreaming(requestBody);
+        } else {
+            await sendMessageNonStreaming(requestBody);
         }
 
-        // 保存数据库会话ID（用于后续继续对话）
-        if (data.conversation_id) {
-            conversationId = data.conversation_id;
-            console.log('[Chat] 会话ID:', conversationId);
-        }
-        
-        // 更新当前阶段
-        currentStage = data.stage;
-        updateStageDisplay(data.stage);
-        
-        // 更新当前Agent
-        if (data.agent_type) {
-            currentAgent = data.agent_type;
-            updateAgentDisplay(data.agent_type);
-        }
-        
-        // 添加AI响应到界面
-        addMessage(data.response, 'assistant');
-        
-        // 如果对话完成，显示提示
-        if (data.is_completed) {
-            setTimeout(() => {
-                addSystemMessage('✅ 问诊已完成！您可以点击"导出病例"按钮查看完整的患者信息。');
-            }, 500);
-        }
-        
     } catch (error) {
         console.error('Error:', error);
         addSystemMessage('❌ 抱歉，发送消息时出现错误，请重试。');
@@ -280,6 +254,130 @@ async function sendMessage() {
         sendBtn.disabled = false;
         hideLoading();
         userInput.focus();
+    }
+}
+
+// 非流式发送（原有逻辑）
+async function sendMessageNonStreaming(requestBody) {
+    const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+        throw new Error('网络请求失败');
+    }
+
+    const data = await response.json();
+
+    // 更新会话ID
+    if (data.session_id && !sessionId) {
+        sessionId = data.session_id;
+        sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+    }
+
+    if (data.conversation_id) {
+        conversationId = data.conversation_id;
+        console.log('[Chat] 会话ID:', conversationId);
+    }
+
+    // 更新阶段和Agent
+    currentStage = data.stage;
+    updateStageDisplay(data.stage);
+
+    if (data.agent_type) {
+        currentAgent = data.agent_type;
+        updateAgentDisplay(data.agent_type);
+    }
+
+    // 添加AI响应
+    addMessage(data.response, 'assistant');
+
+    if (data.is_completed) {
+        setTimeout(() => {
+            addSystemMessage('✅ 问诊已完成！您可以点击"导出病例"按钮查看完整的患者信息。');
+        }, 500);
+    }
+}
+
+// 流式发送（打字机效果）
+async function sendMessageStreaming(requestBody) {
+    const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+        throw new Error('网络请求失败');
+    }
+
+    // 创建流式消息占位符
+    const streamingTextDiv = createStreamingMessage();
+
+    // 处理 SSE 流
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullResponse = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+
+            try {
+                const data = JSON.parse(line.slice(6));
+                const event = data.event;
+
+                if (event === 'start') {
+                    if (data.session_id && !sessionId) {
+                        sessionId = data.session_id;
+                        sessionIdDisplay.textContent = sessionId.substring(0, 8) + '...';
+                    }
+                    if (data.conversation_id) {
+                        conversationId = data.conversation_id;
+                        console.log('[Chat] 流式会话ID:', conversationId);
+                    }
+                }
+                else if (event === 'token') {
+                    fullResponse += data.content;
+                    appendTokenToMessage(streamingTextDiv, data.content);
+                }
+                else if (event === 'tool_call') {
+                    showToolIndicator(data.tool, data.status);
+                }
+                else if (event === 'agent_switch') {
+                    currentAgent = data.to;
+                    updateAgentDisplay(data.to);
+                }
+                else if (event === 'done') {
+                    finalizeStreamingMessage(streamingTextDiv);
+
+                    if (data.stage) {
+                        currentStage = data.stage;
+                        updateStageDisplay(data.stage);
+                    }
+                    if (data.agent_type) {
+                        currentAgent = data.agent_type;
+                        updateAgentDisplay(data.agent_type);
+                    }
+                }
+                else if (event === 'error') {
+                    finalizeStreamingMessage(streamingTextDiv);
+                    streamingTextDiv.textContent = data.message || '发生错误';
+                }
+            } catch (e) {
+                console.warn('解析SSE数据失败:', e);
+            }
+        }
     }
 }
 
@@ -310,9 +408,100 @@ function addMessage(text, type) {
     messageDiv.appendChild(contentDiv);
     
     chatMessages.appendChild(messageDiv);
-    
+
     // 滚动到底部
     scrollToBottom();
+}
+
+// 创建流式消息占位符（返回textDiv元素用于后续追加内容）
+function createStreamingMessage() {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message assistant-message streaming';
+    messageDiv.id = 'streaming-message';
+
+    const avatarDiv = document.createElement('div');
+    avatarDiv.className = 'message-avatar';
+    avatarDiv.textContent = '🤖';
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'message-text';
+    textDiv.id = 'streaming-text';
+
+    const cursorSpan = document.createElement('span');
+    cursorSpan.className = 'typing-cursor';
+    cursorSpan.textContent = '▌';
+    textDiv.appendChild(cursorSpan);
+
+    const timeDiv = document.createElement('div');
+    timeDiv.className = 'message-time';
+    timeDiv.textContent = getCurrentTime();
+
+    contentDiv.appendChild(textDiv);
+    contentDiv.appendChild(timeDiv);
+
+    messageDiv.appendChild(avatarDiv);
+    messageDiv.appendChild(contentDiv);
+
+    chatMessages.appendChild(messageDiv);
+    scrollToBottom();
+
+    return textDiv;
+}
+
+// 追加 token 到流式消息
+function appendTokenToMessage(textDiv, token) {
+    // 移除光标
+    const cursor = textDiv.querySelector('.typing-cursor');
+    if (cursor) cursor.remove();
+
+    // 追加文本
+    textDiv.appendChild(document.createTextNode(token));
+
+    // 重新添加光标
+    const newCursor = document.createElement('span');
+    newCursor.className = 'typing-cursor';
+    newCursor.textContent = '▌';
+    textDiv.appendChild(newCursor);
+
+    scrollToBottom();
+}
+
+// 完成流式消息（移除光标）
+function finalizeStreamingMessage(textDiv) {
+    const cursor = textDiv.querySelector('.typing-cursor');
+    if (cursor) cursor.remove();
+
+    const messageDiv = document.getElementById('streaming-message');
+    if (messageDiv) {
+        messageDiv.classList.remove('streaming');
+        messageDiv.removeAttribute('id');
+    }
+
+    textDiv.removeAttribute('id');
+}
+
+// 显示工具调用指示器
+function showToolIndicator(toolName, status) {
+    let indicator = document.getElementById('tool-indicator');
+
+    if (status === 'start') {
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'tool-indicator';
+            indicator.className = 'tool-indicator';
+            chatMessages.appendChild(indicator);
+        }
+        indicator.innerHTML = `<span class="tool-spinner"></span> 正在调用: ${toolName}`;
+        indicator.style.display = 'flex';
+        scrollToBottom();
+    } else if (status === 'end') {
+        if (indicator) {
+            indicator.style.display = 'none';
+        }
+    }
 }
 
 // 添加系统消息

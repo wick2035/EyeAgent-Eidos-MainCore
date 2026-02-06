@@ -121,9 +121,9 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 3.0.0 |
+| 版本 | 3.0.1 |
 | 架构 | LangGraph |
-| 特性 | MySQL Checkpoint 持久化、自动意图路由、SSE 流式响应 |
+| 特性 | MySQL Checkpoint 持久化、自动意图路由、Token 级别 SSE 流式响应 |
 
 ### 通用响应格式
 
@@ -269,11 +269,13 @@ data: {"event":"done","response":"您好，我是小Eye，请问有什么可以�
 | 事件类型 | 说明 | 数据字段 |
 |---------|------|---------|
 | `start` | 开始处理 | session_id, conversation_id, thread_id |
-| `token` | 响应内容块 | content |
-| `tool_call` | 工具调用 | tool, status (start/end) |
+| `token` | 响应内容块（逐 token 输出） | content |
+| `tool_call` | 工具调用 | tool, status (start/end), input (start时), output (end时) |
 | `agent_switch` | Agent 切换 | from, to |
 | `done` | 完成 | response, agent_type, stage, session_id, conversation_id |
 | `error` | 错误 | message |
+
+> **v3.0.0 更新**：`token` 事件现在实现真正的 Token 级别流式输出（打字机效果），每个事件包含一个或几个字符。
 
 ---
 
@@ -765,10 +767,10 @@ interface StartEvent {
   thread_id: string;
 }
 
-// Token 事件
+// Token 事件（逐 token 输出，打字机效果）
 interface TokenEvent {
   event: "token";
-  content: string;
+  content: string;  // 单个或少量字符
 }
 
 // 工具调用事件
@@ -776,6 +778,8 @@ interface ToolCallEvent {
   event: "tool_call";
   tool: string;
   status: "start" | "end";
+  input?: object;   // 仅 status="start" 时存在
+  output?: string;  // 仅 status="end" 时存在
 }
 
 // Agent 切换事件
@@ -1904,4 +1908,5 @@ for conv in conversations[:5]:
 
 | 版本 | 日期 | 更新内容 |
 |------|------|---------|
+| 3.0.1 | 2025-12-16 | 流式输出升级为真正的 Token 级别（打字机效果），tool_call 事件增加 input/output 字段 |
 | 3.0.0 | 2025-12-16 | 初始版本，基于 LangGraph 架构重构 |

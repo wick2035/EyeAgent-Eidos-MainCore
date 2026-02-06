@@ -7,7 +7,13 @@ import logging
 from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langgraph.prebuilt import create_react_agent
+
+# 兼容不同版本的 langgraph
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:
+    # 旧版本可能在不同位置
+    from langgraph.prebuilt.chat_agent_executor import create_react_agent
 
 from agents.graph.state import MedicalState
 from agents.prompts.health_prompts import (
