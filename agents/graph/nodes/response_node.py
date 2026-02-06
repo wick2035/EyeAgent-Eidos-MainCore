@@ -70,6 +70,10 @@ def _should_mark_completed(state: MedicalState) -> bool:
     if current_agent == "report" and state.get("report_generated", False):
         return True
 
+    # ComplianceAgent: 审查完成
+    if current_agent == "compliance" and state.get("compliance_review_completed", False):
+        return True
+
     # ResearchAgent: 任务完成（根据阶段判断）
     if current_agent == "research":
         research_complete_stages = ["completed", "paper_writing"]

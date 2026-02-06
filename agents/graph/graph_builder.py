@@ -16,6 +16,7 @@ from agents.graph.nodes import (
     report_agent_node,
     reminder_agent_node,
     research_agent_node,
+    compliance_agent_node,
     response_node,
 )
 from agents.graph.edges.routing import (
@@ -33,7 +34,7 @@ class MedicalGraphBuilder:
     负责构建和编译 LangGraph 状态图。
 
     图结构:
-        START -> router -> [health/report/reminder/research] -> response -> END
+        START -> router -> [health/report/reminder/research/compliance] -> response -> END
                     ^                                              |
                     |______________________________________________|
                               (如果需要继续对话)
@@ -68,6 +69,7 @@ class MedicalGraphBuilder:
         graph.add_node("report", report_agent_node)
         graph.add_node("reminder", reminder_agent_node)
         graph.add_node("research", research_agent_node)
+        graph.add_node("compliance", compliance_agent_node)
         graph.add_node("output_handler", response_node)  # 避免与状态键 response 冲突
 
         # 添加入口边
@@ -82,6 +84,7 @@ class MedicalGraphBuilder:
                 "report": "report",
                 "reminder": "reminder",
                 "research": "research",
+                "compliance": "compliance",
             }
         )
 
@@ -90,6 +93,7 @@ class MedicalGraphBuilder:
         graph.add_edge("report", "output_handler")
         graph.add_edge("reminder", "output_handler")
         graph.add_edge("research", "output_handler")
+        graph.add_edge("compliance", "output_handler")
 
         # 添加响应节点条件边 (output_handler -> router 或 END)
         graph.add_conditional_edges(

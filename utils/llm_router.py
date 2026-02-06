@@ -35,6 +35,13 @@ class LightweightLLMRouter:
                 "我的提醒列表有哪些",
                 "取消之前的复诊提醒",
                 "创建一个定期检查的提醒",
+            ],
+            'compliance': [
+                "帮我审查一下这个处方是否合规",
+                "检查这个诊断是否符合临床指南",
+                "审核一下患者病历的规范性",
+                "这个处方的用药剂量是否合理",
+                "对这次诊疗做一个合规性审查",
             ]
         }
 
@@ -103,6 +110,7 @@ class LightweightLLMRouter:
 1. health - 健康咨询、症状评估、预约挂号
 2. report - 查看报告、病史分析、处方记录
 3. reminder - 复诊提醒、用药提醒管理
+4. compliance - 合规性审查（仅医生可用）：处方审查、诊断审查、病历规范审查
 
 **意图示例:**
 {examples_text}
@@ -114,7 +122,7 @@ class LightweightLLMRouter:
 **当前消息:** {message}
 
 **要求:**
-1. 只输出JSON，格式: {{"agent":"health/report/reminder","confidence":0.0-1.0,"reason":"原因"}}
+1. 只输出JSON，格式: {{"agent":"health/report/reminder/compliance","confidence":0.0-1.0,"reason":"原因"}}
 2. confidence范围: 0.0-1.0
 3. 不确定时选health，confidence设为0.5-0.7
 
@@ -156,7 +164,7 @@ class LightweightLLMRouter:
 
             # 验证必要字段
             agent_type = result.get('agent', result.get('agent_type', 'health'))
-            if agent_type not in ['health', 'report', 'reminder']:
+            if agent_type not in ['health', 'report', 'reminder', 'compliance']:
                 agent_type = 'health'
 
             confidence = float(result.get('confidence', 0.6))
@@ -180,7 +188,9 @@ class LightweightLLMRouter:
         response_lower = response.lower()
 
         # 简单关键词检测
-        if 'reminder' in response_lower or '提醒' in response:
+        if 'compliance' in response_lower or '合规' in response or '审查' in response:
+            return {'agent_type': 'compliance', 'confidence': 0.6, 'reason': '文本兜底'}
+        elif 'reminder' in response_lower or '提醒' in response:
             return {'agent_type': 'reminder', 'confidence': 0.6, 'reason': '文本兜底'}
         elif 'report' in response_lower or '报告' in response:
             return {'agent_type': 'report', 'confidence': 0.6, 'reason': '文本兜底'}

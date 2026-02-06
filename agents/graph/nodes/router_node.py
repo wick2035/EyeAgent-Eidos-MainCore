@@ -91,6 +91,12 @@ def router_node(state: MedicalState) -> Dict[str, Any]:
             f"(detected={detected_agent}, confidence={confidence:.2f})"
         )
 
+    # 合规审查仅对医生开放，患者角色无法路由到合规Agent
+    if target_agent == "compliance" and role != "doctor":
+        target_agent = current_agent if current_agent != "compliance" else "health"
+        new_stage = stage if target_agent == current_agent else "greeting"
+        logger.warning("[RouterNode] 患者角色无法访问合规审查Agent，保持当前Agent")
+
     return {
         "current_agent": target_agent,
         "stage": new_stage,
