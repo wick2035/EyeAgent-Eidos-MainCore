@@ -53,6 +53,18 @@ class EnhancedRuleEngine:
                 r'(复诊|复查|随访).*(提醒|通知)',
                 r'(用药|吃药|服药).*(提醒|时间)',
                 r'(提醒.*)(复诊|用药|吃药)',
+            ],
+
+            'compliance': [
+                # 合规审查（强意图）
+                r'(审查|审核|检查).*(合规|规范|合理)',
+                r'(处方|诊断|病历).*(审查|审核|合规)',
+                r'(合规|规范).*(审查|审核|检查|分析)',
+                r'(帮我|请).*(审查|审核|检查).*(处方|诊断|病历)',
+
+                # 质控相关
+                r'(质量|质控).*(审查|检查|控制)',
+                r'(用药|剂量|适应症).*(合理|合规|审查)',
             ]
         }
 
@@ -107,6 +119,24 @@ class EnhancedRuleEngine:
 
                 # 时间相关
                 '定期': 1.5, '按时': 1.5, '定时': 1.5, '到期': 1.5,
+            },
+
+            'compliance': {
+                # 合规审查（高权重）
+                '合规': 3.0, '审查': 2.5, '审核': 2.5, '质控': 2.5,
+                '合规审查': 4.0, '处方审查': 4.0, '诊断审查': 4.0,
+                '病历审查': 4.0, '合规性': 3.5,
+
+                # 规范相关
+                '规范': 2.0, '合理性': 2.5, '规范性': 2.5,
+                '质量控制': 3.0, '质量审查': 3.5,
+
+                # 具体审查项
+                '剂量': 1.5, '适应症': 2.0, '禁忌': 2.0, '相互作用': 2.0,
+                '用药合理': 3.0, '诊断依据': 2.5, '病历规范': 3.0,
+
+                # 指南相关
+                '临床指南': 2.0, '诊疗规范': 2.5, '指南': 1.5,
             }
         }
 
@@ -114,7 +144,8 @@ class EnhancedRuleEngine:
         self.exclusion_keywords = {
             'health': ['报告', '历史', '记录', '之前', '对比', '提醒'],
             'report': ['预约', '挂号', '提醒', '创建提醒'],
-            'reminder': ['症状', '不舒服', '疼', '痛', '预约医生', '报告分析']
+            'reminder': ['症状', '不舒服', '疼', '痛', '预约医生', '报告分析'],
+            'compliance': ['预约', '挂号', '提醒', '报告下载']
         }
 
     def match(self, message: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -171,8 +202,8 @@ class EnhancedRuleEngine:
 
     def _pattern_match(self, message: str) -> Dict[str, Any]:
         """精确模式匹配"""
-        scores = {'health': 0, 'report': 0, 'reminder': 0}
-        matched_patterns = {'health': [], 'report': [], 'reminder': []}
+        scores = {'health': 0, 'report': 0, 'reminder': 0, 'compliance': 0}
+        matched_patterns = {'health': [], 'report': [], 'reminder': [], 'compliance': []}
 
         for agent_type, patterns in self.exact_patterns.items():
             for pattern in patterns:
@@ -201,8 +232,8 @@ class EnhancedRuleEngine:
 
     def _keyword_weighted_match(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """关键词加权匹配"""
-        scores = {'health': 0.0, 'report': 0.0, 'reminder': 0.0}
-        matched_keywords = {'health': [], 'report': [], 'reminder': []}
+        scores = {'health': 0.0, 'report': 0.0, 'reminder': 0.0, 'compliance': 0.0}
+        matched_keywords = {'health': [], 'report': [], 'reminder': [], 'compliance': []}
 
         # 计算每个agent的加权分数
         for agent_type, keywords in self.keyword_weights.items():
@@ -246,7 +277,8 @@ class EnhancedRuleEngine:
         switch_patterns = [
             r'查看.*报告', r'看.*报告', r'我要.*报告',
             r'查看.*提醒', r'看.*提醒', r'我的.*提醒',
-            r'创建.*提醒', r'添加.*提醒'
+            r'创建.*提醒', r'添加.*提醒',
+            r'审查.*合规', r'合规.*审查', r'审核.*处方', r'审查.*诊断',
         ]
 
         for pattern in switch_patterns:

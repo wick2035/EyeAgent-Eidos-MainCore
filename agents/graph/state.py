@@ -35,7 +35,7 @@ class MedicalState(TypedDict):
     patient_full_data: Optional[Dict[str, Any]]  # 患者完整数据（含病历）
 
     # ========== 对话状态 ==========
-    current_agent: str                       # "health" | "report" | "reminder" | "research"
+    current_agent: str                       # "health" | "report" | "reminder" | "research" | "compliance"
     stage: str                               # 当前对话阶段
     is_completed: bool                       # 对话是否完成
     is_streaming: bool                       # 是否流式模式
@@ -58,6 +58,10 @@ class MedicalState(TypedDict):
     # ========== ReminderAgent 特有字段 ==========
     reminder_type: Optional[str]             # 提醒类型
     reminder_created: bool                   # 提醒是否已创建
+
+    # ========== ComplianceAgent 特有字段 ==========
+    compliance_review_type: Optional[str]        # 审查类型: "prescription" | "diagnosis" | "record" | "examination" | "full"
+    compliance_review_completed: bool            # 审查是否完成
 
     # ========== ResearchAgent 特有字段 ==========
     enable_institution_data: bool            # 机构数据库访问开关
@@ -135,6 +139,10 @@ def create_initial_state(
         # ReminderAgent
         reminder_type=None,
         reminder_created=False,
+
+        # ComplianceAgent
+        compliance_review_type=None,
+        compliance_review_completed=False,
 
         # ResearchAgent
         enable_institution_data=kwargs.get("enable_institution_data", False),

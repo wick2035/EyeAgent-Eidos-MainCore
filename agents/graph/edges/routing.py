@@ -11,10 +11,10 @@ from agents.graph.state import MedicalState
 logger = logging.getLogger(__name__)
 
 # 定义 Agent 类型
-AgentType = Literal["health", "report", "reminder", "research"]
+AgentType = Literal["health", "report", "reminder", "research", "compliance"]
 
 # 定义节点目标
-NodeTarget = Literal["health", "report", "reminder", "research", "response", "__end__"]
+NodeTarget = Literal["health", "report", "reminder", "research", "compliance", "response", "__end__"]
 
 
 def route_by_agent_type(state: MedicalState) -> AgentType:
@@ -29,7 +29,7 @@ def route_by_agent_type(state: MedicalState) -> AgentType:
     """
     current_agent = state.get("current_agent", "health")
 
-    valid_agents = {"health", "report", "reminder", "research"}
+    valid_agents = {"health", "report", "reminder", "research", "compliance"}
 
     if current_agent not in valid_agents:
         logger.warning(f"[Routing] 未知的 agent 类型: {current_agent}，默认路由到 health")
@@ -193,6 +193,12 @@ def get_next_stage(current_stage: str, agent_type: str) -> str:
             "literature_review": "research_design",
             "research_design": "paper_writing",
             "paper_writing": "completed",
+        },
+        "compliance": {
+            "greeting": "data_loading",
+            "data_loading": "reviewing",
+            "reviewing": "result",
+            "result": "completed",
         },
     }
 
