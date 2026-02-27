@@ -77,6 +77,10 @@ class MedicalState(TypedDict):
     current_research_task: Optional[str]     # 当前研究任务
     collected_data: Dict[str, Any]           # 收集的研究数据
 
+    # ========== 安全相关 ==========
+    security_blocked: bool                   # 是否被安全拦截
+    security_events: List[Dict[str, Any]]    # 安全事件记录
+
     # ========== 响应输出 ==========
     response: str                            # 最终响应文本
     error: Optional[str]                     # 错误信息
@@ -163,6 +167,10 @@ def create_initial_state(
         search_history=[],
         current_research_task=None,
         collected_data={},
+
+        # 安全
+        security_blocked=False,
+        security_events=[],
 
         # 响应
         response="",

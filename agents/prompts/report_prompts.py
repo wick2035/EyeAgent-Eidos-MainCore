@@ -97,9 +97,11 @@ def get_report_system_prompt(role: str = "patient") -> str:
     Returns:
         系统提示词字符串
     """
+    from utils.input_guard import SECURITY_DIRECTIVE
+
     if role == "doctor":
-        return _DOCTOR_MODE_PROMPT
-    return _PATIENT_MODE_PROMPT
+        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT
+    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
 
 
 def get_report_stage_prompt(stage: str, role: str = "patient") -> str:
@@ -143,10 +145,12 @@ def build_report_context(state: Dict[str, Any]) -> str:
             context_parts.append(f"医生ID: {state['doctor_id']}")
 
     # 患者信息
+    from utils.input_guard import sanitize_context_field
+
     if patient_info:
         context_parts.append("\n【患者信息】")
         context_parts.append(f"患者ID: {patient_id}")
-        context_parts.append(f"姓名: {patient_info.get('name', '未知')}")
+        context_parts.append(f"姓名: {sanitize_context_field(str(patient_info.get('name', '未知')))}")
         context_parts.append(f"年龄: {patient_info.get('age', '未知')}岁")
     else:
         context_parts.append(f"\n【患者ID】{patient_id}")
@@ -156,7 +160,7 @@ def build_report_context(state: Dict[str, Any]) -> str:
     selected_records = state.get("selected_records", [])
 
     if report_type:
-        context_parts.append(f"\n【当前操作】报告类型: {report_type}")
+        context_parts.append(f"\n【当前操作】报告类型: {sanitize_context_field(str(report_type))}")
     if selected_records:
         context_parts.append(f"选中记录数: {len(selected_records)}")
 

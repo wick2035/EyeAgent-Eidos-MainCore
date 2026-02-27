@@ -20,10 +20,12 @@ def get_recommendation_system_prompt(role: str = "patient") -> str:
     Returns:
         系统提示词字符串
     """
+    from utils.input_guard import SECURITY_DIRECTIVE
+
     if role == "doctor":
-        return _get_doctor_system_prompt()
+        return SECURITY_DIRECTIVE + "\n" + _get_doctor_system_prompt()
     else:
-        return _get_patient_system_prompt()
+        return SECURITY_DIRECTIVE + "\n" + _get_patient_system_prompt()
 
 
 def _get_doctor_system_prompt() -> str:
@@ -308,8 +310,10 @@ def build_recommendation_context(state: Dict[str, Any]) -> str:
         context_parts.append("- 权限：可购买非处方药和医疗器械；处方药仅可查看详情")
 
     # 患者信息
+    from utils.input_guard import sanitize_context_field
+
     if patient_info:
-        name = patient_info.get("patientName", patient_info.get("name", "未知"))
+        name = sanitize_context_field(str(patient_info.get("patientName", patient_info.get("name", "未知"))))
         age = patient_info.get("age", "未知")
         gender = patient_info.get("gender", "未知")
         gender_text = {"MALE": "男", "FEMALE": "女"}.get(str(gender).upper(), str(gender))
