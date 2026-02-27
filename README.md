@@ -1,88 +1,174 @@
 # 智能医疗咨询系统
 
-基于Langchain的多智能体集群系统，实现眼科健康咨询、智能分诊、医生预约、病历生成和处方管理等全流程医疗服务。
+基于 **LangGraph** 的多智能体状态图系统，实现眼科健康咨询、智能分诊、医生预约、病历管理、合规审查和科研辅助等全流程医疗服务。
+
+## 系统架构
+
+```
+用户消息 --> Router（混合意图路由）
+               |
+    +----------+----------+----------+----------+
+    |          |          |          |          |
+  Health    Report    Reminder  Research  Compliance
+  (Agent1)  (Agent2)  (Agent3)  (Agent4)  (Agent5)
+    |          |          |          |          |
+    +----------+----------+----------+----------+
+               |
+         Response Handler --> 返回结果
+```
+
+- 每次 `graph.invoke()` 处理一条用户消息，多轮对话通过多次调用实现
+- 状态通过 MySQL Checkpointer 持久化，支持断点续接
+- Router 每条消息重新评估，支持对话中途切换 Agent
 
 ## 功能特性
 
 ### Agent 1 - 健康咨询智能体 (HealthAgent)
-- ✅ **健康信息咨询**：提供专业的眼科健康咨询服务
-- ✅ **场景智能判断**：根据症状评估严重程度，主动询问是否需要预约医生
-- ✅ **眼科分诊问诊**：系统化收集患者信息，包括症状、病史等
-- ✅ **医生预约**：帮助患者完成预约流程
-- ✅ **历史记录管理**：自动加载和关联患者历史就诊记录
+- 眼科健康咨询与症状评估
+- 智能分诊问诊（主诉、现病史、体征采集）
+- 医生空闲时间查询与预约
+- 患者历史处方记录查看
 
 ### Agent 2 - 医疗报告智能体 (ReportAgent)
-- ✅ **病历报告生成**：基于问诊记录生成标准化医疗报告（ PDF）
-- ✅ **处方管理**：创建、查询和生成带条形码的电子处方（ PDF）
-- ✅ **历史记录分析**：智能分析患者历史就诊和用药记录
-- ✅ **角色权限控制**：医生专属功能，患者无法访问
-- ✅ **条形码生成**：为处方单生成Code128标准条形码
+- 处方记录查询（列表 / 详情）
+- 影像及检查数据查看
+- 病历报告 PDF 生成
+- 处方 PDF 生成（含 Code128 条形码）
 
 ### Agent 3 - 提醒管理智能体 (ReminderAgent)
-- ✅ **复诊提醒管理**：创建和管理患者复诊提醒
-- ✅ **用药提醒管理**：设置药物服用时间和剂量提醒
-- ✅ **预约提醒管理**：自动提醒即将到来的预约
-- ✅ **提醒配置管理**：支持通知方式、免打扰时间等个性化设置
-- ✅ **生物力学报告**：生成眼部生物力学检查报告
+- 复诊 / 用药 / 预约提醒的创建与查看
+- 提醒配置管理（通知方式、免打扰时间等）
+- 配置初始化与修改
 
-### Agent 4 - 医问通科研智能体 (ResearchAgent)
-- ✅ **机构数据查询**：访问机构内部科研数据库（需权限）
-- ✅ **医学文献搜索**：支持 general/pubmed/scholar 多类型搜索
-- ✅ **统计分析**：描述性统计、相关性分析、t检验、回归分析等
-- ✅ **文献处理**：摘要提取、关键发现整理、文献翻译
-- ✅ **研究方案设计**：研究设计建议、样本量估算
-- ✅ **论文写作协助**：各章节写作指导（摘要、方法、讨论等）
-- ✅ **临床指南查询**：查询 WHO/NICE/中华医学会等权威指南
-- ✅ **药物相互作用检查**：检查多种药物的相互作用风险
-- ✅ **伦理审查协助**：提供研究伦理审查相关建议
-- ⚠️ **角色权限控制**：仅医生可访问
+### Agent 4 - 科研智能体 (ResearchAgent) [仅医生]
+- 机构数据库查询（需权限开关）
+- 医学文献搜索（general / pubmed / scholar）
+- 统计分析（描述性统计、相关性、t 检验、回归等）
+- 文献综述与摘要提取
+- 研究方案设计与样本量估算
+- 论文写作辅助
+- 临床指南查询、药物相互作用检查
+- 数据可视化生成（MinIO 存储）
+
+### Agent 5 - 合规审查智能体 (ComplianceAgent) [仅医生]
+- **处方合规审查**：药物剂量、适应症匹配、禁忌症、药物相互作用
+- **诊断合规审查**：诊断依据充分性、指南诊断标准、ICD 编码规范
+- **病历文书合规审查**：主诉 / 现病史 / 体征记录完整性、格式规范性
+- **检查合理性审查**：临床必要性、指南推荐路径
+- 每条审查意见附带权威标准 / 文献引用（联网实时搜索）
+- 审查结果保存与 PDF 导出
 
 ### 智能路由系统（混合架构）
-
-- ✅ **规则引擎**：处理90%常见请求，响应时间<1ms
-- ✅ **LLM路由**：处理复杂意图识别，支持融合决策
-- ✅ **意图识别**：自动识别用户意图，置信度≥0.7时智能切换智能体
-- ✅ **会话管理**：保持对话上下文，支持多轮交互，会话自动持久化
-- ✅ **角色控制**：基于角色（患者/医生）的权限管理
+- **规则引擎**（第一层）：精确模式匹配 + 关键词加权，处理 ~90% 请求，<1ms 延迟
+- **LLM 路由**（第二层）：轻量级 LLM 处理复杂语义，支持融合决策
+- **角色权限控制**：患者无法访问 Research / Compliance Agent（路由层拦截）
+- **状态保持**：关键对话阶段中自动保持当前 Agent，防止误切换
 
 ## 技术栈
 
-- **后端框架**：FastAPI + LangChain
-- **测试前端**：HTML5 + CSS3 + JavaScript
-- **AI模型**：硅基流动平台 Qwen/Qwen2.5-32B-Instruct
-- **数据库**：MySQL + Java后端API
-- **文档生成**：python-docx + python-barcode（Code128条形码）
-- **搜索引擎**：Search1API（支持 general/pubmed/scholar）
-- **对象存储**：MinIO（科研文件存储，可选）
-- **数据分析**：numpy、pandas、scipy、matplotlib
+| 类别 | 技术 |
+|------|------|
+| **核心框架** | LangGraph (StateGraph) + LangChain |
+| **Web 框架** | FastAPI + Uvicorn |
+| **AI 模型** | 硅基流动 Qwen/Qwen2.5-32B-Instruct |
+| **状态持久化** | MySQL Checkpointer (langgraph-checkpoint) |
+| **数据库** | MySQL + Java 后端 API |
+| **搜索引擎** | Search1API (general / pubmed / scholar) |
+| **对象存储** | MinIO（科研文件 / 可视化存储，可选） |
+| **数据分析** | numpy, pandas, scipy, matplotlib |
+| **文档生成** | python-docx, python-barcode (Code128) |
+| **测试前端** | HTML5 + CSS3 + JavaScript (SSE) |
 
-## 项目架构
+## 项目结构
 
-本项目采用**清洁架构（Clean Architecture）**设计，分为5层：
-
-```text
-├── domain/          # 领域模型层（实体、枚举）
-├── application/     # 应用服务层（仓储接口、DTO）
-├── infrastructure/  # 基础设施层（数据库、API客户端）
-├── agents/          # 智能体层（Agent实现、工具定义）
-├── presentation/    # 表现层（FastAPI路由、Schema）
-└── utils/           # 工具函数（LLM配置、报告生成）
+```
+├── agents/                         # 智能体层
+│   ├── graph/
+│   │   ├── graph_builder.py        # LangGraph 状态图构建
+│   │   ├── state.py                # MedicalState 全局状态定义
+│   │   ├── graph_manager.py        # 图调用管理器（同步/异步/流式）
+│   │   ├── checkpointer.py         # MySQL Checkpoint 持久化
+│   │   ├── nodes/
+│   │   │   ├── router_node.py      # 路由节点（意图识别 + 角色拦截）
+│   │   │   ├── health_node.py      # Agent 1 - 健康咨询
+│   │   │   ├── report_node.py      # Agent 2 - 医疗报告
+│   │   │   ├── reminder_node.py    # Agent 3 - 提醒管理
+│   │   │   ├── research_node.py    # Agent 4 - 科研辅助
+│   │   │   ├── compliance_node.py  # Agent 5 - 合规审查
+│   │   │   └── response_node.py    # 响应后处理
+│   │   └── edges/
+│   │       └── routing.py          # 条件边路由 + 阶段流定义
+│   ├── prompts/                    # 各 Agent 提示词模块
+│   └── tools/                      # 各 Agent 工具定义
+│       ├── agent_tools.py          # Agent 1-3 工具
+│       ├── research_tools.py       # Agent 4 工具
+│       └── compliance_tools.py     # Agent 5 工具
+├── domain/                         # 领域模型层（实体、枚举）
+├── application/                    # 应用服务层（仓储接口、DTO、持久化服务）
+├── infrastructure/                 # 基础设施层（数据库、API 客户端、MinIO）
+├── presentation/                   # 表现层
+│   ├── routers/
+│   │   ├── chat_router.py          # 通用对话 API
+│   │   ├── research_router.py      # 科研 Agent 专用 API
+│   │   ├── compliance_router.py    # 合规审查 Agent 专用 API
+│   │   └── conversation_router.py  # 会话管理 API
+│   └── schemas/                    # Pydantic 请求/响应模型
+├── utils/                          # 工具函数
+│   ├── hybrid_intent_router.py     # 混合意图路由器
+│   ├── enhanced_rules.py           # 规则引擎
+│   ├── llm_router.py              # LLM 路由器
+│   └── llm_config.py              # LLM 配置
+├── main.py                         # FastAPI 入口
+└── requirements.txt
 ```
 
-## 相关文档
+## API 接口
 
-- [API接口文档](docs/API_DOCUMENTATION.md)
-- [系统架构文档](docs/README_ARCHITECTURE.md)
-- [科研Agent设计文档](docs/RESEARCH_AGENT_DESIGN.md)
-- [Agent工具API文档](docs/Agent工具API文档.md)
+### 通用对话（自动路由）
 
-## 文档存放规则
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/chat` | 同步对话 |
+| POST | `/api/chat/stream` | SSE 流式对话 |
+| GET  | `/api/chat/{session_id}/state` | 查询会话状态 |
+| GET  | `/api/chat/{session_id}/messages` | 查询消息历史 |
 
-- 所有文档统一放置于 `docs`
-- 所有总结类 Markdown 文件统一放置于 `docs/summary`
+### 科研 Agent 专用 [仅医生]
 
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/research/chat` | 科研对话 |
+| POST | `/api/research/chat/stream` | 科研对话 (SSE) |
+| GET  | `/api/research/conversations` | 会话列表 |
+| GET  | `/api/research/health` | 健康检查 |
 
-### 3. 配置环境变量
+### 合规审查 Agent 专用 [仅医生]
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/compliance/chat` | 合规审查对话 |
+| POST | `/api/compliance/chat/stream` | 合规审查对话 (SSE) |
+| GET  | `/api/compliance/health` | 健康检查 |
+
+### 其他
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/users` | 患者列表 |
+| GET | `/api/conversations` | 会话管理 |
+| GET | `/api/export/{session_id}` | 导出对话数据 |
+| GET | `/api/info` | API 信息 |
+| GET | `/health` | 系统健康检查 |
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置环境变量
 
 在项目根目录创建 `.env` 文件：
 
@@ -104,7 +190,7 @@ DB_CHARSET=utf8mb4
 BACKEND_API_URL=http://your_backend:8081
 BACKEND_API_TOKEN=your_token
 
-# 搜索 API 配置（ResearchAgent 使用）
+# 搜索 API 配置（ResearchAgent / ComplianceAgent 使用）
 SEARCH1API_KEY=your_search_api_key
 
 # 对象存储配置（可选）
@@ -114,65 +200,55 @@ SEARCH1API_KEY=your_search_api_key
 # MINIO_BUCKET=research-files
 ```
 
-### 4. 启动服务
+### 3. 启动服务
 
 ```bash
 python main.py
 ```
 
-或使用uvicorn：
+或使用 uvicorn：
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 5. 访问应用
+### 4. 访问应用
 
 打开浏览器访问：http://127.0.0.1:8000
 
-
-
 ## 使用说明
 
-### 患者端对话流程
+### 患者端
 
-1. **初次接待**：系统问候并询问健康问题
-2. **健康咨询**：描述您的眼部症状
-3. **症状评估**：AI评估症状严重程度
-4. **预约询问**：系统主动询问是否需要预约医生
-5. **信息收集**：收集患者基本信息（姓名、年龄、性别、联系方式）
-6. **眼科分诊**：详细了解眼部症状和现病史
-7. **病史采集**：收集既往病史、用药史、过敏史等
-8. **预约确认**：确认期望就诊时间和紧急程度
-9. **完成**：生成完整病例数据
+患者可使用 Agent 1-3：
 
-### 医生端功能
+1. **健康咨询**：描述眼部症状，AI 评估严重程度并引导就诊
+2. **预约挂号**：系统化收集信息（主诉、现病史、既往史），完成医生预约
+3. **报告查看**：查看历史处方和检查记录
+4. **提醒管理**：创建 / 查看复诊和用药提醒
 
-医生登录后可使用以下专属功能：
+### 医生端
 
-1. **病历报告生成**：基于患者就诊记录生成标准化医疗报告
-2. **处方管理**：
-   - 创建新处方（包含药品信息、用法用量）
-   - 查询历史处方记录
-   - 生成带条形码的电子处方PDF
-3. **历史记录分析**：查看和分析患者完整就诊历史
-4. **科研助手**（ResearchAgent）：
-   - 医学文献检索（PubMed、Google Scholar）
-   - 数据统计分析（描述性统计、相关性、t检验等）
-   - 研究方案设计与样本量估算
-   - 论文写作指导
-   - 临床指南查询
-   - 药物相互作用检查
+医生可使用全部 5 个 Agent：
 
-### 功能按钮
-
-- **📄 导出病例**：查看并下载患者病例JSON数据
-- **🔄 重新开始**：清空当前对话，开始新的咨询
+1. **Agent 1-3**：同患者端功能，另有 PDF 生成等高级权限
+2. **科研助手**（Agent 4）：文献检索、统计分析、研究方案设计、论文写作辅助
+3. **合规审查**（Agent 5）：对患者诊断 / 处方 / 病历进行合规性审查，每条审查意见附带权威指南引用
 
 ### 角色切换
 
-在前端界面可以切换角色：
-- **患者模式**：健康咨询、预约挂号
-- **医生模式**：病历生成、处方管理、历史分析
+在前端界面可切换角色：
+- **患者模式**：健康咨询、报告查看、提醒管理
+- **医生模式**：以上全部 + 科研助手 + 合规审查
 
+## 相关文档
 
+- [API 接口文档](docs/API_DOCUMENTATION.md)
+- [系统架构文档](docs/README_ARCHITECTURE.md)
+- [科研 Agent 设计文档](docs/RESEARCH_AGENT_DESIGN.md)
+- [Agent 工具 API 文档](docs/Agent工具API文档.md)
+
+## 文档规则
+
+- 所有文档统一放置于 `docs/`
+- 所有总结类 Markdown 文件统一放置于 `docs/summary/`

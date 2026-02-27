@@ -11,6 +11,7 @@ class AgentType(str, Enum):
     REPORT = "report"  # 2号智能体 - 病例报告和历史分析
     REMINDER = "reminder"  # 3号智能体 - 提醒管理
     RESEARCH = "research"  # 4号智能体 - 医问通科研Agent
+    COMPLIANCE = "compliance"  # 5号智能体 - 合规性审查（仅医生可用）
     
     def __str__(self):
         return self.value
@@ -31,6 +32,7 @@ class AgentType(str, Enum):
             AgentType.REPORT: "报告分析智能体",
             AgentType.REMINDER: "提醒管理智能体",
             AgentType.RESEARCH: "医问通科研智能体",
+            AgentType.COMPLIANCE: "合规审查智能体",
         }
         return display_names.get(self, self.value)
 
