@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, conversation_router, research_router
+from presentation.routers import chat_router, conversation_router, research_router, compliance_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
 
@@ -69,6 +69,7 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(chat_router.router)
 app.include_router(conversation_router.router)
 app.include_router(research_router.router)
+app.include_router(compliance_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
