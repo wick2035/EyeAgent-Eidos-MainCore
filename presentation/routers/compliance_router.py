@@ -34,14 +34,17 @@ UUID_PATTERN = re.compile(
 )
 
 
-def verify_doctor_role(doctor_id: str) -> bool:
+def verify_doctor_role(doctor_id: str, patient_id: str = "") -> bool:
     """
     验证医生身份
 
-    TODO: 实现实际的医生身份验证逻辑
-    目前仅验证UUID格式
+    使用集中角色校验模块，校验 doctor_id 有效性。
     """
-    return bool(UUID_PATTERN.match(doctor_id))
+    if not doctor_id:
+        return False
+    from utils.role_verification import verify_role
+    verified_role, _ = verify_role("doctor", patient_id, doctor_id)
+    return verified_role == "doctor"
 
 
 @router.post("/chat", response_model=ComplianceChatResponse)

@@ -169,7 +169,9 @@ def get_research_system_prompt(role: str = "doctor") -> str:
     Returns:
         系统提示词字符串
     """
-    return _RESEARCH_SYSTEM_PROMPT
+    from utils.input_guard import SECURITY_DIRECTIVE
+
+    return SECURITY_DIRECTIVE + "\n" + _RESEARCH_SYSTEM_PROMPT
 
 
 def get_research_stage_prompt(stage: str, role: str = "doctor") -> str:
@@ -222,16 +224,18 @@ def build_research_context(state: Dict[str, Any]) -> str:
         context_parts.append(f"\n【目标患者ID】{patient_id}")
 
     # 搜索历史
+    from utils.input_guard import sanitize_context_field
+
     search_history = state.get("search_history", [])
     if search_history:
         context_parts.append(f"\n【搜索历史】最近 {len(search_history)} 次搜索")
         for query in search_history[-3:]:  # 显示最近3次
-            context_parts.append(f"  - {query[:50]}...")
+            context_parts.append(f"  - {sanitize_context_field(str(query[:50]))}...")
 
     # 当前研究任务
     current_task = state.get("current_research_task")
     if current_task:
-        context_parts.append(f"\n【当前任务】{current_task}")
+        context_parts.append(f"\n【当前任务】{sanitize_context_field(str(current_task))}")
 
     return "\n".join(context_parts)
 

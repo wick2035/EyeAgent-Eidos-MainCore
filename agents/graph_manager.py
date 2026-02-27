@@ -122,6 +122,38 @@ class GraphManager:
 
         logger.info(f"[GraphManager] chat: patient={patient_id}, thread={thread_id}")
 
+        # === 安全检查：角色校验 + 输入防护 ===
+        from utils.role_verification import verify_role
+        from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
+
+        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        if was_downgraded:
+            logger.warning(
+                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
+                f"patient_id={patient_id}, doctor_id={doctor_id}"
+            )
+            role = verified_role
+            if agent_type in ("compliance", "research"):
+                agent_type = "health"
+
+        guard_result = check_input_safety(message, context={
+            "role": role, "agent_type": agent_type, "patient_id": patient_id,
+        })
+        if not guard_result.is_safe:
+            logger.warning(
+                f"[GraphManager] 安全拦截: risk={guard_result.risk_level.value}, "
+                f"category={guard_result.category.value if guard_result.category else 'N/A'}, "
+                f"detail={guard_result.detail}"
+            )
+            blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
+            return {
+                "response": blocked_response,
+                "agent_type": agent_type,
+                "stage": "security_blocked",
+                "is_completed": guard_result.risk_level == RiskLevel.HIGH,
+                "thread_id": thread_id,
+            }
+
         # === 两阶段写入 - 第一阶段：保存用户消息 ===
         assistant_msg_id = None
         if conversation_id:
@@ -302,6 +334,41 @@ class GraphManager:
 
         logger.info(f"[GraphManager] chat_stream: patient={patient_id}, thread={thread_id}")
 
+        # === 安全检查：角色校验 + 输入防护 ===
+        from utils.role_verification import verify_role
+        from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
+
+        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        if was_downgraded:
+            logger.warning(
+                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
+                f"patient_id={patient_id}, doctor_id={doctor_id}"
+            )
+            role = verified_role
+            if agent_type in ("compliance", "research"):
+                agent_type = "health"
+
+        guard_result = check_input_safety(message, context={
+            "role": role, "agent_type": agent_type, "patient_id": patient_id,
+        })
+        if not guard_result.is_safe:
+            logger.warning(
+                f"[GraphManager] 安全拦截(stream): risk={guard_result.risk_level.value}, "
+                f"category={guard_result.category.value if guard_result.category else 'N/A'}"
+            )
+            blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
+            yield {
+                "type": "token",
+                "content": blocked_response,
+                "metadata": {"security_blocked": True, "risk": guard_result.risk_level.value},
+            }
+            yield {
+                "type": "done",
+                "content": "",
+                "metadata": {"security_blocked": True},
+            }
+            return
+
         # === 两阶段写入 - 第一阶段：保存用户消息 ===
         assistant_msg_id = None
         if conversation_id:
@@ -470,6 +537,41 @@ class GraphManager:
         thread_id = thread_config["configurable"]["thread_id"]
 
         logger.info(f"[GraphManager] chat_stream_async: patient={patient_id}, thread={thread_id}")
+
+        # === 安全检查：角色校验 + 输入防护 ===
+        from utils.role_verification import verify_role
+        from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
+
+        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        if was_downgraded:
+            logger.warning(
+                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
+                f"patient_id={patient_id}, doctor_id={doctor_id}"
+            )
+            role = verified_role
+            if agent_type in ("compliance", "research"):
+                agent_type = "health"
+
+        guard_result = check_input_safety(message, context={
+            "role": role, "agent_type": agent_type, "patient_id": patient_id,
+        })
+        if not guard_result.is_safe:
+            logger.warning(
+                f"[GraphManager] 安全拦截(async_stream): risk={guard_result.risk_level.value}, "
+                f"category={guard_result.category.value if guard_result.category else 'N/A'}"
+            )
+            blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
+            yield {
+                "type": "token",
+                "content": blocked_response,
+                "metadata": {"security_blocked": True, "risk": guard_result.risk_level.value},
+            }
+            yield {
+                "type": "done",
+                "content": "",
+                "metadata": {"security_blocked": True},
+            }
+            return
 
         # === 两阶段写入 - 第一阶段：保存用户消息 ===
         assistant_msg_id = None

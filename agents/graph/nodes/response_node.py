@@ -36,6 +36,21 @@ def response_node(state: MedicalState) -> Dict[str, Any]:
         f"response_len={len(last_response)}"
     )
 
+    # === 输出安全校验 ===
+    from utils.input_guard import check_output_safety
+
+    if last_response:
+        output_check = check_output_safety(last_response)
+        if not output_check["is_safe"]:
+            logger.warning(
+                f"[ResponseNode] 输出安全检查失败: {output_check['issues']}"
+            )
+            return {
+                "is_completed": True,
+                "last_response": output_check["sanitized_response"],
+                "messages": [AIMessage(content=output_check["sanitized_response"])],
+            }
+
     # 每次 invoke 处理一条消息，处理完毕后标记完成
     # 多轮对话通过多次 invoke() 调用实现
     return {"is_completed": True}

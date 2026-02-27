@@ -50,6 +50,25 @@ def router_node(state: MedicalState) -> Dict[str, Any]:
             "routing_reason": "无用户消息",
         }
 
+    # === 路由层安全二次检查（纵深防御，仅拦截高风险） ===
+    from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE
+    from langchain_core.messages import AIMessage
+
+    guard_result = check_input_safety(last_message, context={
+        "role": role, "current_agent": current_agent,
+    })
+    if not guard_result.is_safe and guard_result.risk_level == RiskLevel.HIGH:
+        logger.warning(f"[RouterNode] 安全拦截: {guard_result.detail}")
+        return {
+            "current_agent": current_agent,
+            "stage": stage,
+            "routing_confidence": 0.0,
+            "routing_reason": f"安全拦截: {guard_result.detail}",
+            "security_blocked": True,
+            "last_response": HIGH_RISK_RESPONSE,
+            "messages": [AIMessage(content=HIGH_RISK_RESPONSE)],
+        }
+
     # 构建对话历史（用于上下文理解）
     conversation_history = _build_conversation_history(messages)
 
@@ -96,6 +115,12 @@ def router_node(state: MedicalState) -> Dict[str, Any]:
         target_agent = current_agent if current_agent != "compliance" else "health"
         new_stage = stage if target_agent == current_agent else "greeting"
         logger.warning("[RouterNode] 患者角色无法访问合规审查Agent，保持当前Agent")
+
+    # 科研Agent仅对医生开放
+    if target_agent == "research" and role != "doctor":
+        target_agent = current_agent if current_agent != "research" else "health"
+        new_stage = stage if target_agent == current_agent else "greeting"
+        logger.warning("[RouterNode] 患者角色无法访问科研Agent，保持当前Agent")
 
     return {
         "current_agent": target_agent,

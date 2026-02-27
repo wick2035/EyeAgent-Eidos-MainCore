@@ -131,9 +131,11 @@ def get_health_system_prompt(role: str = "patient") -> str:
     Returns:
         系统提示词字符串
     """
+    from utils.input_guard import SECURITY_DIRECTIVE
+
     if role == "doctor":
-        return _DOCTOR_MODE_PROMPT
-    return _PATIENT_MODE_PROMPT
+        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT
+    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
 
 
 def get_health_stage_prompt(stage: str, role: str = "patient") -> str:
@@ -191,25 +193,28 @@ def build_health_context(state: Dict[str, Any]) -> str:
         if patient_info.get("phone"):
             context_parts.append(f"联系方式: {patient_info['phone']}")
 
-        # 病史信息
+        # 病史信息（消毒用户可能提供的数据）
+        from utils.input_guard import sanitize_context_field as _scf
         if patient_info.get("medical_history"):
-            context_parts.append(f"既往病史: {patient_info['medical_history']}")
+            context_parts.append(f"既往病史: {_scf(str(patient_info['medical_history']))}")
         if patient_info.get("allergy_history"):
-            context_parts.append(f"过敏史: {patient_info['allergy_history']}")
+            context_parts.append(f"过敏史: {_scf(str(patient_info['allergy_history']))}")
         if patient_info.get("family_history"):
-            context_parts.append(f"家族史: {patient_info['family_history']}")
+            context_parts.append(f"家族史: {_scf(str(patient_info['family_history']))}")
     else:
         context_parts.append(f"\n【患者ID】{patient_id}")
 
     # 已收集信息
+    from utils.input_guard import sanitize_context_field
+
     context_parts.append("\n【已收集信息】")
     if state.get("chief_complaint"):
-        context_parts.append(f"✓ 主诉: {state['chief_complaint']}")
+        context_parts.append(f"✓ 主诉: {sanitize_context_field(state['chief_complaint'])}")
     else:
         context_parts.append("○ 主诉: 待收集")
 
     if state.get("present_illness"):
-        context_parts.append(f"✓ 现病史: {state['present_illness']}")
+        context_parts.append(f"✓ 现病史: {sanitize_context_field(state['present_illness'])}")
     else:
         context_parts.append("○ 现病史: 待收集")
 
