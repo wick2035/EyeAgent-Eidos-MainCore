@@ -17,6 +17,7 @@ from agents.graph.nodes import (
     reminder_agent_node,
     research_agent_node,
     compliance_agent_node,
+    recommendation_agent_node,
     response_node,
 )
 from agents.graph.edges.routing import (
@@ -70,6 +71,7 @@ class MedicalGraphBuilder:
         graph.add_node("reminder", reminder_agent_node)
         graph.add_node("research", research_agent_node)
         graph.add_node("compliance", compliance_agent_node)
+        graph.add_node("recommendation", recommendation_agent_node)
         graph.add_node("output_handler", response_node)  # 避免与状态键 response 冲突
 
         # 添加入口边
@@ -85,6 +87,7 @@ class MedicalGraphBuilder:
                 "reminder": "reminder",
                 "research": "research",
                 "compliance": "compliance",
+                "recommendation": "recommendation",
             }
         )
 
@@ -94,6 +97,7 @@ class MedicalGraphBuilder:
         graph.add_edge("reminder", "output_handler")
         graph.add_edge("research", "output_handler")
         graph.add_edge("compliance", "output_handler")
+        graph.add_edge("recommendation", "output_handler")
 
         # 添加响应节点条件边 (output_handler -> router 或 END)
         graph.add_conditional_edges(

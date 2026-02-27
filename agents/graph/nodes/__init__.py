@@ -9,6 +9,7 @@ from agents.graph.nodes.report_node import report_agent_node
 from agents.graph.nodes.reminder_node import reminder_agent_node
 from agents.graph.nodes.research_node import research_agent_node
 from agents.graph.nodes.compliance_node import compliance_agent_node
+from agents.graph.nodes.recommendation_node import recommendation_agent_node
 from agents.graph.nodes.response_node import response_node
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "reminder_agent_node",
     "research_agent_node",
     "compliance_agent_node",
+    "recommendation_agent_node",
     "response_node",
 ]

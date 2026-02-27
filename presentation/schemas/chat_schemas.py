@@ -19,7 +19,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话ID（如果为空会自动生成）")
     patient_id: str = Field(..., description="患者UUID（必需）")
     doctor_id: Optional[str] = Field(None, description="医生UUID（医生端必需，用于记录医生的会话）")
-    agent_type: Optional[str] = Field("health", description="Agent类型 (health/report/reminder/research/compliance)")
+    agent_type: Optional[str] = Field("health", description="Agent类型 (health/report/reminder/research/compliance/recommendation)")
     role: Optional[str] = Field("patient", description="用户角色 (patient/doctor)")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID（用于继续对话，为空则创建新会话）")
 

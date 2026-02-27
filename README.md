@@ -1,18 +1,18 @@
 # 智能医疗咨询系统
 
-基于 **LangGraph** 的多智能体状态图系统，实现眼科健康咨询、智能分诊、医生预约、病历管理、合规审查和科研辅助等全流程医疗服务。
+基于 **LangGraph** 的多智能体状态图系统，实现眼科健康咨询、智能分诊、医生预约、病历管理、合规审查、科研辅助和医药产品推荐等全流程医疗服务。
 
 ## 系统架构
 
 ```
 用户消息 --> Router（混合意图路由）
                |
-    +----------+----------+----------+----------+
-    |          |          |          |          |
-  Health    Report    Reminder  Research  Compliance
-  (Agent1)  (Agent2)  (Agent3)  (Agent4)  (Agent5)
-    |          |          |          |          |
-    +----------+----------+----------+----------+
+    +----------+----------+----------+----------+----------+
+    |          |          |          |          |          |
+  Health    Report    Reminder  Research  Compliance  Recommendation
+  (Agent1)  (Agent2)  (Agent3)  (Agent4)  (Agent5)    (Agent6)
+    |          |          |          |          |          |
+    +----------+----------+----------+----------+----------+
                |
          Response Handler --> 返回结果
 ```
@@ -58,10 +58,19 @@
 - 每条审查意见附带权威标准 / 文献引用（联网实时搜索）
 - 审查结果保存与 PDF 导出
 
+### Agent 6 - 医药产品推荐智能体 (RecommendationAgent)
+- **医生端**：根据患者诊断报告 / 病历推荐处方药、非处方药及医疗器械
+- **患者端**：通过症状描述或购药需求推荐 OTC 药品和医疗器械
+- **产品卡片**：响应中包含结构化产品卡片（图片、名称、规格、价格、操作按钮）
+- **交互选项**：问询过程中提供可点击的选项卡片，点击后自动作为消息继续对话
+- 产品搜索、详情查看、加入购物车（stub）、开具处方（stub）
+- 患者端自动过滤处方药直接推荐，仅展示"查看详情"
+
 ### 智能路由系统（混合架构）
+
 - **规则引擎**（第一层）：精确模式匹配 + 关键词加权，处理 ~90% 请求，<1ms 延迟
 - **LLM 路由**（第二层）：轻量级 LLM 处理复杂语义，支持融合决策
-- **角色权限控制**：患者无法访问 Research / Compliance Agent（路由层拦截）
+- **角色权限控制**：患者无法访问 Research / Compliance Agent（路由层拦截）；Recommendation Agent 医生患者均可使用
 - **状态保持**：关键对话阶段中自动保持当前 Agent，防止误切换
 
 ## 技术栈
@@ -95,6 +104,7 @@
 │   │   │   ├── reminder_node.py    # Agent 3 - 提醒管理
 │   │   │   ├── research_node.py    # Agent 4 - 科研辅助
 │   │   │   ├── compliance_node.py  # Agent 5 - 合规审查
+│   │   │   ├── recommendation_node.py # Agent 6 - 产品推荐
 │   │   │   └── response_node.py    # 响应后处理
 │   │   └── edges/
 │   │       └── routing.py          # 条件边路由 + 阶段流定义
@@ -102,7 +112,8 @@
 │   └── tools/                      # 各 Agent 工具定义
 │       ├── agent_tools.py          # Agent 1-3 工具
 │       ├── research_tools.py       # Agent 4 工具
-│       └── compliance_tools.py     # Agent 5 工具
+│       ├── compliance_tools.py     # Agent 5 工具
+│       └── recommendation_tools.py # Agent 6 工具
 ├── domain/                         # 领域模型层（实体、枚举）
 ├── application/                    # 应用服务层（仓储接口、DTO、持久化服务）
 ├── infrastructure/                 # 基础设施层（数据库、API 客户端、MinIO）
@@ -111,6 +122,7 @@
 │   │   ├── chat_router.py          # 通用对话 API
 │   │   ├── research_router.py      # 科研 Agent 专用 API
 │   │   ├── compliance_router.py    # 合规审查 Agent 专用 API
+│   │   ├── recommendation_router.py # 产品推荐 Agent 专用 API
 │   │   └── conversation_router.py  # 会话管理 API
 │   └── schemas/                    # Pydantic 请求/响应模型
 ├── utils/                          # 工具函数
@@ -149,6 +161,14 @@
 | POST | `/api/compliance/chat` | 合规审查对话 |
 | POST | `/api/compliance/chat/stream` | 合规审查对话 (SSE) |
 | GET  | `/api/compliance/health` | 健康检查 |
+
+### 产品推荐 Agent 专用
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/recommendation/chat` | 产品推荐对话 |
+| POST | `/api/recommendation/chat/stream` | 产品推荐对话 (SSE) |
+| GET | `/api/recommendation/health` | 健康检查 |
 
 ### 其他
 
@@ -220,26 +240,29 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ### 患者端
 
-患者可使用 Agent 1-3：
+患者可使用 Agent 1-3、Agent 6：
 
 1. **健康咨询**：描述眼部症状，AI 评估严重程度并引导就诊
 2. **预约挂号**：系统化收集信息（主诉、现病史、既往史），完成医生预约
 3. **报告查看**：查看历史处方和检查记录
 4. **提醒管理**：创建 / 查看复诊和用药提醒
+5. **购药推荐**（Agent 6）：根据症状推荐 OTC 药品和医疗器械，产品卡片展示
 
 ### 医生端
 
-医生可使用全部 5 个 Agent：
+医生可使用全部 6 个 Agent：
 
 1. **Agent 1-3**：同患者端功能，另有 PDF 生成等高级权限
 2. **科研助手**（Agent 4）：文献检索、统计分析、研究方案设计、论文写作辅助
 3. **合规审查**（Agent 5）：对患者诊断 / 处方 / 病历进行合规性审查，每条审查意见附带权威指南引用
+4. **产品推荐**（Agent 6）：根据患者诊断推荐处方药 / 非处方药 / 医疗器械，支持开具处方
 
 ### 角色切换
 
 在前端界面可切换角色：
-- **患者模式**：健康咨询、报告查看、提醒管理
-- **医生模式**：以上全部 + 科研助手 + 合规审查
+
+- **患者模式**：健康咨询、报告查看、提醒管理、购药推荐
+- **医生模式**：以上全部 + 科研助手 + 合规审查 + 产品推荐（处方权限）
 
 ## 相关文档
 
