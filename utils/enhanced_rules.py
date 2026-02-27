@@ -65,6 +65,23 @@ class EnhancedRuleEngine:
                 # 质控相关
                 r'(质量|质控).*(审查|检查|控制)',
                 r'(用药|剂量|适应症).*(合理|合规|审查)',
+            ],
+
+            'recommendation': [
+                # 购药/推荐（强意图）
+                r'(推荐|建议).*(药|药品|产品|器械|眼药水|滴眼液)',
+                r'(买|购买|购|想买|想要买).*(药|药品|产品|器械|眼药水|滴眼液)',
+                r'(什么|哪种|哪个).*(药|药品|产品|器械).*(好|合适|推荐)',
+                r'(给|帮).*(推荐|开|选).*(药|药品|产品)',
+                r'(有没有|有什么).*(药|药品|产品).*(推荐|可以)',
+
+                # 处方/开药
+                r'(处方|开药|配药|拿药)',
+                r'(给.*患者|给.*病人).*(推荐|开).*(药|产品)',
+
+                # 产品相关
+                r'(眼药水|滴眼液|眼膏|护目镜|眼罩|隐形眼镜|OK镜|角膜塑形)',
+                r'(买|想要|需要).*(眼药水|滴眼液|眼膏|护目镜)',
             ]
         }
 
@@ -137,15 +154,35 @@ class EnhancedRuleEngine:
 
                 # 指南相关
                 '临床指南': 2.0, '诊疗规范': 2.5, '指南': 1.5,
+            },
+
+            'recommendation': {
+                # 购药/推荐（高权重）
+                '推荐': 2.0, '买药': 3.5, '购药': 3.5, '购买': 2.0,
+                '推荐药': 4.0, '推荐产品': 4.0, '推荐药品': 4.0,
+
+                # 具体产品
+                '眼药水': 3.0, '滴眼液': 3.0, '眼膏': 3.0,
+                '护目镜': 3.0, '眼罩': 2.5, '隐形眼镜': 3.0,
+                'OK镜': 3.5, '角膜塑形镜': 3.5,
+
+                # 动作类
+                '买': 2.0, '购': 2.0, '想买': 3.0, '想要买': 3.0,
+                '开药': 3.0, '配药': 3.0, '拿药': 2.5, '处方': 1.5,
+
+                # 需求类
+                '产品': 2.0, '药品': 2.5, '器械': 2.5, '药物': 2.5,
+                '什么药': 3.5, '哪种药': 3.5, '用什么药': 3.5,
             }
         }
 
         # 排除关键词（出现这些词时降低置信度）
         self.exclusion_keywords = {
-            'health': ['报告', '历史', '记录', '之前', '对比', '提醒'],
-            'report': ['预约', '挂号', '提醒', '创建提醒'],
-            'reminder': ['症状', '不舒服', '疼', '痛', '预约医生', '报告分析'],
-            'compliance': ['预约', '挂号', '提醒', '报告下载']
+            'health': ['报告', '历史', '记录', '之前', '对比', '提醒', '买药', '购买', '推荐药'],
+            'report': ['预约', '挂号', '提醒', '创建提醒', '买药', '购买'],
+            'reminder': ['症状', '不舒服', '疼', '痛', '预约医生', '报告分析', '买药'],
+            'compliance': ['预约', '挂号', '提醒', '报告下载', '买药', '购买'],
+            'recommendation': ['预约', '挂号', '报告', '提醒', '审查', '合规'],
         }
 
     def match(self, message: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -202,8 +239,8 @@ class EnhancedRuleEngine:
 
     def _pattern_match(self, message: str) -> Dict[str, Any]:
         """精确模式匹配"""
-        scores = {'health': 0, 'report': 0, 'reminder': 0, 'compliance': 0}
-        matched_patterns = {'health': [], 'report': [], 'reminder': [], 'compliance': []}
+        scores = {'health': 0, 'report': 0, 'reminder': 0, 'compliance': 0, 'recommendation': 0}
+        matched_patterns = {'health': [], 'report': [], 'reminder': [], 'compliance': [], 'recommendation': []}
 
         for agent_type, patterns in self.exact_patterns.items():
             for pattern in patterns:
@@ -232,8 +269,8 @@ class EnhancedRuleEngine:
 
     def _keyword_weighted_match(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """关键词加权匹配"""
-        scores = {'health': 0.0, 'report': 0.0, 'reminder': 0.0, 'compliance': 0.0}
-        matched_keywords = {'health': [], 'report': [], 'reminder': [], 'compliance': []}
+        scores = {'health': 0.0, 'report': 0.0, 'reminder': 0.0, 'compliance': 0.0, 'recommendation': 0.0}
+        matched_keywords = {'health': [], 'report': [], 'reminder': [], 'compliance': [], 'recommendation': []}
 
         # 计算每个agent的加权分数
         for agent_type, keywords in self.keyword_weights.items():
@@ -279,6 +316,8 @@ class EnhancedRuleEngine:
             r'查看.*提醒', r'看.*提醒', r'我的.*提醒',
             r'创建.*提醒', r'添加.*提醒',
             r'审查.*合规', r'合规.*审查', r'审核.*处方', r'审查.*诊断',
+            r'推荐.*药', r'买.*药', r'购买.*药', r'开药', r'配药',
+            r'推荐.*产品', r'买.*眼药水', r'推荐.*滴眼液',
         ]
 
         for pattern in switch_patterns:

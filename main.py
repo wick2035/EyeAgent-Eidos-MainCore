@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, conversation_router, research_router, compliance_router
+from presentation.routers import chat_router, conversation_router, research_router, compliance_router, recommendation_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
 
@@ -70,11 +70,12 @@ app.include_router(chat_router.router)
 app.include_router(conversation_router.router)
 app.include_router(research_router.router)
 app.include_router(compliance_router.router)
+app.include_router(recommendation_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
 logger.info("架构版本: 3.0.0 (LangGraph)")
-logger.info("已启用: 健康咨询、报告、提醒、科研 Agent")
+logger.info("已启用: 健康咨询、报告、提醒、科研、合规审查、产品推荐 Agent")
 logger.info("=" * 80)
 
 
@@ -88,6 +89,13 @@ async def index(request: Request):
 async def research_test_page():
     """返回科研Agent测试页面"""
     with open("static/research_test.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/recommendation-test", response_class=HTMLResponse)
+async def recommendation_test_page():
+    """返回产品推荐Agent测试页面"""
+    with open("static/recommendation_test.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
 
@@ -218,6 +226,8 @@ async def api_info():
             "conversation_detail": "/api/conversations/{conversation_id}",
             "research_chat": "/api/research/chat",
             "research_chat_stream": "/api/research/chat/stream",
+            "recommendation_chat": "/api/recommendation/chat",
+            "recommendation_chat_stream": "/api/recommendation/chat/stream",
             "export": "/api/export/{session_id}",
         },
         "features": {

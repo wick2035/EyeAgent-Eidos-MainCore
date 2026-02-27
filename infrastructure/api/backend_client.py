@@ -414,6 +414,107 @@ class BackendAPIClient:
             logger.error(f"[API] 获取患者所有扫描数据失败: {e}")
             return []  # 优雅降级
 
+    # ========== Agent 6 产品推荐相关方法 ==========
+
+    def search_products(self, query: str, category: str = None,
+                       product_type: str = None, limit: int = 10) -> list:
+        """
+        搜索医药产品
+
+        Args:
+            query: 搜索关键词
+            category: 产品分类
+            product_type: 产品类型（PRESCRIPTION/OTC/DEVICE）
+            limit: 返回数量限制
+
+        Returns:
+            产品列表
+        """
+        params = {"query": query, "limit": limit}
+        if category:
+            params["category"] = category
+        if product_type:
+            params["productType"] = product_type
+        return self._request('GET', '/agent/api/search-products', params=params)
+
+    def get_product_detail(self, product_id: str) -> Dict[str, Any]:
+        """
+        获取产品详情
+
+        Args:
+            product_id: 产品UUID
+
+        Returns:
+            产品详情字典
+        """
+        return self._request('GET', '/agent/api/product-detail',
+                            params={"productId": product_id})
+
+    def get_recommended_products(self, patient_id: str, diagnosis: str = None,
+                                symptoms: str = None) -> list:
+        """
+        获取基于诊断的推荐产品
+
+        Args:
+            patient_id: 患者UUID
+            diagnosis: 诊断信息
+            symptoms: 症状描述
+
+        Returns:
+            推荐产品列表
+        """
+        params = {"patientId": patient_id}
+        if diagnosis:
+            params["diagnosis"] = diagnosis
+        if symptoms:
+            params["symptoms"] = symptoms
+        return self._request('GET', '/agent/api/recommended-products', params=params)
+
+    def add_to_cart(self, patient_id: str, product_id: str,
+                   quantity: int = 1) -> Dict[str, Any]:
+        """
+        加入购物车
+
+        Args:
+            patient_id: 患者UUID
+            product_id: 产品UUID
+            quantity: 数量
+
+        Returns:
+            购物车操作结果
+        """
+        return self._request('POST', '/agent/api/add-to-cart',
+                            json={
+                                "patientId": patient_id,
+                                "productId": product_id,
+                                "quantity": quantity,
+                            })
+
+    def create_product_prescription(self, doctor_id: str, patient_id: str,
+                                   product_id: str, dosage_instruction: str,
+                                   notes: str = "") -> Dict[str, Any]:
+        """
+        开具产品处方
+
+        Args:
+            doctor_id: 医生UUID
+            patient_id: 患者UUID
+            product_id: 产品UUID
+            dosage_instruction: 用法用量
+            notes: 备注
+
+        Returns:
+            处方记录结果
+        """
+        return self._request('POST', '/agent/api/create-product-prescription',
+                            json={
+                                "doctorId": doctor_id,
+                                "patientId": patient_id,
+                                "productId": product_id,
+                                "dosageInstruction": dosage_instruction,
+                                "notes": notes,
+                            })
+
     def close(self):
         """关闭连接"""
         self.session.close()

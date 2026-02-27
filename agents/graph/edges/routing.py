@@ -11,10 +11,10 @@ from agents.graph.state import MedicalState
 logger = logging.getLogger(__name__)
 
 # 定义 Agent 类型
-AgentType = Literal["health", "report", "reminder", "research", "compliance"]
+AgentType = Literal["health", "report", "reminder", "research", "compliance", "recommendation"]
 
 # 定义节点目标
-NodeTarget = Literal["health", "report", "reminder", "research", "compliance", "response", "__end__"]
+NodeTarget = Literal["health", "report", "reminder", "research", "compliance", "recommendation", "response", "__end__"]
 
 
 def route_by_agent_type(state: MedicalState) -> AgentType:
@@ -29,7 +29,7 @@ def route_by_agent_type(state: MedicalState) -> AgentType:
     """
     current_agent = state.get("current_agent", "health")
 
-    valid_agents = {"health", "report", "reminder", "research", "compliance"}
+    valid_agents = {"health", "report", "reminder", "research", "compliance", "recommendation"}
 
     if current_agent not in valid_agents:
         logger.warning(f"[Routing] 未知的 agent 类型: {current_agent}，默认路由到 health")
@@ -199,6 +199,16 @@ def get_next_stage(current_stage: str, agent_type: str) -> str:
             "data_loading": "reviewing",
             "reviewing": "result",
             "result": "completed",
+        },
+        "recommendation": {
+            "greeting": "diagnosis_review",
+            "diagnosis_review": "product_search",
+            "need_inquiry": "symptom_collect",
+            "symptom_collect": "product_search",
+            "product_search": "recommendation",
+            "recommendation": "prescription",
+            "prescription": "completed",
+            "purchase_confirm": "completed",
         },
     }
 

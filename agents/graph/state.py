@@ -63,6 +63,12 @@ class MedicalState(TypedDict):
     compliance_review_type: Optional[str]        # 审查类型: "prescription" | "diagnosis" | "record" | "examination" | "full"
     compliance_review_completed: bool            # 审查是否完成
 
+    # ========== RecommendationAgent 特有字段 ==========
+    recommendation_mode: Optional[str]                      # "doctor" | "patient"
+    recommendation_ui_elements: Optional[Dict[str, Any]]    # UI元素数据（产品卡片/选项）
+    recommendation_completed: bool                          # 推荐流程是否完成
+    selected_products: List[str]                            # 已选产品ID列表
+
     # ========== ResearchAgent 特有字段 ==========
     enable_institution_data: bool            # 机构数据库访问开关
     enable_web_search: bool                  # 网页搜索开关
@@ -143,6 +149,12 @@ def create_initial_state(
         # ComplianceAgent
         compliance_review_type=None,
         compliance_review_completed=False,
+
+        # RecommendationAgent
+        recommendation_mode=None,
+        recommendation_ui_elements=None,
+        recommendation_completed=False,
+        selected_products=[],
 
         # ResearchAgent
         enable_institution_data=kwargs.get("enable_institution_data", False),
