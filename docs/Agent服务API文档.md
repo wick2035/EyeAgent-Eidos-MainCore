@@ -12,8 +12,12 @@
   - [目录](#目录)
   - [概述](#概述)
     - [系统架构](#系统架构)
+    - [Agent 类型](#agent-类型)
     - [API 版本](#api-版本)
     - [通用响应格式](#通用响应格式)
+  - [安全机制](#安全机制)
+    - [输入安全防护](#输入安全防护)
+    - [角色校验](#角色校验)
   - [第一部分：Agent API（通用对话系统）](#第一部分agent-api通用对话系统)
     - [1. 聊天对话接口](#1-聊天对话接口)
       - [1.1 同步对话](#11-同步对话)
@@ -73,6 +77,26 @@
       - [文献搜索流程](#文献搜索流程)
       - [数据分析流程](#数据分析流程)
       - [完整工作流示例](#完整工作流示例)
+  - [第三部分：合规审查 Agent API](#第三部分合规审查-agent-api)
+    - [1. 概述](#1-概述-1)
+    - [2. 合规审查对话接口](#2-合规审查对话接口)
+      - [2.1 同步合规对话](#21-同步合规对话)
+      - [2.2 流式合规对话 (SSE)](#22-流式合规对话-sse)
+      - [2.3 合规 Agent 健康检查](#23-合规-agent-健康检查)
+    - [3. 数据模型](#3-数据模型-1)
+      - [ComplianceChatRequest](#compliancechatrequest)
+  - [第四部分：产品推荐 Agent API](#第四部分产品推荐-agent-api)
+    - [1. 概述](#1-概述-2)
+    - [2. 产品推荐对话接口](#2-产品推荐对话接口)
+      - [2.1 同步推荐对话](#21-同步推荐对话)
+      - [2.2 流式推荐对话 (SSE)](#22-流式推荐对话-sse)
+      - [2.3 推荐 Agent 健康检查](#23-推荐-agent-健康检查)
+    - [3. 数据模型](#3-数据模型-2)
+      - [RecommendationChatRequest](#recommendationchatrequest)
+      - [RecommendationChatResponse](#recommendationchatresponse)
+      - [UIElements](#uielements)
+      - [ProductCard](#productcard)
+      - [OptionItem](#optionitem)
   - [附录](#附录)
     - [A. 错误码说明](#a-错误码说明)
     - [B. UUID 格式规范](#b-uuid-格式规范)
@@ -86,44 +110,75 @@
 
 ### 系统架构
 
-本系统基于 **LangGraph 3.0** 架构，采用多 Agent 协作模式：
+本系统基于 **LangGraph 3.0** 架构，采用多 Agent 协作模式，具备多层安全防护：
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     前端/客户端                              │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│              FastAPI Python 服务 (本文档)                    │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐   │
-│  │ /api/chat   │ │ /api/conv.  │ │ /api/research       │   │
-│  └─────────────┘ └─────────────┘ └─────────────────────┘   │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   LangGraph Agent                           │
-│  ┌────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐          │
-│  │ Health │ │ Report │ │ Reminder │ │ Research │          │
-│  │ Agent  │ │ Agent  │ │  Agent   │ │  Agent   │          │
-│  └────────┘ └────────┘ └──────────┘ └──────────┘          │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│               Java 后端 (/agent/api)                        │
-│        (预约、处方、扫描、提醒等业务接口)                     │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       前端/客户端                                │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                FastAPI Python 服务 (本文档)                      │
+│  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────┐  │
+│  │/api/chat │ │/api/conv.│ │/api/research│ │/api/compliance  │  │
+│  └──────────┘ └──────────┘ └────────────┘ └──────────────────┘  │
+│  ┌──────────────────────┐                                       │
+│  │/api/recommendation   │                                       │
+│  └──────────────────────┘                                       │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │           安全防护层（输入检测 → 角色校验 → 输出校验）       │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     LangGraph Agent                             │
+│  ┌────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐                │
+│  │ Health │ │ Report │ │ Reminder │ │ Research │                │
+│  │ Agent  │ │ Agent  │ │  Agent   │ │  Agent   │                │
+│  └────────┘ └────────┘ └──────────┘ └──────────┘                │
+│  ┌────────────┐ ┌────────────────┐                              │
+│  │ Compliance │ │ Recommendation │                              │
+│  │   Agent    │ │     Agent      │                              │
+│  └────────────┘ └────────────────┘                              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 Java 后端 (/agent/api)                          │
+│          (预约、处方、扫描、提醒等业务接口)                        │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+系统采用两层路由机制自动识别用户意图并分配到对应 Agent：
+
+1. **规则引擎**：基于关键词和正则匹配，零延迟
+2. **LLM 路由**：对模糊意图使用轻量 LLM 判断（回退机制）
+
+### Agent 类型
+
+
+| 类型   | 标识               | 说明                      | 访问权限    |
+| ---- | ---------------- | ----------------------- | ------- |
+| 健康咨询 | `health`         | 默认 Agent，症状评估、智能分诊、预约推荐 | 患者 + 医生 |
+| 报告分析 | `report`         | 检查报告解读、处方查询、PDF 生成      | 患者 + 医生 |
+| 提醒管理 | `reminder`       | 用药提醒、复诊提醒、预约提醒          | 患者 + 医生 |
+| 科研辅助 | `research`       | 文献检索、数据分析、论文辅助          | 仅医生     |
+| 合规审查 | `compliance`     | 处方/诊断/病历/检查合规性审查        | 仅医生     |
+| 产品推荐 | `recommendation` | 药品/器械推荐、购物车、处方开具        | 患者 + 医生 |
+
 
 ### API 版本
 
-| 属性 | 值 |
-|------|-----|
-| 版本 | 3.0.1 |
-| 架构 | LangGraph |
-| 特性 | MySQL Checkpoint 持久化、自动意图路由、Token 级别 SSE 流式响应 |
+
+| 属性  | 值                                                    |
+| --- | ---------------------------------------------------- |
+| 版本  | 3.0.1                                                |
+| 架构  | LangGraph                                            |
+| 特性  | MySQL Checkpoint 持久化、自动意图路由、Token 级别 SSE 流式响应、多层安全防护 |
+
 
 ### 通用响应格式
 
@@ -148,6 +203,78 @@
   "detail": "错误信息描述"
 }
 ```
+
+---
+
+## 安全机制
+
+### 输入安全防护
+
+所有对话接口在处理消息前会经过多层安全检测，防止提示词注入、越狱攻击和越权操作。
+
+**检测层级**
+
+
+| 层级        | 位置              | 作用                   |
+| --------- | --------------- | -------------------- |
+| 1 - 输入防护  | GraphManager 入口 | 规则引擎 + LLM 双层检测，分级拦截 |
+| 2 - 路由防护  | Router Node     | 二次高风险检测（纵深防御）        |
+| 3 - 提示词加固 | Agent 系统提示词     | 指令级防御，拒绝角色篡改/提示泄露    |
+| 4 - 上下文消毒 | 提示词构建           | 清理注入标记后再插入上下文        |
+| 5 - 输出校验  | Response Node   | 检测并阻止系统提示泄露          |
+
+
+**分级响应**
+
+**高风险**（明确的注入攻击）：立即中断对话，返回警告：
+
+```json
+{
+  "response": "检测到您的输入包含不安全内容。为了保障系统安全和您的隐私，本次对话已被中断。如果您有正常的医疗咨询需求，请重新描述您的问题。\n\n如有疑问，请联系客服。",
+  "stage": "security_blocked",
+  "is_completed": true
+}
+```
+
+**低风险**（模糊的越权尝试）：返回引导回复，对话可继续：
+
+```json
+{
+  "response": "抱歉，我无法处理您的请求。我是一个专业的医疗咨询助手，只能为您提供眼科健康咨询、预约、报告查看等医疗服务。\n\n请问您有什么健康方面的问题需要咨询吗？",
+  "stage": "security_blocked",
+  "is_completed": false
+}
+```
+
+**流式接口的安全拦截**以 SSE 事件返回：
+
+```
+data: {"type": "token", "content": "拦截回复文本...", "metadata": {"security_blocked": true, "risk": "high"}}
+
+data: {"type": "done", "content": "", "metadata": {"security_blocked": true}}
+```
+
+### 角色校验
+
+系统在服务端对角色进行校验，不信任客户端提交的 `role` 字段：
+
+
+| 场景                                   | 处理                   |
+| ------------------------------------ | -------------------- |
+| `role=doctor` 但未提供 `doctor_id`       | 降级为 `patient`        |
+| `doctor_id` UUID 格式无效                | 降级为 `patient`        |
+| `doctor_id` 与 `patient_id` 相同        | 降级为 `patient`（防自我提权） |
+| 降级后 `agent_type` 为 doctor-only Agent | 自动回退到 `health`       |
+
+
+**角色权限矩阵**
+
+
+| 角色  | `role` 值  | `patient_id` | `doctor_id`  | 可访问 Agent                                |
+| --- | --------- | ------------ | ------------ | ---------------------------------------- |
+| 患者  | `patient` | 自己的 UUID     | 不需要          | health, report, reminder, recommendation |
+| 医生  | `doctor`  | 目标患者 UUID    | **自己的 UUID** | 全部 6 个 Agent                             |
+
 
 ---
 
@@ -182,15 +309,17 @@ Content-Type: application/json
 
 **请求参数说明**
 
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| message | String | 是 | - | 用户消息内容 |
-| patient_id | String | 是 | - | 患者 UUID（必须是有效的 UUID 格式） |
-| doctor_id | String | 否 | null | 医生 UUID（医生端必需） |
-| session_id | String | 否 | 自动生成 | 会话 ID，格式：`sess_{uuid[:16]}` |
-| conversation_id | String | 否 | 自动创建 | 数据库会话 ID（继续对话时使用） |
-| agent_type | String | 否 | "health" | Agent 类型：`health`/`report`/`reminder` |
-| role | String | 否 | "patient" | 用户角色：`patient`/`doctor` |
+
+| 参数              | 类型     | 必需  | 默认值       | 说明                                    |
+| --------------- | ------ | --- | --------- | ------------------------------------- |
+| message         | String | 是   | -         | 用户消息内容                                |
+| patient_id      | String | 是   | -         | 患者 UUID（必须是有效的 UUID 格式）               |
+| doctor_id       | String | 否   | null      | 医生 UUID（医生端必需）                        |
+| session_id      | String | 否   | 自动生成      | 会话 ID，格式：`sess_{uuid[:16]}`           |
+| conversation_id | String | 否   | 自动创建      | 数据库会话 ID（继续对话时使用）                     |
+| agent_type      | String | 否   | "health"  | Agent 类型：`health`/`report`/`reminder`/`research`/`compliance`/`recommendation` |
+| role            | String | 否   | "patient" | 用户角色：`patient`/`doctor`               |
+
 
 **响应体**
 
@@ -213,15 +342,17 @@ Content-Type: application/json
 
 **响应字段说明**
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| response | String | AI 生成的响应内容 |
-| session_id | String | 当前会话 ID |
-| conversation_id | String | 数据库会话 ID（用于后续继续对话） |
-| is_completed | Boolean | 对话是否完成（用户说再见等） |
-| stage | String | 当前对话阶段（详见对话阶段说明） |
-| agent_type | String | 当前使用的 Agent 类型 |
-| metadata | Object | 附加元数据 |
+
+| 字段              | 类型      | 说明                 |
+| --------------- | ------- | ------------------ |
+| response        | String  | AI 生成的响应内容         |
+| session_id      | String  | 当前会话 ID            |
+| conversation_id | String  | 数据库会话 ID（用于后续继续对话） |
+| is_completed    | Boolean | 对话是否完成（用户说再见等）     |
+| stage           | String  | 当前对话阶段（详见对话阶段说明）   |
+| agent_type      | String  | 当前使用的 Agent 类型     |
+| metadata        | Object  | 附加元数据              |
+
 
 ---
 
@@ -266,14 +397,16 @@ data: {"event":"done","response":"您好，我是小Eye，请问有什么可以�
 
 **SSE 事件类型**
 
-| 事件类型 | 说明 | 数据字段 |
-|---------|------|---------|
-| `start` | 开始处理 | session_id, conversation_id, thread_id |
-| `token` | 响应内容块（逐 token 输出） | content |
-| `tool_call` | 工具调用 | tool, status (start/end), input (start时), output (end时) |
-| `agent_switch` | Agent 切换 | from, to |
-| `done` | 完成 | response, agent_type, stage, session_id, conversation_id |
-| `error` | 错误 | message |
+
+| 事件类型           | 说明                | 数据字段                                                     |
+| -------------- | ----------------- | -------------------------------------------------------- |
+| `start`        | 开始处理              | session_id, conversation_id, thread_id                   |
+| `token`        | 响应内容块（逐 token 输出） | content                                                  |
+| `tool_call`    | 工具调用              | tool, status (start/end), input (start时), output (end时)  |
+| `agent_switch` | Agent 切换          | from, to                                                 |
+| `done`         | 完成                | response, agent_type, stage, session_id, conversation_id |
+| `error`        | 错误                | message                                                  |
+
 
 > **v3.0.0 更新**：`token` 事件现在实现真正的 Token 级别流式输出（打字机效果），每个事件包含一个或几个字符。
 
@@ -291,15 +424,19 @@ DELETE /api/chat/{session_id}?conversation_id={conversation_id}
 
 **路径参数**
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
+
+| 参数         | 类型     | 说明    |
+| ---------- | ------ | ----- |
 | session_id | String | 会话 ID |
+
 
 **查询参数**
 
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| conversation_id | String | 否 | 数据库会话 ID |
+
+| 参数              | 类型     | 必需  | 说明       |
+| --------------- | ------ | --- | -------- |
+| conversation_id | String | 否   | 数据库会话 ID |
+
 
 **响应**
 
@@ -385,10 +522,12 @@ GET /api/chat/{session_id}/checkpoints?conversation_id={conversation_id}&limit=1
 
 **查询参数**
 
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| conversation_id | String | 否 | - | 数据库会话 ID |
-| limit | Integer | 否 | 10 | 返回数量限制 |
+
+| 参数              | 类型      | 必需  | 默认值 | 说明       |
+| --------------- | ------- | --- | --- | -------- |
+| conversation_id | String  | 否   | -   | 数据库会话 ID |
+| limit           | Integer | 否   | 10  | 返回数量限制   |
+
 
 **响应**
 
@@ -460,12 +599,14 @@ GET /api/conversations?host_id={host_id}&user_type={user_type}&limit={limit}&off
 
 **查询参数**
 
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| host_id | String | 是 | - | 用户 ID（患者或医生 UUID） |
-| user_type | String | 否 | "patient" | 用户类型：`patient`/`doctor` |
-| limit | Integer | 否 | 20 | 返回数量（1-100） |
-| offset | Integer | 否 | 0 | 偏移量 |
+
+| 参数        | 类型      | 必需  | 默认值       | 说明                      |
+| --------- | ------- | --- | --------- | ----------------------- |
+| host_id   | String  | 是   | -         | 用户 ID（患者或医生 UUID）       |
+| user_type | String  | 否   | "patient" | 用户类型：`patient`/`doctor` |
+| limit     | Integer | 否   | 20        | 返回数量（1-100）             |
+| offset    | Integer | 否   | 0         | 偏移量                     |
+
 
 **响应**
 
@@ -608,16 +749,19 @@ GET /api/info
     "users": "/api/users",
     "conversations": "/api/conversations",
     "conversation_detail": "/api/conversations/{conversation_id}",
-    "research_chat": "/api/research/chat",
-    "research_chat_stream": "/api/research/chat/stream",
+    "research": "/api/research/chat",
+    "compliance": "/api/compliance/chat",
+    "recommendation": "/api/recommendation/chat",
     "export": "/api/export/{session_id}"
   },
-  "features": {
-    "state_persistence": "MySQL Checkpoint 持久化",
-    "auto_routing": "自动意图路由和 Agent 切换",
-    "streaming": "SSE 流式响应",
-    "conversation_history": "对话历史自动保存"
-  }
+  "features": [
+    "state_persistence",
+    "auto_routing",
+    "streaming",
+    "conversation_history",
+    "input_security_guard",
+    "role_verification"
+  ]
 }
 ```
 
@@ -690,71 +834,81 @@ GET /api/export/{session_id}?conversation_id={conversation_id}
 
 聊天请求模型
 
-| 字段 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| message | String | 是 | - | 用户消息内容 |
-| patient_id | String | 是 | - | 患者 UUID（必须是有效的 UUID 格式） |
-| doctor_id | String | 否 | null | 医生 UUID（医生端必需） |
-| session_id | String | 否 | 自动生成 | 会话 ID |
-| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
-| agent_type | String | 否 | "health" | Agent 类型：`health`/`report`/`reminder` |
-| role | String | 否 | "patient" | 用户角色：`patient`/`doctor` |
+
+| 字段              | 类型     | 必需  | 默认值       | 说明                                    |
+| --------------- | ------ | --- | --------- | ------------------------------------- |
+| message         | String | 是   | -         | 用户消息内容                                |
+| patient_id      | String | 是   | -         | 患者 UUID（必须是有效的 UUID 格式）               |
+| doctor_id       | String | 否   | null      | 医生 UUID（医生端必需）                        |
+| session_id      | String | 否   | 自动生成      | 会话 ID                                 |
+| conversation_id | String | 否   | 自动创建      | 数据库会话 ID                              |
+| agent_type      | String | 否   | "health"  | Agent 类型：`health`/`report`/`reminder`/`research`/`compliance`/`recommendation` |
+| role            | String | 否   | "patient" | 用户角色：`patient`/`doctor`               |
+
 
 #### ChatResponse
 
 聊天响应模型
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| response | String | AI 生成的响应内容 |
-| session_id | String | 当前会话 ID |
-| conversation_id | String | 数据库会话 ID |
-| is_completed | Boolean | 对话是否完成 |
-| stage | String | 当前对话阶段 |
-| agent_type | String | 当前使用的 Agent 类型 |
-| metadata | Object | 附加元数据 |
+
+| 字段              | 类型      | 说明             |
+| --------------- | ------- | -------------- |
+| response        | String  | AI 生成的响应内容     |
+| session_id      | String  | 当前会话 ID        |
+| conversation_id | String  | 数据库会话 ID       |
+| is_completed    | Boolean | 对话是否完成         |
+| stage           | String  | 当前对话阶段         |
+| agent_type      | String  | 当前使用的 Agent 类型 |
+| metadata        | Object  | 附加元数据          |
+
 
 #### ConversationSummary
 
 会话摘要模型
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 会话 UUID |
-| title | String | 会话标题 |
-| summary | String | 会话摘要（可空） |
-| total_messages | Integer | 消息总数 |
-| create_time | DateTime | 创建时间 |
-| update_time | DateTime | 更新时间 |
+
+| 字段             | 类型       | 说明       |
+| -------------- | -------- | -------- |
+| id             | String   | 会话 UUID  |
+| title          | String   | 会话标题     |
+| summary        | String   | 会话摘要（可空） |
+| total_messages | Integer  | 消息总数     |
+| create_time    | DateTime | 创建时间     |
+| update_time    | DateTime | 更新时间     |
+
 
 #### ConversationDetailResponse
 
 会话详情响应模型
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 会话 UUID |
-| user_type | String | 用户类型：`patient`/`doctor` |
-| host_id | String | 会话主体 ID |
-| title | String | 会话标题 |
-| summary | String | 会话摘要 |
-| total_messages | Integer | 消息总数 |
-| create_time | DateTime | 创建时间 |
-| update_time | DateTime | 更新时间 |
-| messages | List | 消息列表 |
+
+| 字段             | 类型       | 说明                      |
+| -------------- | -------- | ----------------------- |
+| id             | String   | 会话 UUID                 |
+| user_type      | String   | 用户类型：`patient`/`doctor` |
+| host_id        | String   | 会话主体 ID                 |
+| title          | String   | 会话标题                    |
+| summary        | String   | 会话摘要                    |
+| total_messages | Integer  | 消息总数                    |
+| create_time    | DateTime | 创建时间                    |
+| update_time    | DateTime | 更新时间                    |
+| messages       | List     | 消息列表                    |
+
 
 #### MessageResponse
 
 消息响应模型
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 消息 UUID |
-| message_order | Integer | 消息顺序 |
-| message_content | String | 消息内容 |
-| message_type | String | 消息类型：`user`/`assistant`/`system` |
-| create_time | DateTime | 创建时间 |
-| context | List | 上下文信息列表（可空） |
+
+| 字段              | 类型       | 说明                               |
+| --------------- | -------- | -------------------------------- |
+| id              | String   | 消息 UUID                          |
+| message_order   | Integer  | 消息顺序                             |
+| message_content | String   | 消息内容                             |
+| message_type    | String   | 消息类型：`user`/`assistant`/`system` |
+| create_time     | DateTime | 创建时间                             |
+| context         | List     | 上下文信息列表（可空）                      |
+
 
 #### SSE 事件格式
 
@@ -812,39 +966,67 @@ interface ErrorEvent {
 
 #### Health Agent 阶段
 
-| 阶段 | 代码 | 说明 |
-|------|------|------|
-| 问候 | `greeting` | 初次问候，了解用户需求 |
-| 健康咨询 | `health_consultation` | 健康问题咨询 |
-| 症状评估 | `symptom_assessment` | 评估症状严重程度 |
-| 预约询问 | `appointment_inquiry` | 询问是否需要预约 |
-| 信息收集 | `patient_info_collection` | 收集患者基本信息 |
-| 眼科分诊 | `ophthalmology_triage` | 眼科专业分诊 |
-| 病史采集 | `medical_history` | 采集病史信息 |
-| 预约医生 | `appointment_booking` | 完成医生预约 |
-| 完成 | `completed` | 对话完成 |
+
+| 阶段   | 代码                        | 说明          |
+| ---- | ------------------------- | ----------- |
+| 问候   | `greeting`                | 初次问候，了解用户需求 |
+| 健康咨询 | `health_consultation`     | 健康问题咨询      |
+| 症状评估 | `symptom_assessment`      | 评估症状严重程度    |
+| 预约询问 | `appointment_inquiry`     | 询问是否需要预约    |
+| 信息收集 | `patient_info_collection` | 收集患者基本信息    |
+| 眼科分诊 | `ophthalmology_triage`    | 眼科专业分诊      |
+| 病史采集 | `medical_history`         | 采集病史信息      |
+| 预约医生 | `appointment_booking`     | 完成医生预约      |
+| 完成   | `completed`               | 对话完成        |
+
 
 #### Report Agent 阶段
 
-| 阶段 | 代码 | 说明 |
-|------|------|------|
-| 选择操作 | `select_action` | 选择报告操作类型 |
+
+| 阶段   | 代码                | 说明        |
+| ---- | ----------------- | --------- |
+| 选择操作 | `select_action`   | 选择报告操作类型  |
 | 生成报告 | `generate_report` | 生成病历/处方报告 |
-| 分析历史 | `analyze_history` | 分析历史记录 |
-| 回答问题 | `answer_question` | 回答报告相关问题 |
-| 对比记录 | `compare_records` | 对比多次检查记录 |
-| 完成 | `completed` | 对话完成 |
+| 分析历史 | `analyze_history` | 分析历史记录    |
+| 回答问题 | `answer_question` | 回答报告相关问题  |
+| 对比记录 | `compare_records` | 对比多次检查记录  |
+| 完成   | `completed`       | 对话完成      |
+
 
 #### Reminder Agent 阶段
 
-| 阶段 | 代码 | 说明 |
-|------|------|------|
-| 查看提醒 | `view_reminders` | 查看现有提醒 |
-| 创建提醒 | `create_reminder` | 创建新提醒 |
-| 更新提醒 | `update_reminder` | 更新提醒设置 |
-| 配置设置 | `config_settings` | 配置提醒偏好 |
+
+| 阶段     | 代码                             | 说明       |
+| ------ | ------------------------------ | -------- |
+| 查看提醒   | `view_reminders`               | 查看现有提醒   |
+| 创建提醒   | `create_reminder`              | 创建新提醒    |
+| 更新提醒   | `update_reminder`              | 更新提醒设置   |
+| 配置设置   | `config_settings`              | 配置提醒偏好   |
 | 生物力学报告 | `generate_biomechanics_report` | 生成生物力学报告 |
-| 完成 | `completed` | 对话完成 |
+| 完成     | `completed`                    | 对话完成     |
+
+
+#### Compliance Agent 阶段
+
+| 阶段   | 代码           | 说明         |
+|--------|----------------|--------------|
+| 问候   | `greeting`     | 初次问候       |
+| 处理中 | `processing`   | 合规审查处理中 |
+| 完成   | `completed`    | 审查完成       |
+
+#### Recommendation Agent 阶段
+
+| 阶段   | 代码           | 说明         |
+|--------|----------------|--------------|
+| 问候   | `greeting`     | 初次问候       |
+| 处理中 | `processing`   | 推荐处理中     |
+| 完成   | `completed`    | 推荐完成       |
+
+#### 安全拦截阶段（所有 Agent 通用）
+
+| 阶段       | 代码                 | 说明                     |
+|------------|----------------------|--------------------------|
+| 安全拦截   | `security_blocked`   | 检测到注入/越权，对话被拦截 |
 
 ---
 
@@ -1064,14 +1246,16 @@ await chatStream('550e8400-e29b-41d4-a716-446655440000', '我想预约眼科医�
 
 **主要特性：**
 
-| 特性 | 说明 |
-|------|------|
-| 机构数据访问 | 访问机构内部脱敏患者数据 |
+
+| 特性     | 说明                         |
+| ------ | -------------------------- |
+| 机构数据访问 | 访问机构内部脱敏患者数据               |
 | 多源文献搜索 | 支持 PubMed、Google Scholar 等 |
-| 统计分析 | 描述统计、相关分析、回归分析等 |
-| 数据可视化 | 生成图表并存储到 MinIO |
-| 研究设计 | 辅助设计研究方案和样本量估算 |
-| 论文写作 | 提供论文各章节写作指导 |
+| 统计分析   | 描述统计、相关分析、回归分析等            |
+| 数据可视化  | 生成图表并存储到 MinIO             |
+| 研究设计   | 辅助设计研究方案和样本量估算             |
+| 论文写作   | 提供论文各章节写作指导                |
+
 
 **权限要求：**
 
@@ -1109,16 +1293,18 @@ Content-Type: application/json
 
 **请求参数说明**
 
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| message | String | 是 | - | 用户消息 |
-| doctor_id | String | 是 | - | 医生 UUID（必需，有效 UUID 格式） |
-| patient_id | String | 否 | null | 患者 UUID（查看特定患者数据时需要） |
-| session_id | String | 否 | 自动生成 | 会话 ID，格式：`research_{uuid[:16]}` |
-| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
-| enable_institution_data | Boolean | 否 | false | 启用机构数据库访问 |
-| enable_web_search | Boolean | 否 | false | 启用网页搜索 |
-| web_search_types | List | 否 | [] | 搜索类型：`general`/`pubmed`/`scholar` |
+
+| 参数                      | 类型      | 必需  | 默认值   | 说明                                |
+| ----------------------- | ------- | --- | ----- | --------------------------------- |
+| message                 | String  | 是   | -     | 用户消息                              |
+| doctor_id               | String  | 是   | -     | 医生 UUID（必需，有效 UUID 格式）            |
+| patient_id              | String  | 否   | null  | 患者 UUID（查看特定患者数据时需要）              |
+| session_id              | String  | 否   | 自动生成  | 会话 ID，格式：`research_{uuid[:16]}`   |
+| conversation_id         | String  | 否   | 自动创建  | 数据库会话 ID                          |
+| enable_institution_data | Boolean | 否   | false | 启用机构数据库访问                         |
+| enable_web_search       | Boolean | 否   | false | 启用网页搜索                            |
+| web_search_types        | List    | 否   | []    | 搜索类型：`general`/`pubmed`/`scholar` |
+
 
 **响应体**
 
@@ -1198,11 +1384,13 @@ GET /api/research/conversations?doctor_id={doctor_id}&limit={limit}&offset={offs
 
 **查询参数**
 
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| doctor_id | String | 是 | - | 医生 UUID |
-| limit | Integer | 否 | 20 | 返回数量（1-100） |
-| offset | Integer | 否 | 0 | 偏移量 |
+
+| 参数        | 类型      | 必需  | 默认值 | 说明          |
+| --------- | ------- | --- | --- | ----------- |
+| doctor_id | String  | 是   | -   | 医生 UUID     |
+| limit     | Integer | 否   | 20  | 返回数量（1-100） |
+| offset    | Integer | 否   | 0   | 偏移量         |
+
 
 **响应**
 
@@ -1235,10 +1423,12 @@ GET /api/research/conversations/{conversation_id}?doctor_id={doctor_id}
 
 **参数**
 
-| 参数 | 类型 | 位置 | 必需 | 说明 |
-|------|------|------|------|------|
-| conversation_id | String | Path | 是 | 会话 ID |
-| doctor_id | String | Query | 是 | 医生 UUID（权限验证） |
+
+| 参数              | 类型     | 位置    | 必需  | 说明            |
+| --------------- | ------ | ----- | --- | ------------- |
+| conversation_id | String | Path  | 是   | 会话 ID         |
+| doctor_id       | String | Query | 是   | 医生 UUID（权限验证） |
+
 
 **响应**
 
@@ -1283,10 +1473,12 @@ DELETE /api/research/conversations/{conversation_id}?doctor_id={doctor_id}
 
 **参数**
 
-| 参数 | 类型 | 位置 | 必需 | 说明 |
-|------|------|------|------|------|
-| conversation_id | String | Path | 是 | 会话 ID |
-| doctor_id | String | Query | 是 | 医生 UUID（权限验证） |
+
+| 参数              | 类型     | 位置    | 必需  | 说明            |
+| --------------- | ------ | ----- | --- | ------------- |
+| conversation_id | String | Path  | 是   | 会话 ID         |
+| doctor_id       | String | Query | 是   | 医生 UUID（权限验证） |
+
 
 **响应**
 
@@ -1351,38 +1543,44 @@ GET /api/research/health
 
 科研对话请求模型
 
-| 字段 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| message | String | 是 | - | 用户消息 |
-| doctor_id | String | 是 | - | 医生 UUID |
-| patient_id | String | 否 | null | 患者 UUID |
-| session_id | String | 否 | 自动生成 | 会话 ID |
-| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
-| enable_institution_data | Boolean | 否 | false | 启用机构数据库访问 |
-| enable_web_search | Boolean | 否 | false | 启用网页搜索 |
-| web_search_types | List[String] | 否 | [] | 搜索类型列表 |
+
+| 字段                      | 类型           | 必需  | 默认值   | 说明        |
+| ----------------------- | ------------ | --- | ----- | --------- |
+| message                 | String       | 是   | -     | 用户消息      |
+| doctor_id               | String       | 是   | -     | 医生 UUID   |
+| patient_id              | String       | 否   | null  | 患者 UUID   |
+| session_id              | String       | 否   | 自动生成  | 会话 ID     |
+| conversation_id         | String       | 否   | 自动创建  | 数据库会话 ID  |
+| enable_institution_data | Boolean      | 否   | false | 启用机构数据库访问 |
+| enable_web_search       | Boolean      | 否   | false | 启用网页搜索    |
+| web_search_types        | List[String] | 否   | []    | 搜索类型列表    |
+
 
 #### ResearchChatResponse
 
 科研对话响应模型
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| response | String | AI 生成的响应内容 |
-| session_id | String | 会话 ID |
-| conversation_id | String | 数据库会话 ID |
-| is_completed | Boolean | 对话是否完成 |
-| stage | String | 当前对话阶段 |
-| agent_type | String | 固定为 "research" |
-| metadata | Object | 附加元数据 |
+
+| 字段              | 类型      | 说明             |
+| --------------- | ------- | -------------- |
+| response        | String  | AI 生成的响应内容     |
+| session_id      | String  | 会话 ID          |
+| conversation_id | String  | 数据库会话 ID       |
+| is_completed    | Boolean | 对话是否完成         |
+| stage           | String  | 当前对话阶段         |
+| agent_type      | String  | 固定为 "research" |
+| metadata        | Object  | 附加元数据          |
+
 
 #### WebSearchType 枚举
 
-| 值 | 说明 |
-|-----|------|
-| `general` | 通用网页搜索 |
-| `pubmed` | PubMed 医学文献搜索 |
+
+| 值         | 说明                  |
+| --------- | ------------------- |
+| `general` | 通用网页搜索              |
+| `pubmed`  | PubMed 医学文献搜索       |
 | `scholar` | Google Scholar 学术搜索 |
+
 
 #### 科研 SSE 事件格式
 
@@ -1429,12 +1627,14 @@ interface ResearchDoneEvent {
 
 访问机构内部数据库进行科研分析。
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| data_type | String | 数据类型：`patients`/`appointments`/`prescriptions`/`scans`/`all` |
-| date_from | String | 开始日期（YYYY-MM-DD） |
-| date_to | String | 结束日期（YYYY-MM-DD） |
-| limit | Integer | 返回数量限制 |
+
+| 参数        | 类型      | 说明                                                           |
+| --------- | ------- | ------------------------------------------------------------ |
+| data_type | String  | 数据类型：`patients`/`appointments`/`prescriptions`/`scans`/`all` |
+| date_from | String  | 开始日期（YYYY-MM-DD）                                             |
+| date_to   | String  | 结束日期（YYYY-MM-DD）                                             |
+| limit     | Integer | 返回数量限制                                                       |
+
 
 > 注意：返回数据自动脱敏处理
 
@@ -1442,12 +1642,14 @@ interface ResearchDoneEvent {
 
 多来源医学文献搜索。
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| query | String | 搜索关键词 |
-| search_types | List | 搜索类型：`general`/`pubmed`/`scholar` |
-| max_results | Integer | 每个类型最大结果数（默认20） |
-| fetch_content | Boolean | 是否爬取页面内容 |
+
+| 参数            | 类型      | 说明                                |
+| ------------- | ------- | --------------------------------- |
+| query         | String  | 搜索关键词                             |
+| search_types  | List    | 搜索类型：`general`/`pubmed`/`scholar` |
+| max_results   | Integer | 每个类型最大结果数（默认20）                   |
+| fetch_content | Boolean | 是否爬取页面内容                          |
+
 
 #### 统计分析工具
 
@@ -1455,29 +1657,33 @@ interface ResearchDoneEvent {
 
 执行各类统计分析。
 
-| 分析类型 | 说明 |
-|---------|------|
-| `descriptive` | 描述性统计（均值、标准差、四分位数等） |
+
+| 分析类型          | 说明                      |
+| ------------- | ----------------------- |
+| `descriptive` | 描述性统计（均值、标准差、四分位数等）     |
 | `correlation` | 相关性分析（Pearson/Spearman） |
-| `ttest` | t 检验 |
-| `chi_square` | 卡方检验 |
-| `regression` | 回归分析 |
-| `anova` | 方差分析 |
-| `survival` | 生存分析 |
+| `ttest`       | t 检验                    |
+| `chi_square`  | 卡方检验                    |
+| `regression`  | 回归分析                    |
+| `anova`       | 方差分析                    |
+| `survival`    | 生存分析                    |
+
 
 **generate_research_visualization** - 数据可视化
 
 生成研究图表。
 
-| 图表类型 | 说明 |
-|---------|------|
-| `bar` | 柱状图 |
-| `line` | 折线图 |
-| `scatter` | 散点图 |
-| `pie` | 饼图 |
-| `boxplot` | 箱线图 |
+
+| 图表类型        | 说明  |
+| ----------- | --- |
+| `bar`       | 柱状图 |
+| `line`      | 折线图 |
+| `scatter`   | 散点图 |
+| `pie`       | 饼图  |
+| `boxplot`   | 箱线图 |
 | `histogram` | 直方图 |
-| `heatmap` | 热力图 |
+| `heatmap`   | 热力图 |
+
 
 > 图表可存储到 MinIO，返回访问 URL
 
@@ -1485,13 +1691,15 @@ interface ResearchDoneEvent {
 
 **summarize_medical_literature** - 文献处理
 
-| 任务类型 | 说明 |
-|---------|------|
-| `summarize` | 生成摘要 |
+
+| 任务类型                   | 说明     |
+| ---------------------- | ------ |
+| `summarize`            | 生成摘要   |
 | `extract_key_findings` | 提取关键发现 |
-| `translate` | 中英文翻译 |
-| `extract_methods` | 提取方法学 |
-| `extract_conclusions` | 提取结论 |
+| `translate`            | 中英文翻译  |
+| `extract_methods`      | 提取方法学  |
+| `extract_conclusions`  | 提取结论   |
+
 
 **search_clinical_guidelines** - 临床指南查询
 
@@ -1501,14 +1709,16 @@ interface ResearchDoneEvent {
 
 **design_research_protocol** - 研究方案设计
 
-| 研究类型 | 说明 |
-|---------|------|
-| `rct` | 随机对照试验 |
-| `cohort` | 队列研究 |
-| `case_control` | 病例对照研究 |
-| `cross_sectional` | 横断面研究 |
-| `case_series` | 病例系列 |
-| `meta_analysis` | 荟萃分析 |
+
+| 研究类型              | 说明     |
+| ----------------- | ------ |
+| `rct`             | 随机对照试验 |
+| `cohort`          | 队列研究   |
+| `case_control`    | 病例对照研究 |
+| `cross_sectional` | 横断面研究  |
+| `case_series`     | 病例系列   |
+| `meta_analysis`   | 荟萃分析   |
+
 
 提供样本量估算和完整研究方案模板
 
@@ -1521,13 +1731,15 @@ interface ResearchDoneEvent {
 
 **assist_paper_writing** - 论文写作助手
 
-| 章节 | 说明 |
-|-----|------|
-| `abstract` | 摘要写作指导 |
-| `introduction` | 引言写作指导 |
-| `methods` | 方法学写作指导 |
-| `results` | 结果写作指导 |
-| `discussion` | 讨论写作指导 |
+
+| 章节             | 说明      |
+| -------------- | ------- |
+| `abstract`     | 摘要写作指导  |
+| `introduction` | 引言写作指导  |
+| `methods`      | 方法学写作指导 |
+| `results`      | 结果写作指导  |
+| `discussion`   | 讨论写作指导  |
+
 
 #### 临床决策工具
 
@@ -1547,12 +1759,14 @@ interface ResearchDoneEvent {
 
 **export_research_data** - 数据导出
 
-| 格式 | 说明 |
-|-----|------|
+
+| 格式      | 说明               |
+| ------- | ---------------- |
 | `excel` | Excel 格式 (.xlsx) |
-| `csv` | CSV 格式 |
-| `spss` | SPSS 格式 (.sav) |
-| `json` | JSON 格式 |
+| `csv`   | CSV 格式           |
+| `spss`  | SPSS 格式 (.sav)   |
+| `json`  | JSON 格式          |
+
 
 > 导出数据自动脱敏，添加水印标记
 
@@ -1560,17 +1774,19 @@ interface ResearchDoneEvent {
 
 ### 5. 对话阶段
 
-| 阶段 | 代码 | 说明 |
-|------|------|------|
-| 初始化 | `greeting` | 初次接待，了解研究目标 |
-| 研究初始化 | `research_init` | 明确研究需求和方向 |
-| 数据查询 | `data_query` | 机构数据库查询 |
-| 网页搜索 | `web_search` | 文献/网页搜索 |
-| 统计分析 | `statistical_analysis` | 执行统计分析 |
-| 文献综述 | `literature_review` | 文献处理和综述 |
-| 研究设计 | `research_design` | 设计研究方案 |
-| 论文写作 | `paper_writing` | 论文写作辅助 |
-| 完成 | `completed` | 任务完成 |
+
+| 阶段    | 代码                     | 说明          |
+| ----- | ---------------------- | ----------- |
+| 初始化   | `greeting`             | 初次接待，了解研究目标 |
+| 研究初始化 | `research_init`        | 明确研究需求和方向   |
+| 数据查询  | `data_query`           | 机构数据库查询     |
+| 网页搜索  | `web_search`           | 文献/网页搜索     |
+| 统计分析  | `statistical_analysis` | 执行统计分析      |
+| 文献综述  | `literature_review`    | 文献处理和综述     |
+| 研究设计  | `research_design`      | 设计研究方案      |
+| 论文写作  | `paper_writing`        | 论文写作辅助      |
+| 完成    | `completed`            | 任务完成        |
+
 
 ---
 
@@ -1808,28 +2024,390 @@ for conv in conversations[:5]:
 
 ---
 
+## 第三部分：合规审查 Agent API
+
+### 1. 概述
+
+合规审查 Agent 是专为医生用户设计的合规审查工具，支持处方合规性、诊断合规性、病历规范性和检查合理性审查。
+
+**主要特性：**
+
+| 特性 | 说明 |
+|------|------|
+| 处方审查 | 检查处方是否符合诊疗规范 |
+| 诊断审查 | 验证诊断编码和依据合规性 |
+| 病历审查 | 检查病历书写规范性 |
+| 检查审查 | 评估检查项目合理性 |
+| PDF 导出 | 导出审查报告 |
+| 网页搜索 | 查询最新法规标准 |
+
+**权限要求：**
+
+- 仅医生角色可访问
+- 必须提供有效的 `doctor_id`（UUID 格式）
+- 服务端校验医生身份（见 [角色校验](#角色校验)）
+
+---
+
+### 2. 合规审查对话接口
+
+#### 2.1 同步合规对话
+
+**请求**
+
+```
+POST /api/compliance/chat
+Content-Type: application/json
+```
+
+**请求体**
+
+```json
+{
+  "message": "请审查这位患者的处方是否合规",
+  "doctor_id": "660e8400-e29b-41d4-a716-446655440001",
+  "patient_id": "550e8400-e29b-41d4-a716-446655440000",
+  "session_id": null,
+  "conversation_id": null
+}
+```
+
+**请求参数说明**
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| message | String | 是 | - | 审查内容/指令 |
+| doctor_id | String | 是 | - | 医生 UUID（服务端校验） |
+| patient_id | String | 是 | - | 目标患者 UUID |
+| session_id | String | 否 | 自动生成 | 会话 ID |
+| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
+
+**响应体**
+
+```json
+{
+  "response": "处方合规性审查结果...",
+  "session_id": "compliance_abc123",
+  "conversation_id": "...",
+  "is_completed": false,
+  "stage": "processing",
+  "agent_type": "compliance",
+  "metadata": {
+    "doctor_id": "...",
+    "patient_id": "...",
+    "thread_id": "..."
+  }
+}
+```
+
+---
+
+#### 2.2 流式合规对话 (SSE)
+
+**请求**
+
+```
+POST /api/compliance/chat/stream
+Content-Type: application/json
+```
+
+请求体与 [2.1 同步合规对话](#21-同步合规对话) 相同。响应为 SSE 事件流，事件类型：`start`、`chunk`、`tool_call`、`done`、`error`。
+
+---
+
+#### 2.3 合规 Agent 健康检查
+
+**请求**
+
+```
+GET /api/compliance/health
+```
+
+**响应**
+
+```json
+{
+  "status": "healthy",
+  "agent_type": "compliance",
+  "access_control": "doctor_only",
+  "features": {
+    "prescription_review": true,
+    "diagnosis_review": true,
+    "medical_record_review": true,
+    "examination_review": true,
+    "web_search": true,
+    "sse_streaming": true,
+    "save_review": true,
+    "export_pdf": true
+  }
+}
+```
+
+---
+
+### 3. 数据模型
+
+#### ComplianceChatRequest
+
+合规审查请求模型
+
+| 字段 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| message | String | 是 | - | 审查内容/指令 |
+| doctor_id | String | 是 | - | 医生 UUID |
+| patient_id | String | 是 | - | 患者 UUID |
+| session_id | String | 否 | 自动生成 | 会话 ID |
+| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
+
+---
+
+## 第四部分：产品推荐 Agent API
+
+### 1. 概述
+
+产品推荐 Agent 提供药品/器械推荐、购物车管理和处方开具功能。患者和医生均可访问，但功能范围不同。
+
+**角色权限差异：**
+
+| 功能 | 患者 | 医生 |
+|------|------|------|
+| 查看非处方药 | 可以 | 可以 |
+| 查看处方药详情 | 仅查看（`VIEW_DETAIL`） | 可以 |
+| 加入购物车 | 非处方药/器械（`ADD_TO_CART`） | — |
+| 开具处方 | — | 处方药（`PRESCRIBE`） |
+
+---
+
+### 2. 产品推荐对话接口
+
+#### 2.1 同步推荐对话
+
+**请求**
+
+```
+POST /api/recommendation/chat
+Content-Type: application/json
+```
+
+**患者端请求体**
+
+```json
+{
+  "message": "我眼睛干涩，有什么眼药水推荐吗",
+  "patient_id": "550e8400-e29b-41d4-a716-446655440000",
+  "role": "patient"
+}
+```
+
+**医生端请求体**
+
+```json
+{
+  "message": "这位患者需要抗青光眼药物",
+  "patient_id": "550e8400-e29b-41d4-a716-446655440000",
+  "doctor_id": "660e8400-e29b-41d4-a716-446655440001",
+  "role": "doctor"
+}
+```
+
+**请求参数说明**
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| message | String | 是 | - | 推荐查询内容 |
+| patient_id | String | 是 | - | 患者 UUID |
+| doctor_id | String | 医生端必需 | null | 医生 UUID |
+| role | String | 否 | "patient" | `patient` 或 `doctor` |
+| session_id | String | 否 | 自动生成 | 会话 ID |
+| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
+
+**响应体**
+
+```json
+{
+  "response": "根据您的症状，推荐以下产品...",
+  "session_id": "rec_abc123",
+  "conversation_id": "...",
+  "is_completed": false,
+  "stage": "processing",
+  "agent_type": "recommendation",
+  "ui_elements": {
+    "ui_type": "product_cards",
+    "product_cards": [
+      {
+        "product_id": "prod-001",
+        "product_name": "人工泪液滴眼液",
+        "generic_name": "聚乙烯醇滴眼液",
+        "product_type": "OTC",
+        "category": "眼科用药",
+        "image_url": "https://...",
+        "unit_price": 35.00,
+        "specification": "10ml/瓶",
+        "stock_status": "IN_STOCK",
+        "indications": "干眼症、视疲劳",
+        "is_prescription": false,
+        "action_type": "ADD_TO_CART",
+        "action_label": "加入购物车"
+      }
+    ],
+    "options": null
+  },
+  "metadata": {
+    "patient_id": "...",
+    "role": "patient",
+    "thread_id": "..."
+  }
+}
+```
+
+**`ui_elements` 说明**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| ui_type | String | UI 类型：`product_cards`、`options`、`none` |
+| product_cards | Array | 产品卡片列表（见 ProductCard 模型） |
+| options | Array | 交互选项列表（见 OptionItem 模型） |
+
+---
+
+#### 2.2 流式推荐对话 (SSE)
+
+**请求**
+
+```
+POST /api/recommendation/chat/stream
+Content-Type: application/json
+```
+
+请求体与 [2.1 同步推荐对话](#21-同步推荐对话) 相同。响应为 SSE 事件流。
+
+**特有事件**：推荐结果包含 UI 元素事件：
+
+```
+data: {"event": "ui_elements", "ui_type": "product_cards", "product_cards": [...]}
+```
+
+---
+
+#### 2.3 推荐 Agent 健康检查
+
+**请求**
+
+```
+GET /api/recommendation/health
+```
+
+---
+
+### 3. 数据模型
+
+#### RecommendationChatRequest
+
+推荐对话请求模型
+
+| 字段 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| message | String | 是 | - | 推荐查询内容 |
+| patient_id | String | 是 | - | 患者 UUID |
+| doctor_id | String | 医生端必需 | null | 医生 UUID |
+| role | String | 否 | "patient" | `patient` 或 `doctor` |
+| session_id | String | 否 | 自动生成 | 会话 ID |
+| conversation_id | String | 否 | 自动创建 | 数据库会话 ID |
+
+#### RecommendationChatResponse
+
+推荐对话响应模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| response | String | 纯文本响应（不含标记） |
+| session_id | String | 会话 ID |
+| conversation_id | String | 数据库会话 ID |
+| is_completed | Boolean | 对话是否完成 |
+| stage | String | 当前对话阶段 |
+| agent_type | String | 固定为 "recommendation" |
+| ui_elements | UIElements | 结构化 UI 元素（可空） |
+| metadata | Object | 附加元数据 |
+
+#### UIElements
+
+UI 元素容器
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| ui_type | String | `product_cards`、`options`、`none` |
+| product_cards | Array | 产品卡片列表 |
+| options | Array | 交互选项列表 |
+
+#### ProductCard
+
+产品卡片模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| product_id | String | 产品 ID |
+| product_name | String | 产品名称 |
+| generic_name | String | 通用名（可空） |
+| product_type | String | 类型：`PRESCRIPTION`/`OTC`/`DEVICE` |
+| category | String | 分类 |
+| image_url | String | 图片 URL（可空） |
+| unit_price | Number | 单价 |
+| specification | String | 规格（可空） |
+| stock_status | String | 库存：`IN_STOCK`/`LOW_STOCK`/`OUT_OF_STOCK` |
+| indications | String | 适应症（可空） |
+| is_prescription | Boolean | 是否处方药 |
+| action_type | String | 操作类型：`ADD_TO_CART`/`PRESCRIBE`/`VIEW_DETAIL` |
+| action_label | String | 操作按钮文本 |
+
+#### OptionItem
+
+交互选项模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| option_id | String | 选项 ID |
+| label | String | 显示文本 |
+| value | String | 选项值 |
+| description | String | 描述（可空） |
+| icon | String | 图标（可空） |
+
+---
+
 ## 附录
 
 ### A. 错误码说明
 
-| HTTP 状态码 | 说明 | 常见场景 |
-|------------|------|---------|
-| 200 | 成功 | 请求处理成功 |
-| 400 | 请求错误 | 参数格式错误、UUID 无效 |
-| 403 | 禁止访问 | 医生身份验证失败、无权访问会话 |
-| 404 | 未找到 | 会话不存在 |
-| 500 | 服务器错误 | 内部处理失败 |
+
+| HTTP 状态码 | 说明    | 常见场景            |
+| -------- | ----- | --------------- |
+| 200      | 成功    | 请求处理成功          |
+| 400      | 请求错误  | 参数格式错误、UUID 无效  |
+| 403      | 禁止访问  | 医生身份验证失败、无权访问会话 |
+| 404      | 未找到   | 会话不存在           |
+| 500      | 服务器错误 | 内部处理失败          |
+
 
 **常见错误信息**
 
-| 错误信息 | 说明 |
-|---------|------|
-| `patient_id 必须是有效的UUID格式` | patient_id 格式错误 |
-| `doctor_id 必须是有效的UUID格式` | doctor_id 格式错误 |
-| `医生端请求必须提供 doctor_id` | 医生角色缺少 doctor_id |
-| `仅医生用户可访问科研Agent` | 非医生用户访问科研接口 |
-| `会话不存在` | 指定的会话 ID 不存在 |
-| `无权访问此会话` | 会话不属于当前用户 |
+
+| 错误信息                      | 说明               |
+| ------------------------- | ---------------- |
+| `patient_id 必须是有效的UUID格式` | patient_id 格式错误  |
+| `doctor_id 必须是有效的UUID格式`  | doctor_id 格式错误   |
+| `医生端请求必须提供 doctor_id`     | 医生角色缺少 doctor_id |
+| `仅医生用户可访问科研Agent`         | 非医生用户访问科研接口      |
+| `仅医生用户可访问合规审查Agent`       | 非医生用户访问合规接口      |
+| `会话不存在`                   | 指定的会话 ID 不存在     |
+| `无权访问此会话`                 | 会话不属于当前用户        |
+
+**安全相关响应**
+
+| 响应 | 说明 |
+|------|------|
+| `stage: "security_blocked"`, `is_completed: true` | 高风险注入攻击被拦截，对话中断 |
+| `stage: "security_blocked"`, `is_completed: false` | 低风险越权尝试，返回引导，可继续对话 |
+| 角色降级（无显式错误） | `role=doctor` 校验失败，静默降级为 `patient`，doctor-only Agent 回退到 `health` |
+
 
 ---
 
@@ -1843,10 +2421,12 @@ for conv in conversations[:5]:
 
 **支持格式**
 
-| 格式 | 示例 |
-|------|------|
-| 带连字符 | `550e8400-e29b-41d4-a716-446655440000` |
-| 不带连字符 | `550e8400e29b41d4a716446655440000` |
+
+| 格式    | 示例                                     |
+| ----- | -------------------------------------- |
+| 带连字符  | `550e8400-e29b-41d4-a716-446655440000` |
+| 不带连字符 | `550e8400e29b41d4a716446655440000`     |
+
 
 > 大小写不敏感
 
@@ -1854,11 +2434,13 @@ for conv in conversations[:5]:
 
 ### C. 日期时间格式
 
-| 类型 | 格式 | 示例 |
-|------|------|------|
-| 日期 | `YYYY-MM-DD` | `2025-12-17` |
-| 时间 | `YYYY-MM-DDTHH:mm:ss` | `2025-12-17T10:00:00` |
+
+| 类型       | 格式                         | 示例                         |
+| -------- | -------------------------- | -------------------------- |
+| 日期       | `YYYY-MM-DD`               | `2025-12-17`               |
+| 时间       | `YYYY-MM-DDTHH:mm:ss`      | `2025-12-17T10:00:00`      |
 | ISO 8601 | `YYYY-MM-DDTHH:mm:ss.sssZ` | `2025-12-17T10:00:00.000Z` |
+
 
 ---
 
@@ -1866,47 +2448,55 @@ for conv in conversations[:5]:
 
 **chat_conversation 表**
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | 会话 UUID (主键) |
-| user_type | VARCHAR(20) | 用户类型：patient/doctor |
-| host_id | VARCHAR(36) | 会话主体 ID |
-| title | VARCHAR(255) | 会话标题 |
-| summary | TEXT | 会话摘要 |
-| total_messages | INT | 消息总数 |
-| create_time | DATETIME | 创建时间 |
-| create_by | VARCHAR(50) | 创建者 |
-| update_time | DATETIME | 更新时间 |
-| update_by | VARCHAR(50) | 更新者 |
-| deleted | TINYINT | 软删除标记 |
-| version | INT | 乐观锁版本号 |
+
+| 字段             | 类型           | 说明                  |
+| -------------- | ------------ | ------------------- |
+| id             | VARCHAR(36)  | 会话 UUID (主键)        |
+| user_type      | VARCHAR(20)  | 用户类型：patient/doctor |
+| host_id        | VARCHAR(36)  | 会话主体 ID             |
+| title          | VARCHAR(255) | 会话标题                |
+| summary        | TEXT         | 会话摘要                |
+| total_messages | INT          | 消息总数                |
+| create_time    | DATETIME     | 创建时间                |
+| create_by      | VARCHAR(50)  | 创建者                 |
+| update_time    | DATETIME     | 更新时间                |
+| update_by      | VARCHAR(50)  | 更新者                 |
+| deleted        | TINYINT      | 软删除标记               |
+| version        | INT          | 乐观锁版本号              |
+
 
 **chat_message 表**
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | 消息 UUID (主键) |
-| chat_id | VARCHAR(36) | 所属会话 ID (外键) |
-| message_order | INT | 消息顺序 |
-| message_content | LONGTEXT | 消息内容 |
-| message_type | VARCHAR(20) | 消息类型：user/assistant/system |
-| sender_id | VARCHAR(36) | 发送者 ID |
-| context | JSON | 上下文信息 |
-| token_used | INT | 使用的 Token 数 |
-| status | VARCHAR(20) | 状态：running/success/failed/cancelled |
-| error_message | TEXT | 错误信息 |
-| create_time | DATETIME | 创建时间 |
-| create_by | VARCHAR(50) | 创建者 |
-| update_time | DATETIME | 更新时间 |
-| update_by | VARCHAR(50) | 更新者 |
-| deleted | TINYINT | 软删除标记 |
-| version | INT | 乐观锁版本号 |
+
+| 字段              | 类型          | 说明                                  |
+| --------------- | ----------- | ----------------------------------- |
+| id              | VARCHAR(36) | 消息 UUID (主键)                        |
+| chat_id         | VARCHAR(36) | 所属会话 ID (外键)                        |
+| message_order   | INT         | 消息顺序                                |
+| message_content | LONGTEXT    | 消息内容                                |
+| message_type    | VARCHAR(20) | 消息类型：user/assistant/system          |
+| sender_id       | VARCHAR(36) | 发送者 ID                              |
+| context         | JSON        | 上下文信息                               |
+| token_used      | INT         | 使用的 Token 数                         |
+| status          | VARCHAR(20) | 状态：running/success/failed/cancelled |
+| error_message   | TEXT        | 错误信息                                |
+| create_time     | DATETIME    | 创建时间                                |
+| create_by       | VARCHAR(50) | 创建者                                 |
+| update_time     | DATETIME    | 更新时间                                |
+| update_by       | VARCHAR(50) | 更新者                                 |
+| deleted         | TINYINT     | 软删除标记                               |
+| version         | INT         | 乐观锁版本号                              |
+
 
 ---
 
 ## 更新日志
 
-| 版本 | 日期 | 更新内容 |
-|------|------|---------|
+
+| 版本    | 日期         | 更新内容                                                      |
+| ----- | ---------- | --------------------------------------------------------- |
+| 3.0.2 | 2026-02-27 | 新增合规审查、产品推荐 Agent API 文档；新增安全机制章节（输入注入检测、角色校验、输出安全校验）；更新 Agent 类型至 6 个；更新架构图、对话阶段、数据模型、错误码 |
 | 3.0.1 | 2025-12-16 | 流式输出升级为真正的 Token 级别（打字机效果），tool_call 事件增加 input/output 字段 |
-| 3.0.0 | 2025-12-16 | 初始版本，基于 LangGraph 架构重构 |
+| 3.0.0 | 2025-12-16 | 初始版本，基于 LangGraph 架构重构                                    |
+
+
