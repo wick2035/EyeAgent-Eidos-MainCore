@@ -7,20 +7,17 @@
 import uuid
 import json
 import logging
-import re
-from typing import AsyncGenerator, Optional, List
+from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from presentation.schemas.recommendation_schemas import (
     RecommendationChatRequest,
     RecommendationChatResponse,
-    ProductCard,
-    OptionItem,
-    UIElements,
 )
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
+from utils.ui_element_parser import parse_ui_elements
 
 logger = logging.getLogger(__name__)
 
@@ -29,89 +26,6 @@ router = APIRouter(prefix="/api/recommendation", tags=["recommendation"])
 
 # GraphManager 单例
 graph_manager = get_graph_manager()
-
-# UI元素标记正则
-PRODUCT_CARDS_PATTERN = re.compile(
-    r'\[PRODUCT_CARDS\]\s*([\s\S]*?)\s*\[/PRODUCT_CARDS\]',
-    re.DOTALL
-)
-OPTIONS_PATTERN = re.compile(
-    r'\[OPTIONS\]\s*([\s\S]*?)\s*\[/OPTIONS\]',
-    re.DOTALL
-)
-
-
-def _parse_ui_elements(response_text: str) -> tuple:
-    """
-    从AI响应文本中解析UI元素标记
-
-    Args:
-        response_text: 原始AI响应文本
-
-    Returns:
-        (clean_text, ui_elements): 清理后的文本和UI元素对象
-    """
-    ui_elements = None
-    clean_text = response_text
-
-    # 解析产品卡片
-    product_match = PRODUCT_CARDS_PATTERN.search(response_text)
-    if product_match:
-        try:
-            cards_json = product_match.group(1).strip()
-            cards_data = json.loads(cards_json)
-            if isinstance(cards_data, list):
-                product_cards = []
-                for card in cards_data:
-                    try:
-                        product_cards.append(ProductCard(**card))
-                    except Exception as e:
-                        logger.warning(f"[RecommendationRouter] 解析产品卡片失败: {e}")
-                        continue
-                if product_cards:
-                    ui_elements = UIElements(
-                        product_cards=product_cards,
-                        ui_type="product_cards"
-                    )
-        except json.JSONDecodeError as e:
-            logger.warning(f"[RecommendationRouter] 产品卡片JSON解析失败: {e}")
-
-        # 从文本中移除标记
-        clean_text = PRODUCT_CARDS_PATTERN.sub('', clean_text)
-
-    # 解析选项（如果没有产品卡片）
-    if not ui_elements:
-        options_match = OPTIONS_PATTERN.search(response_text)
-        if options_match:
-            try:
-                options_json = options_match.group(1).strip()
-                options_data = json.loads(options_json)
-                if isinstance(options_data, list):
-                    option_items = []
-                    for opt in options_data:
-                        try:
-                            option_items.append(OptionItem(**opt))
-                        except Exception as e:
-                            logger.warning(f"[RecommendationRouter] 解析选项失败: {e}")
-                            continue
-                    if option_items:
-                        ui_elements = UIElements(
-                            options=option_items,
-                            ui_type="options"
-                        )
-            except json.JSONDecodeError as e:
-                logger.warning(f"[RecommendationRouter] 选项JSON解析失败: {e}")
-
-            # 从文本中移除标记
-            clean_text = OPTIONS_PATTERN.sub('', clean_text)
-    else:
-        # 即使有产品卡片，也移除选项标记
-        clean_text = OPTIONS_PATTERN.sub('', clean_text)
-
-    # 清理多余空行
-    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
-
-    return clean_text, ui_elements
 
 
 @router.post("/chat", response_model=RecommendationChatResponse)
@@ -171,7 +85,7 @@ async def recommendation_chat(request: RecommendationChatRequest) -> Recommendat
 
         # 解析UI元素
         raw_response = result["response"]
-        clean_text, ui_elements = _parse_ui_elements(raw_response)
+        clean_text, ui_elements = parse_ui_elements(raw_response)
 
         return RecommendationChatResponse(
             response=clean_text,
@@ -299,7 +213,7 @@ async def recommendation_chat_stream(request: RecommendationChatRequest):
                     yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
 
             # 解析UI元素
-            clean_text, ui_elements = _parse_ui_elements(full_response)
+            clean_text, ui_elements = parse_ui_elements(full_response)
 
             # 发送UI元素事件（如果有）
             if ui_elements:

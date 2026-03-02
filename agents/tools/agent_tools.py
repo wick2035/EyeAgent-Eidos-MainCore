@@ -44,6 +44,35 @@ def get_patient_prescription(patient_id: str) -> str:
 
 
 @tool
+def get_all_hospitals() -> str:
+    """
+    获取系统中所有医院的基本信息列表。
+
+    Returns:
+        包含所有医院信息的JSON字符串，每个医院包含:
+        id(医院UUID), hospitalName(名称), province(省份), city(城市),
+        address(地址), hospitalType(类型), hospitalLevel(等级), star(评分)
+
+    使用场景：
+    - 患者想要预约但不确定选择哪家医院
+    - 需要展示可选医院列表供患者选择
+    - 在预约流程开始前帮助患者了解可用医院
+
+    重要：在调用 get_doctor_free_time 之前，如果患者未指定医院，
+    应先调用此工具获取医院列表供患者选择。
+    """
+    try:
+        logger.info("[Tool] get_all_hospitals")
+        client = get_api_client()
+        result = client.get_all_hospitals()
+        return json.dumps(result, ensure_ascii=False)
+    except (APIError, NetworkError) as e:
+        error_msg = f"获取医院列表失败: {str(e)}"
+        logger.error(f"[Tool Error] {error_msg}")
+        return error_msg
+
+
+@tool
 def get_doctor_free_time(patient_id: str, date: str, hospital_key: str) -> str:
     """
     获取指定日期医生的空闲时间段。
@@ -80,7 +109,8 @@ def get_doctor_free_time(patient_id: str, date: str, hospital_key: str) -> str:
 
         client = get_api_client()
         result = client.get_doctor_free_time(patient_id, date, hospital_key)
-        return json.dumps(result, ensure_ascii=False)
+        result_str = json.dumps(result, ensure_ascii=False)
+        return f"[注意：以下数据中的ID字段仅供内部工具调用，不要在回复中展示给用户]\n{result_str}"
     except (APIError, NetworkError) as e:
         error_msg = f"查询医生空闲时间失败: {str(e)}"
         logger.error(f"[Tool Error] {error_msg}")
@@ -129,6 +159,21 @@ def reserve_doctor(
     """
     try:
         logger.info(f"[Tool] reserve_doctor: patient={patient_id}, doctor={doctor_id}, time={reserve_time}")
+
+        # doctor_id 格式验证：必须是真实的 UUID（32位hex 或 8-4-4-4-12 格式）
+        import re as _re
+        is_valid_uuid = bool(
+            _re.match(r'^[0-9a-fA-F]{32}$', doctor_id) or
+            _re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', doctor_id)
+        )
+        if not is_valid_uuid:
+            error_msg = (
+                f"doctor_id '{doctor_id}' 不是有效的UUID格式。"
+                f"请先调用 get_doctor_free_time 查询可用医生，使用返回结果中的 doctorId 字段。"
+                f"不要编造 doctor_id。"
+            )
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
 
         # 日期验证
         try:
@@ -179,7 +224,8 @@ def reserve_doctor(
         result = client.reserve_doctor(request_data)
 
         logger.info(f"[Tool Success] 预约成功: {result.get('id')}")
-        return json.dumps(result, ensure_ascii=False)
+        result_str = json.dumps(result, ensure_ascii=False)
+        return f"[注意：以下数据中的ID字段仅供内部工具调用，不要在回复中展示给用户]\n{result_str}"
 
     except (APIError, NetworkError) as e:
         error_msg = f"预约失败: {str(e)}"
@@ -532,7 +578,7 @@ def create_reminder(
 
     Args:
         patient_id: 患者UUID
-        reminder_type: 提醒类型，可选值：RESERVE(预约/复诊/看病)/MEDICATION(用药)
+        reminder_type: 提醒类型，可选值：FOLLOW_UP(复诊)/APPOINTMENT(预约)/MEDICATION(用药)
         reminder_title: 提醒标题
         reminder_content: 提醒内容
         scheduled_time: 计划提醒时间，格式 yyyy-MM-ddTHH:mm:ss（如 "2025-12-10T09:00:00"）
@@ -554,7 +600,8 @@ def create_reminder(
     - 设置用药提醒、复诊提醒、预约提醒等
 
     示例：
-    - 预约/复诊提醒：reminder_type="RESERVE", scheduled_time="2025-12-15T09:00:00"
+    - 复诊提醒：reminder_type="FOLLOW_UP", scheduled_time="2025-12-15T09:00:00"
+    - 预约提醒：reminder_type="APPOINTMENT", scheduled_time="2025-12-15T09:00:00"
     - 用药提醒：reminder_type="MEDICATION", repeat_type="DAILY", max_repeat_count=7
     """
     try:
@@ -566,14 +613,15 @@ def create_reminder(
         repeat_type = repeat_type.upper()
         notification_method = notification_method.upper()
 
-        # 提醒类型映射（API 只接受 RESERVE/MEDICATION/SYSTEM，患者只能创建前两种）
-        TYPE_MAPPING = {
-            "FOLLOW_UP": "RESERVE",      # 复诊 → 预约
-            "APPOINTMENT": "RESERVE",    # 预约 → 预约
-            "RESERVE": "RESERVE",        # 预约 → 预约
-            "MEDICATION": "MEDICATION",  # 用药 → 用药
-        }
-        reminder_type = TYPE_MAPPING.get(reminder_type, "RESERVE")
+        # 提醒类型验证（API 接受 FOLLOW_UP/APPOINTMENT/MEDICATION）
+        valid_reminder_types = {"FOLLOW_UP", "APPOINTMENT", "MEDICATION"}
+        if reminder_type not in valid_reminder_types:
+            error_msg = (
+                f"提醒类型 '{reminder_type}' 无效，"
+                f"可选值：FOLLOW_UP(复诊)/APPOINTMENT(预约)/MEDICATION(用药)"
+            )
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
 
         reminder_data = {
             "reminderType": reminder_type,
@@ -606,6 +654,104 @@ def create_reminder(
         return json.dumps(result, ensure_ascii=False)
     except (APIError, NetworkError) as e:
         error_msg = f"创建提醒失败: {str(e)}"
+        logger.error(f"[Tool Error] {error_msg}")
+        return error_msg
+
+
+@tool
+def create_medical_reminder(
+    patient_id: str,
+    title: str,
+    medical_type: str,
+    time: str,
+    duration: int,
+    content: str = ""
+) -> str:
+    """
+    为患者批量创建用药提醒（含关联日程）。
+
+    根据指定的用药时间和持续天数，自动生成多天的提醒和对应的日程。
+
+    Args:
+        patient_id: 患者UUID
+        title: 提醒标题，通常为药品名称（如"玻璃酸钠滴眼液"）
+        medical_type: 药品类型，可选值：
+            - "DROP": 滴剂
+            - "PILL": 药片
+            - "CAPSULE": 胶囊
+            - "INJECT": 注射
+        time: 每日用药时间，格式 HH:mm:ss（如 "08:30:00"）
+        duration: 持续天数（必须大于0，从今天起连续N天生成提醒）
+        content: 提醒内容/用药说明（可选，如"每次1-2滴，滴入眼睑内"）
+
+    Returns:
+        操作结果字符串
+
+    使用场景：
+    - 医生为患者设置定期用药提醒
+    - 患者需要设置多天连续的用药提醒
+    - 术后恢复期间的定时用药提醒
+
+    示例：
+    - 滴眼液提醒：medical_type="DROP", time="08:00:00", duration=7
+    - 口服药提醒：medical_type="PILL", time="09:00:00", duration=14
+
+    业务规则：
+    - 如果当天指定时间已过，则从明天开始生成，持续天数顺延
+    - 每个提醒自动关联一个日程
+    """
+    try:
+        logger.info(
+            f"[Tool] create_medical_reminder: patient_id={patient_id}, "
+            f"title={title}, type={medical_type}, time={time}, duration={duration}"
+        )
+
+        # 参数验证：medical_type 枚举
+        medical_type = medical_type.upper()
+        valid_types = {"DROP", "PILL", "CAPSULE", "INJECT"}
+        if medical_type not in valid_types:
+            error_msg = (
+                f"药品类型 '{medical_type}' 无效，"
+                f"可选值：DROP(滴剂)/PILL(药片)/CAPSULE(胶囊)/INJECT(注射)"
+            )
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
+
+        # 参数验证：time 格式 (HH:mm:ss)
+        try:
+            datetime.strptime(time, "%H:%M:%S")
+        except ValueError:
+            error_msg = f"用药时间格式错误: {time}，请使用格式 HH:mm:ss（如 08:30:00）"
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
+
+        # 参数验证：duration > 0
+        if duration <= 0:
+            error_msg = f"持续天数必须大于0，当前值: {duration}"
+            logger.warning(f"[Tool Warning] {error_msg}")
+            return error_msg
+
+        request_data = {
+            "patientId": patient_id,
+            "title": title,
+            "content": content,
+            "medicalType": medical_type,
+            "time": time,
+            "duration": duration,
+        }
+
+        client = get_api_client()
+        client.create_medical_reminder(request_data)
+
+        # 此API的data为null，成功不抛异常即表示成功
+        type_names = {"DROP": "滴剂", "PILL": "药片", "CAPSULE": "胶囊", "INJECT": "注射"}
+        type_name = type_names.get(medical_type, medical_type)
+        success_msg = f"已成功为患者创建 {duration} 天的用药提醒（{title}，{type_name}），每天 {time} 提醒用药。"
+        logger.info(f"[Tool Success] create_medical_reminder: {duration} 天提醒已创建")
+        return success_msg
+
+    except (APIError, NetworkError) as e:
+        error_msg = f"创建用药提醒失败: {str(e)}"
         logger.error(f"[Tool Error] {error_msg}")
         return error_msg
 
@@ -655,6 +801,7 @@ COMMON_TOOLS = [
 ]
 
 AGENT_1_TOOLS = COMMON_TOOLS + [
+    get_all_hospitals,
     get_patient_prescription,
     get_doctor_free_time,
     reserve_doctor,
@@ -674,6 +821,7 @@ AGENT_3_TOOLS = COMMON_TOOLS + [
     init_patient_reminder_config,
     modify_patient_reminder_config,
     create_reminder,
+    create_medical_reminder,
 ]
 
 # 所有工具的组合

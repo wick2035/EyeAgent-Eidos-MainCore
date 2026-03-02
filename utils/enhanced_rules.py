@@ -51,8 +51,14 @@ class EnhancedRuleEngine:
 
                 # 复诊/用药提醒
                 r'(复诊|复查|随访).*(提醒|通知)',
-                r'(用药|吃药|服药).*(提醒|时间)',
+                r'(用药|吃药|服药).*(提醒|时间|计划)',
                 r'(提醒.*)(复诊|用药|吃药)',
+                r'(连续|每天|每日).*(用药|吃药|服药|滴眼).*(提醒|计划)',
+                r'(创建|设置|添加).*(用药|吃药|服药).*(提醒|计划)',
+
+                # 时间延迟提醒（如"提醒我5分钟后..."，"1小时后提醒我..."）
+                r'提醒.{0,15}(\d+|一|两|三|四|五|六|七|八|九|十).*(分钟|小时|天|周|月)',
+                r'(\d+|一|两|三|四|五|六|七|八|九|十).*(分钟|小时|天|周|月).*(后|之后).*(提醒|通知)',
             ],
 
             'compliance': [
@@ -249,8 +255,14 @@ class EnhancedRuleEngine:
                     scores[agent_type] += 1
                     matched_patterns[agent_type].append(pattern)
 
+        # 应用排除关键词惩罚到模式匹配分数
+        for agent_type in scores:
+            for exclude_kw in self.exclusion_keywords[agent_type]:
+                if exclude_kw in message:
+                    scores[agent_type] -= 1
+
         # 找到最高分
-        if max(scores.values()) == 0:
+        if max(scores.values()) <= 0:
             return {'agent_type': 'health', 'confidence': 0.0, 'reason': '无模式匹配'}
 
         max_agent = max(scores, key=scores.get)

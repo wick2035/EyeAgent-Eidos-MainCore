@@ -96,6 +96,30 @@ def reminder_agent_node(state: MedicalState) -> Dict[str, Any]:
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     tool_calls.extend(msg.tool_calls)
 
+        # 若 LLM 未生成文本回复，从工具调用结果中构造准确的成功/失败消息
+        if not ai_response:
+            from langchain_core.messages import ToolMessage
+            import json
+            _CREATE_TOOLS = {"create_reminder", "create_medical_reminder"}
+            _CONFIG_TOOLS = {"init_patient_reminder_config", "modify_patient_reminder_config"}
+            _VIEW_TOOLS = {"get_patient_reminder", "get_patient_reminder_config"}
+            for msg in response_messages:
+                if isinstance(msg, ToolMessage):
+                    try:
+                        data = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    except Exception:
+                        data = {}
+                    success = (data.get("code") == 200 or "成功" in str(msg.content))
+                    if msg.name in _CREATE_TOOLS:
+                        ai_response = "好的，提醒已为您创建成功！" if success else f"提醒创建失败，请稍后再试。({data.get('msg', '')})"
+                        break
+                    elif msg.name in _CONFIG_TOOLS:
+                        ai_response = "提醒设置已更新。" if success else f"设置更新失败。({data.get('msg', '')})"
+                        break
+                    elif msg.name in _VIEW_TOOLS:
+                        ai_response = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        break
+
         # 检测状态变更
         new_stage = _detect_reminder_stage(state, ai_response, tool_calls)
         reminder_created = _check_reminder_created(tool_calls, response_messages)
@@ -132,7 +156,7 @@ def _detect_reminder_stage(
     tool_names = [tc.get("name", "") for tc in tool_calls if isinstance(tc, dict)]
 
     # 创建提醒完成
-    if "create_reminder" in tool_names:
+    if "create_reminder" in tool_names or "create_medical_reminder" in tool_names:
         return "completed"
 
     # 配置更新
@@ -157,11 +181,11 @@ def _detect_reminder_stage(
 def _check_reminder_created(tool_calls: list, messages: list) -> bool:
     """检查是否创建了提醒"""
     for tc in tool_calls:
-        if isinstance(tc, dict) and tc.get("name") == "create_reminder":
+        if isinstance(tc, dict) and tc.get("name") in ("create_reminder", "create_medical_reminder"):
             return True
 
     for msg in messages:
-        if hasattr(msg, "name") and msg.name == "create_reminder":
+        if hasattr(msg, "name") and msg.name in ("create_reminder", "create_medical_reminder"):
             content = getattr(msg, "content", "")
             if "成功" in content or '"id"' in content:
                 return True
