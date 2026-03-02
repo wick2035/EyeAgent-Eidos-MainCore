@@ -2,11 +2,14 @@
 RecommendationAgent API Schemas
 医药产品推荐Agent请求/响应模型
 
-包含产品卡片(ProductCard)、交互选项(OptionItem)、UI元素(UIElements)等结构化模型
+ProductCard 为推荐Agent专用模型。
+OptionItem、UIElements 从 ui_schemas.py 共享导入。
 """
 import re
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, field_validator
+
+from presentation.schemas.ui_schemas import OptionItem, UIElements
 
 # UUID格式正则表达式
 UUID_PATTERN = re.compile(
@@ -15,7 +18,7 @@ UUID_PATTERN = re.compile(
 )
 
 
-# ========== UI 结构化元素模型 ==========
+# ========== 推荐Agent专用模型 ==========
 
 class ProductCard(BaseModel):
     """产品推荐卡片"""
@@ -32,22 +35,6 @@ class ProductCard(BaseModel):
     is_prescription: bool = Field(False, description="是否需要处方")
     action_type: str = Field(..., description="操作类型: ADD_TO_CART/PRESCRIBE/VIEW_DETAIL")
     action_label: str = Field(..., description="操作按钮文本")
-
-
-class OptionItem(BaseModel):
-    """交互选项"""
-    option_id: str = Field(..., description="选项唯一ID")
-    label: str = Field(..., description="选项显示文本")
-    value: str = Field(..., description="选项值（发送回AI的内容）")
-    description: Optional[str] = Field(None, description="选项说明")
-    icon: Optional[str] = Field(None, description="图标标识")
-
-
-class UIElements(BaseModel):
-    """UI结构化元素"""
-    product_cards: Optional[List[ProductCard]] = Field(None, description="产品卡片列表")
-    options: Optional[List[OptionItem]] = Field(None, description="交互选项列表")
-    ui_type: str = Field("none", description="UI类型: product_cards/options/none")
 
 
 # ========== 请求/响应模型 ==========

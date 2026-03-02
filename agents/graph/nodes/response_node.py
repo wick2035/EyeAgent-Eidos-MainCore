@@ -3,6 +3,7 @@
 
 处理 Agent 响应的后处理，包括格式化、日志记录等。
 """
+import re
 import logging
 from typing import Dict, Any
 
@@ -36,6 +37,13 @@ def response_node(state: MedicalState) -> Dict[str, Any]:
         f"response_len={len(last_response)}"
     )
 
+    # === 清理原始 ID ===
+    if last_response:
+        cleaned = _strip_ids_from_response(last_response)
+        if cleaned != last_response:
+            logger.info("[ResponseNode] 已从响应中清理原始ID")
+            last_response = cleaned
+
     # === 输出安全校验 ===
     from utils.input_guard import check_output_safety
 
@@ -51,8 +59,25 @@ def response_node(state: MedicalState) -> Dict[str, Any]:
                 "messages": [AIMessage(content=output_check["sanitized_response"])],
             }
 
+    # 响应内容为空时的兜底处理
+    if not last_response:
+        fallback = "抱歉，我没有生成有效回复，请重新提问。"
+        logger.warning(f"[ResponseNode] 响应为空 (agent={current_agent}, stage={stage})，返回兜底消息")
+        return {
+            "is_completed": True,
+            "last_response": fallback,
+            "messages": [AIMessage(content=fallback)],
+        }
+
     # 每次 invoke 处理一条消息，处理完毕后标记完成
     # 多轮对话通过多次 invoke() 调用实现
+    # 如果响应被清理过（去除了ID），需要更新 state
+    if last_response != state.get("last_response", ""):
+        return {
+            "is_completed": True,
+            "last_response": last_response,
+            "messages": [AIMessage(content=last_response)],
+        }
     return {"is_completed": True}
 
 
@@ -138,3 +163,30 @@ def format_response_node(state: MedicalState) -> Dict[str, Any]:
         }
 
     return {}
+
+
+def _strip_ids_from_response(text: str) -> str:
+    """
+    从用户可见的响应文本中清除原始 UUID / 数据库 ID
+
+    Args:
+        text: 响应文本
+
+    Returns:
+        清理后的文本
+    """
+    # 标准 UUID 格式 (8-4-4-4-12)
+    text = re.sub(
+        r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',
+        '', text
+    )
+    # 32 位无横线 hex 字符串
+    text = re.sub(r'\b[0-9a-fA-F]{32}\b', '', text)
+    # 清理残留的 ID 标签（如 "doctorId: " 后面已无值）
+    text = re.sub(
+        r'(?:doctorId|hospitalId|patientId|appointmentId|id)\s*[:：]\s*(?=[,，。\s\n]|$)',
+        '', text, flags=re.IGNORECASE
+    )
+    # 合并多余空格
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()

@@ -54,15 +54,15 @@ class SiliconFlowChatOpenAI(ChatOpenAI):
 def get_llm():
     """
     获取配置好的LLM实例（业务Agent专用）
-    硅基流动平台使用OpenAI兼容接口
+    阿里云DashScope平台使用OpenAI兼容接口
     """
-    api_key = os.getenv("SILICONFLOW_API_KEY")
-    base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-32B-Instruct")  # 业务Agent使用32B
-    
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    model_name = os.getenv("ALIYUN_MODEL_NAME", "qwen3.5-plus")
+
     if not api_key:
-        raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
-    
+        raise ValueError("未找到DASHSCOPE_API_KEY环境变量，请在.env文件中配置")
+
     llm = SiliconFlowChatOpenAI(
         model=model_name,
         openai_api_key=api_key,
@@ -70,6 +70,7 @@ def get_llm():
         temperature=0.7,
         max_tokens=2000,
         streaming=False,
+        extra_body={"enable_thinking": False},
     )
 
     return llm
@@ -79,12 +80,12 @@ def get_streaming_llm():
     """
     获取支持流式输出的LLM实例（业务Agent专用）
     """
-    api_key = os.getenv("SILICONFLOW_API_KEY")
-    base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-32B-Instruct")  # 业务Agent使用32B
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    model_name = os.getenv("ALIYUN_MODEL_NAME", "qwen3.5-plus")
 
     if not api_key:
-        raise ValueError("未找到SILICONFLOW_API_KEY环境变量，请在.env文件中配置")
+        raise ValueError("未找到DASHSCOPE_API_KEY环境变量，请在.env文件中配置")
 
     llm = SiliconFlowChatOpenAI(
         model=model_name,
@@ -93,6 +94,7 @@ def get_streaming_llm():
         temperature=0.7,
         max_tokens=2000,
         streaming=True,
+        extra_body={"enable_thinking": False},
     )
 
     return llm

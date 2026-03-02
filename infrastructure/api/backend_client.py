@@ -157,6 +157,23 @@ class BackendAPIClient:
         return self._request('POST', '/agent/api/reserve-doctor',
                             json=request_data)
 
+    def get_all_hospitals(self) -> list:
+        """
+        获取所有医院信息列表
+
+        Returns:
+            医院列表 List[HospitalSimpleResponse]，每个元素包含:
+                - id: 医院UUID
+                - hospitalName: 医院名称
+                - province: 省份
+                - city: 城市
+                - address: 详细地址
+                - hospitalType: 医院类型 (GENERAL/SPECIALIZED等)
+                - hospitalLevel: 医院等级 (TERTIARY_A/TERTIARY_B等)
+                - star: 评分 (0-5)
+        """
+        return self._request('GET', '/agent/api/all-hospitals')
+
     # ========== Agent 2 报告/处方相关方法 ==========
 
     def get_patient_prescription_limit(self, patient_id: str,
@@ -298,6 +315,30 @@ class BackendAPIClient:
             创建的Reminder对象
         """
         return self._request('POST', '/agent/api/create-reminder',
+                            json=request_data)
+
+    def create_medical_reminder(self, request_data: Dict[str, Any]) -> Any:
+        """
+        批量创建用药提醒（含关联日程）
+
+        根据指定的用药时间和持续天数，自动生成多天的 Reminder 和对应的 Agenda。
+
+        Args:
+            request_data: 创建请求数据，格式：
+                {
+                    "patientId": "患者UUID",
+                    "title": "药品名称",
+                    "content": "用药说明",
+                    "medicalType": "DROP/PILL/CAPSULE/INJECT",
+                    "time": "HH:mm:ss",
+                    "duration": 7
+                }
+
+        Returns:
+            None（此API的data为null，成功信息在msg中，
+            _request返回data字段即None，不抛异常即表示成功）
+        """
+        return self._request('POST', '/agent/api/create-medical-reminder',
                             json=request_data)
 
     # ========== 患者管理相关方法 ==========

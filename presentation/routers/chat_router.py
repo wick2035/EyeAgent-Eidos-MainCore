@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
+from utils.ui_element_parser import parse_options_only
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,9 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # GraphManager 单例
 graph_manager = get_graph_manager()
+
+# 患者模式下支持OPTIONS选择框的Agent类型
+_AGENTS_WITH_OPTIONS = {"health", "reminder", "report"}
 
 
 @router.post("", response_model=ChatResponse)
@@ -80,17 +84,27 @@ async def chat(request: ChatRequest) -> ChatResponse:
             agent_type=request.agent_type or "health",
         )
 
+        # 解析UI元素（仅患者模式的特定Agent）
+        raw_response = result["response"]
+        ui_elements = None
+        role = request.role or "patient"
+        agent = result["agent_type"]
+
+        if role == "patient" and agent in _AGENTS_WITH_OPTIONS:
+            raw_response, ui_elements = parse_options_only(raw_response)
+
         # 构建响应
         return ChatResponse(
-            response=result["response"],
+            response=raw_response,
             session_id=session_id,
             conversation_id=conversation_id,
             is_completed=result["is_completed"],
             stage=result["stage"],
-            agent_type=result["agent_type"],
+            agent_type=agent,
+            ui_elements=ui_elements,
             metadata={
                 "patient_id": request.patient_id,
-                "role": request.role or "patient",
+                "role": role,
                 "thread_id": result.get("thread_id", ""),
                 "version": "langgraph",
             }
@@ -424,8 +438,27 @@ async def chat_stream(request: ChatRequest):
                 elif event_type == "error":
                     yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
 
+            # 解析UI元素（仅患者模式的特定Agent）
+            role = request.role or "patient"
+            ui_elements_data = None
+            if role == "patient" and current_agent in _AGENTS_WITH_OPTIONS:
+                full_response, ui_elements = parse_options_only(full_response)
+                if ui_elements:
+                    ui_elements_data = ui_elements.model_dump(exclude_none=True)
+                    yield f"data: {json.dumps({'event': 'ui_elements', **ui_elements_data})}\n\n"
+
             # 发送完成事件
-            yield f"data: {json.dumps({'event': 'done', 'response': full_response, 'agent_type': current_agent, 'stage': current_stage, 'session_id': session_id, 'conversation_id': conversation_id})}\n\n"
+            done_data = {
+                'event': 'done',
+                'response': full_response,
+                'agent_type': current_agent,
+                'stage': current_stage,
+                'session_id': session_id,
+                'conversation_id': conversation_id,
+            }
+            if ui_elements_data:
+                done_data['ui_elements'] = ui_elements_data
+            yield f"data: {json.dumps(done_data)}\n\n"
 
         except Exception as e:
             logger.error(f"[ChatRouter] 流式对话失败: {e}", exc_info=True)

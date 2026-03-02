@@ -5,6 +5,8 @@ import re
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 
+from presentation.schemas.ui_schemas import UIElements
+
 # UUID格式正则表达式（支持带连字符和不带连字符两种格式）
 UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$',
@@ -78,6 +80,7 @@ class ChatResponse(BaseModel):
     is_completed: bool = Field(..., description="对话是否完成")
     stage: str = Field(..., description="当前对话阶段")
     agent_type: str = Field(..., description="当前使用的Agent类型")
+    ui_elements: Optional[UIElements] = Field(None, description="结构化UI元素（交互选项）")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="附加元数据")
 
     class Config:
