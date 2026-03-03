@@ -90,7 +90,13 @@ _DOCTOR_MODE_PROMPT = """你是小Report，一位专业的医疗报告助手，�
 # ========== 阶段提示词 ==========
 
 _PATIENT_STAGE_PROMPTS = {
-    "greeting": "问候患者，了解需求。使用[OPTIONS]提供查看选择：处方记录/就诊历史/检查对比",
+    "greeting": (
+        "根据【患者信息】中的姓名称呼患者（如：张先生、李女士），自然回应用户实际输入的内容："
+        "若用户直接说了查报告/看处方/就诊历史等需求，直接进入查询，不做自我介绍；"
+        "若用户询问你是谁/你叫什么，介绍自己是小Report，专业医疗报告助手；"
+        "若用户未说明需求，以姓名友好问候并用[OPTIONS]提供选择（处方记录/就诊历史/检查对比）。"
+        "若【患者信息】中无姓名则用您称呼。"
+    ),
     "select_action": "询问患者想要查看什么。使用[OPTIONS]提供选择：处方记录/就诊历史/检查对比",
     "generate_report": "正在生成报告",
     "analyze_history": "正在分析历史记录",
@@ -121,10 +127,11 @@ def get_report_system_prompt(role: str = "patient") -> str:
         系统提示词字符串
     """
     from utils.input_guard import SECURITY_DIRECTIVE
+    from agents.prompts._shared import SHARED_ID_PROHIBITION, SHARED_PERSONALIZATION
 
     if role == "doctor":
-        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT
-    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
+        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT + SHARED_ID_PROHIBITION
+    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT + SHARED_ID_PROHIBITION + SHARED_PERSONALIZATION
 
 
 def get_report_stage_prompt(stage: str, role: str = "patient") -> str:

@@ -21,11 +21,12 @@ def get_recommendation_system_prompt(role: str = "patient") -> str:
         系统提示词字符串
     """
     from utils.input_guard import SECURITY_DIRECTIVE
+    from agents.prompts._shared import SHARED_ID_PROHIBITION, SHARED_PERSONALIZATION
 
     if role == "doctor":
-        return SECURITY_DIRECTIVE + "\n" + _get_doctor_system_prompt()
+        return SECURITY_DIRECTIVE + "\n" + _get_doctor_system_prompt() + SHARED_ID_PROHIBITION + SHARED_PERSONALIZATION
     else:
-        return SECURITY_DIRECTIVE + "\n" + _get_patient_system_prompt()
+        return SECURITY_DIRECTIVE + "\n" + _get_patient_system_prompt() + SHARED_ID_PROHIBITION + SHARED_PERSONALIZATION
 
 
 def _get_doctor_system_prompt() -> str:
@@ -92,7 +93,9 @@ def _get_doctor_system_prompt() -> str:
 - 所有推荐产品的action_type使用"PRESCRIBE"，action_label使用"开具处方"
 - 产品卡片数据必须来自工具调用的真实结果，不要凭空编造产品
 - 每次最多推荐3-5个产品
-- 先给出文字分析和推荐理由，再输出产品卡片"""
+- 先给出文字分析和推荐理由，再输出产品卡片
+
+"""
 
 
 def _get_patient_system_prompt() -> str:
@@ -164,7 +167,9 @@ def _get_patient_system_prompt() -> str:
 - 语言友好通俗，避免过多专业术语
 - 每次最多推荐3-5个产品
 - 在初次对话时使用[OPTIONS]引导患者选择需求类型
-- 先给出文字建议和说明，再输出产品卡片或选项"""
+- 先给出文字建议和说明，再输出产品卡片或选项
+
+"""
 
 
 def get_recommendation_stage_prompt(stage: str, role: str = "patient") -> str:
@@ -187,12 +192,13 @@ def get_recommendation_stage_prompt(stage: str, role: str = "patient") -> str:
 def _get_doctor_stage_prompt(stage: str) -> str:
     """医生端阶段提示词"""
     stage_prompts = {
-        "greeting": """当前阶段：问候与需求了解
-- 问候医生，了解推荐需求
-- 确认要推荐产品的患者
-- 使用[OPTIONS]提供选择：全科推荐/特定病症推荐/器械推荐
-- 例如询问："您需要针对哪位患者的什么诊断推荐产品？"
-""",
+        "greeting": (
+            "当前阶段：需求了解\n"
+            "根据【患者信息】中的患者姓名确认当前操作对象，自然回应医生实际输入的内容：\n"
+            "若医生明确说了推荐需求，直接进入操作，无需自我介绍；\n"
+            "若医生询问你是谁/你叫什么，介绍自己是小Eye产品推荐助手；\n"
+            "否则提供[OPTIONS]选择（全科推荐/特定病症推荐/器械推荐）并询问针对哪位患者的什么诊断。\n"
+        ),
         "diagnosis_review": """当前阶段：诊断分析
 - 使用 get_patient_diagnosis_summary 获取患者诊断信息
 - 使用 get_patient_prescription_detail 查看当前用药
@@ -230,15 +236,15 @@ def _get_doctor_stage_prompt(stage: str) -> str:
 def _get_patient_stage_prompt(stage: str) -> str:
     """患者端阶段提示词"""
     stage_prompts = {
-        "greeting": """当前阶段：问候与需求引导
-- 友好问候患者
-- 使用[OPTIONS]提供常见需求选择，例如：
-  - 眼睛干涩/疲劳
-  - 近视防控
-  - 眼部感染/发炎
-  - 日常护理
-  - 其他症状
-""",
+        "greeting": (
+            "当前阶段：需求引导\n"
+            "根据【患者信息】中的姓名称呼患者（如：张先生、李女士），自然回应用户实际输入的内容：\n"
+            "若用户说明了购药/产品需求，直接进入需求了解，无需自我介绍；\n"
+            "若用户询问你是谁/你叫什么，介绍自己是小Eye购药助手；\n"
+            "若用户未说明需求，以姓名友好问候并用[OPTIONS]提供常见需求选择"
+            "（眼睛干涩/疲劳、近视防控、眼部感染/发炎、日常护理、其他症状）。\n"
+            "若【患者信息】中无姓名则用您称呼。\n"
+        ),
         "need_inquiry": """当前阶段：需求了解
 - 患者已选择了需求类型
 - 使用[OPTIONS]进一步细化，或通过文本对话了解详情

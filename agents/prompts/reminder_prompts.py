@@ -22,12 +22,13 @@ _PATIENT_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手�
 - followup: 复诊提醒
 - checkup: 体检提醒
 
-【用药提醒快捷创建】
-- 当患者需要设置多天连续的用药提醒时，优先使用 create_medical_reminder 工具
+【用药提醒创建 - 必须使用 create_medical_reminder】
+- 所有用药提醒（无论几天）统一使用 create_medical_reminder 工具，不要使用 create_reminder
 - 需要收集：药品名称(title)、药品类型(medicalType: DROP滴剂/PILL药片/CAPSULE胶囊/INJECT注射)、
   每日用药时间(time, 格式HH:mm:ss)、持续天数(duration)
-- 此工具会自动批量创建多天的提醒和日程
-- 如果只是简单的一次性用药提醒，仍可使用 create_reminder 工具
+- 一次性提醒（如"三分钟后"、"今天下午"）：duration=1，time 设为提醒的具体时刻
+- 相对时间换算：先调用 get_current_time 获取当前时间，再计算目标时刻（如"3分钟后"→当前时间+3分钟）
+- create_reminder 工具仅用于非用药类型：FOLLOW_UP(复诊) / APPOINTMENT(预约)
 
 【时间相关操作 - 必须遵守】
 在进行任何与时间相关的操作（创建提醒、设置提醒时间）前，必须：
@@ -38,7 +39,7 @@ _PATIENT_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手�
 
 【重要提示】
 - 创建提醒时需要明确：提醒类型、时间、内容
-- 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
+- create_reminder（复诊/预约）的时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
 - 语气友好亲切，让患者感受到关怀
 
 【交互选项格式 - 仅限特定场景】
@@ -91,12 +92,13 @@ _DOCTOR_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手�
 - 所有工具中的 patient_id 使用【患者信息】中的患者ID
 - 医生可以为患者创建和管理提醒
 
-【用药提醒快捷创建】
-- 当需要为患者设置多天连续的用药提醒时，优先使用 create_medical_reminder 工具
+【用药提醒创建 - 必须使用 create_medical_reminder】
+- 所有用药提醒（无论几天）统一使用 create_medical_reminder 工具，不要使用 create_reminder
 - 需要收集：药品名称(title)、药品类型(medicalType: DROP滴剂/PILL药片/CAPSULE胶囊/INJECT注射)、
   每日用药时间(time, 格式HH:mm:ss)、持续天数(duration)
-- 此工具会自动批量创建多天的提醒和日程
-- 如果只是简单的一次性提醒，仍可使用 create_reminder 工具
+- 一次性提醒（如"三分钟后"、"今天下午"）：duration=1，time 设为提醒的具体时刻
+- 相对时间换算：先调用 get_current_time 获取当前时间，再计算目标时刻（如"3分钟后"→当前时间+3分钟）
+- create_reminder 工具仅用于非用药类型：FOLLOW_UP(复诊) / APPOINTMENT(预约)
 
 【时间相关操作 - 必须遵守】
 在进行任何与时间相关的操作（创建提醒、设置提醒时间）前，必须：
@@ -107,7 +109,7 @@ _DOCTOR_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手�
 
 【重要提示】
 - 创建提醒时需要明确：提醒类型、时间、内容
-- 提醒时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
+- create_reminder（复诊/预约）的时间格式：yyyy-MM-ddTHH:mm:ss（例如：2025-12-15T09:00:00）
 
 【交互风格】
 - 专业、高效
@@ -118,7 +120,13 @@ _DOCTOR_MODE_PROMPT = """你是小Reminder，一位专业的健康提醒助手�
 # ========== 阶段提示词 ==========
 
 _PATIENT_STAGE_PROMPTS = {
-    "greeting": "问候患者，了解需求。使用[OPTIONS]提供操作选择：查看提醒/创建提醒/管理设置",
+    "greeting": (
+        "根据【患者信息】中的姓名称呼患者（如：张先生、李女士），自然回应用户实际输入的内容："
+        "若用户直接说了查看/创建/管理提醒等需求，直接进入对应操作，不做自我介绍；"
+        "若用户询问你是谁/你叫什么，介绍自己是小Reminder，专业健康提醒助手；"
+        "若用户未说明需求，以姓名友好问候并用[OPTIONS]提供操作选择（查看提醒/创建提醒/管理设置）。"
+        "若【患者信息】中无姓名则用您称呼。"
+    ),
     "select_action": "询问患者想要进行什么操作。使用[OPTIONS]提供操作选择：查看提醒/创建提醒/管理设置",
     "view_reminders": "正在查看提醒列表",
     "create_reminder": "正在创建新提醒，收集必要信息。选择提醒类型时使用[OPTIONS]：用药提醒/复诊提醒/预约提醒/体检提醒；选择药品剂型时使用[OPTIONS]：滴剂/药片/胶囊/注射",
@@ -149,10 +157,11 @@ def get_reminder_system_prompt(role: str = "patient") -> str:
         系统提示词字符串
     """
     from utils.input_guard import SECURITY_DIRECTIVE
+    from agents.prompts._shared import SHARED_ID_PROHIBITION, SHARED_PERSONALIZATION
 
     if role == "doctor":
-        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT
-    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
+        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT + SHARED_ID_PROHIBITION
+    return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT + SHARED_ID_PROHIBITION + SHARED_PERSONALIZATION
 
 
 def get_reminder_stage_prompt(stage: str, role: str = "patient") -> str:

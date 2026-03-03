@@ -919,6 +919,41 @@ class GraphManager:
         # 添加用户消息
         state["messages"] = [HumanMessage(content=message)]
 
+        # 加载患者基本信息（每轮注入，确保 Agent 始终持有真实患者数据）
+        try:
+            from infrastructure.api.backend_client import get_api_client
+            client = get_api_client()
+            medical_data = client.get_medical_records(patient_id)
+            patient_raw = medical_data.get("patient", {}) if medical_data else {}
+            if patient_raw:
+                # 将后端字段名统一映射到 domain 字段名
+                _gender_map = {
+                    "male": "男", "female": "女",
+                    "MALE": "男", "FEMALE": "女",
+                }
+                raw_gender = str(patient_raw.get("gender", ""))
+                state["patient_info"] = {
+                    "name": patient_raw.get("patientName") or patient_raw.get("name", ""),
+                    "age": patient_raw.get("age"),
+                    "gender": _gender_map.get(raw_gender, raw_gender),
+                    "phone": patient_raw.get("phone", ""),
+                    "medical_history": (
+                        patient_raw.get("medicalHistory") or patient_raw.get("medical_history")
+                    ),
+                    "allergy_history": (
+                        patient_raw.get("allergyHistory") or patient_raw.get("allergy_history")
+                    ),
+                    "family_history": (
+                        patient_raw.get("familyHistory") or patient_raw.get("family_history")
+                    ),
+                }
+                logger.debug(
+                    f"[GraphManager] 患者信息加载成功: {state['patient_info'].get('name')}"
+                )
+        except Exception as _e:
+            logger.warning(f"[GraphManager] 加载患者信息失败，将继续执行: {_e}")
+            # patient_info 保持 None，各 agent 的 context builder 会优雅降级
+
         # 合并额外参数
         for key, value in kwargs.items():
             if key in state:

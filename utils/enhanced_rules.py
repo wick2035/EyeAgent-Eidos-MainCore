@@ -212,7 +212,9 @@ class EnhancedRuleEngine:
             critical_stages = [
                 'symptom_assessment', 'appointment_inquiry',
                 'patient_info_collection', 'ophthalmology_triage',
-                'medical_history', 'appointment_booking'
+                'medical_history', 'appointment_booking',
+                # reminder agent 中间阶段保护
+                'select_action', 'create_reminder', 'view_reminders', 'config_settings'
             ]
 
             if current_stage in critical_stages:

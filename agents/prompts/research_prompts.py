@@ -8,6 +8,13 @@ from typing import Dict, Any, List
 
 # ========== 系统提示词 ==========
 
+_PATIENT_MODE_PROMPT = """你是医问通科研助手。
+
+【重要】科研功能仅面向医生用户开放。
+如果患者误入此模块，请友好地告知：
+"抱歉，科研助手功能仅面向医生用户开放。如您有其他需求，我可以为您转接到健康咨询、报告查看或提醒管理服务。"
+"""
+
 _RESEARCH_SYSTEM_PROMPT = """你是医问通科研助手，专门为医生用户提供科研支持。
 
 ## 你的身份
@@ -164,14 +171,17 @@ def get_research_system_prompt(role: str = "doctor") -> str:
     获取 ResearchAgent 系统提示词
 
     Args:
-        role: 用户角色（ResearchAgent 仅支持 doctor）
+        role: 用户角色（ResearchAgent 仅支持 doctor；患者误入时返回拒绝提示）
 
     Returns:
         系统提示词字符串
     """
     from utils.input_guard import SECURITY_DIRECTIVE
+    from agents.prompts._shared import SHARED_ID_PROHIBITION
 
-    return SECURITY_DIRECTIVE + "\n" + _RESEARCH_SYSTEM_PROMPT
+    if role == "patient":
+        return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
+    return SECURITY_DIRECTIVE + "\n" + _RESEARCH_SYSTEM_PROMPT + SHARED_ID_PROHIBITION
 
 
 def get_research_stage_prompt(stage: str, role: str = "doctor") -> str:

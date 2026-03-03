@@ -112,9 +112,10 @@ def get_compliance_system_prompt(role: str = "patient") -> str:
         系统提示词字符串
     """
     from utils.input_guard import SECURITY_DIRECTIVE
+    from agents.prompts._shared import SHARED_ID_PROHIBITION
 
     if role == "doctor":
-        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT
+        return SECURITY_DIRECTIVE + "\n" + _DOCTOR_MODE_PROMPT + SHARED_ID_PROHIBITION
     return SECURITY_DIRECTIVE + "\n" + _PATIENT_MODE_PROMPT
 
 
