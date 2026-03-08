@@ -99,3 +99,22 @@ def get_streaming_llm():
 
     return llm
 
+
+def get_pdf_analysis_llm():
+    """
+    获取PDF页面视觉分析LLM实例
+    使用硅基流动平台的 Qwen3.5-397B-A17B 大参数VLM
+    专用于将PDF转图片后的多图视觉分析，不绑定工具
+    """
+    api_key = os.getenv("SILICON_FLOW_API_KEY")
+    if not api_key:
+        raise ValueError("未找到SILICON_FLOW_API_KEY环境变量，请在.env文件中配置")
+
+    return ChatOpenAI(
+        model="Qwen/Qwen3.5-397B-A17B",
+        openai_api_key=api_key,
+        openai_api_base="https://api.siliconflow.cn/v1",
+        temperature=0.3,
+        max_tokens=4000,
+    )
+

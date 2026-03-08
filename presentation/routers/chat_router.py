@@ -13,6 +13,7 @@ from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
 from utils.ui_element_parser import parse_options_only
+from utils.attachment_analyzer import analyze_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
             )
             logger.info(f"[ChatRouter] 创建新会话: {conversation_id}")
 
+        # 附件预分析（如有附件，同步调用视觉/文档模型，得到分析文本）
+        attachments_raw = []
+        attachment_analysis = ""
+        if request.attachments:
+            attachments_raw = [a.model_dump() for a in request.attachments]
+            logger.info(f"[ChatRouter] 开始预分析附件，数量={len(attachments_raw)}")
+            attachment_analysis = analyze_attachments(attachments_raw, request.message)
+            logger.info(f"[ChatRouter] 附件预分析完成，分析长度={len(attachment_analysis)}")
+
         # 使用 GraphManager 处理对话
         result = graph_manager.chat(
             patient_id=request.patient_id,
@@ -82,6 +92,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
             doctor_id=request.doctor_id,
             conversation_id=conversation_id,
             agent_type=request.agent_type or "health",
+            attachments=attachments_raw,
+            attachment_analysis=attachment_analysis,
         )
 
         # 解析UI元素（仅患者模式的特定Agent）
@@ -385,6 +397,15 @@ async def chat_stream(request: ChatRequest):
             thread_config = get_thread_config(session_id, conversation_id)
             thread_id = thread_config["configurable"]["thread_id"]
 
+            # 附件预分析（在第一个 SSE token 之前完成）
+            attachments_raw = []
+            attachment_analysis = ""
+            if request.attachments:
+                attachments_raw = [a.model_dump() for a in request.attachments]
+                logger.info(f"[ChatRouter/Stream] 开始预分析附件，数量={len(attachments_raw)}")
+                attachment_analysis = analyze_attachments(attachments_raw, request.message)
+                logger.info(f"[ChatRouter/Stream] 附件预分析完成，分析长度={len(attachment_analysis)}")
+
             # 发送开始事件
             yield f"data: {json.dumps({'event': 'start', 'session_id': session_id, 'conversation_id': conversation_id, 'thread_id': thread_id})}\n\n"
 
@@ -404,6 +425,8 @@ async def chat_stream(request: ChatRequest):
                 doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 agent_type=request.agent_type or "health",
+                attachments=attachments_raw,
+                attachment_analysis=attachment_analysis,
             ):
                 event_type = chunk.get("type", "")
                 content = chunk.get("content", "")

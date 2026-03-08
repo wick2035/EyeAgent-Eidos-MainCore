@@ -2,10 +2,29 @@
 聊天相关的Pydantic Schema
 """
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, field_validator
 
 from presentation.schemas.ui_schemas import UIElements
+
+
+class PageImage(BaseModel):
+    """PDF 单页图片数据"""
+    base64: str = Field(..., description="JPEG 图片的 base64 字符串")
+    mime_type: str = Field("image/jpeg", description="图片 MIME 类型")
+    page: int = Field(..., description="页码（从 1 开始）")
+
+
+class AttachmentRef(BaseModel):
+    """附件引用 - 由前端在 /api/upload 响应后构造，随 ChatRequest 发送"""
+    file_type: str = Field(..., description="附件类型: 'image' | 'pdf'")
+    filename: str = Field(..., description="原始文件名")
+    minio_url: Optional[str] = Field(None, description="MinIO 备份 URL（不传给 AI，仅记录）")
+    # 图片专用
+    base64: Optional[str] = Field(None, description="图片 base64 字符串（不含 data: 前缀）")
+    mime_type: Optional[str] = Field(None, description="图片 MIME 类型，如 image/jpeg")
+    # PDF 专用
+    page_images: Optional[List[PageImage]] = Field(None, description="PDF 各页图片列表")
 
 # UUID格式正则表达式（支持带连字符和不带连字符两种格式）
 UUID_PATTERN = re.compile(
@@ -24,6 +43,7 @@ class ChatRequest(BaseModel):
     agent_type: Optional[str] = Field("health", description="Agent类型 (health/report/reminder/research/compliance/recommendation)")
     role: Optional[str] = Field("patient", description="用户角色 (patient/doctor)")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID（用于继续对话，为空则创建新会话）")
+    attachments: Optional[List[AttachmentRef]] = Field(None, description="附件列表（图片/PDF），由前端通过 /api/upload 上传后附带")
 
     @field_validator('patient_id')
     @classmethod
