@@ -835,3 +835,58 @@ input:checked + .slider:before {
     animation: spin 1s linear infinite;
 }
 
+/* ── 麦克风按钮（PTT 语音识别） ───────────────────────────────────────── */
+.btn-mic {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.2s;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+.btn-mic:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(102, 126, 234, 0.35);
+}
+
+/* 录音中：红色脉冲 */
+.btn-mic.recording {
+    background: linear-gradient(135deg, #e74c3c, #c0392b);
+    animation: micPulse 1s ease-in-out infinite;
+}
+
+/* 识别处理中：灰色禁用 */
+.btn-mic.processing {
+    background: #aaa;
+    cursor: not-allowed;
+    animation: none;
+    transform: none;
+}
+
+.btn-mic:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+@keyframes micPulse {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.45);
+    }
+    50% {
+        transform: scale(1.08);
+        box-shadow: 0 0 0 10px rgba(231, 76, 60, 0);
+    }
+}
+

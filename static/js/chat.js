@@ -106,6 +106,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // 初始化身份UI
     updateRoleUI();
 
+    // 初始化麦克风 PTT 按钮
+    initMicButton();
+
     // 流式模式切换
     const streamingToggle = document.getElementById('streamingToggle');
     const streamingStatus = document.getElementById('streamingStatus');
@@ -923,3 +926,299 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// PTT（Push-to-Talk）语音识别模块
+// ════════════════════════════════════════════════════════════════════════════
+
+// PTT 状态变量
+let micAudioContext = null;
+let micScriptProcessor = null;
+let micStream = null;
+let micRecordedSamples = [];   // Float32 PCM 采样数组
+let micIsRecording = false;
+let micIsProcessing = false;
+
+/**
+ * 初始化麦克风按钮事件绑定。
+ * 支持鼠标（desktop）和触摸（mobile）两种交互方式。
+ */
+function initMicButton() {
+    const micBtn = document.getElementById('micBtn');
+    if (!micBtn) return;
+
+    // ── 桌面端：mouse events ──────────────────────────────────────────────
+    micBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        startRecording();
+    });
+
+    micBtn.addEventListener('mouseup', (e) => {
+        e.preventDefault();
+        stopRecordingAndSend();
+    });
+
+    // 防止鼠标移出时卡录音状态
+    micBtn.addEventListener('mouseleave', () => {
+        if (micIsRecording) {
+            stopRecordingAndSend();
+        }
+    });
+
+    // ── 移动端：touch events ──────────────────────────────────────────────
+    micBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        startRecording();
+    }, { passive: false });
+
+    micBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        stopRecordingAndSend();
+    }, { passive: false });
+
+    micBtn.addEventListener('touchcancel', () => {
+        if (micIsRecording) {
+            stopRecordingAndSend();
+        }
+    });
+}
+
+/**
+ * 设置麦克风按钮 UI 状态。
+ * @param {'idle'|'recording'|'processing'} state
+ */
+function setMicState(state) {
+    const micBtn = document.getElementById('micBtn');
+    const micIcon = document.getElementById('micIcon');
+    if (!micBtn || !micIcon) return;
+
+    micBtn.classList.remove('recording', 'processing');
+
+    switch (state) {
+        case 'recording':
+            micBtn.classList.add('recording');
+            micIcon.textContent = '🔴';
+            micBtn.disabled = false;
+            break;
+        case 'processing':
+            micBtn.classList.add('processing');
+            micIcon.textContent = '⏳';
+            micBtn.disabled = true;
+            break;
+        case 'idle':
+        default:
+            micIcon.textContent = '🎤';
+            micBtn.disabled = false;
+            break;
+    }
+}
+
+/**
+ * 开始录音：请求麦克风权限，创建 16kHz AudioContext，开始采集 PCM 样本。
+ */
+async function startRecording() {
+    // 防重入：正在录音或识别中时忽略
+    if (micIsRecording || micIsProcessing || isProcessing) return;
+
+    try {
+        // 请求麦克风权限
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                sampleRate: 16000,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true
+            }
+        });
+
+        // 创建 16kHz AudioContext（确保与 DashScope ASR 要求匹配）
+        micAudioContext = new AudioContext({ sampleRate: 16000 });
+        const source = micAudioContext.createMediaStreamSource(micStream);
+
+        // ScriptProcessorNode：每 4096 帧触发一次，获取原始 Float32 PCM
+        micScriptProcessor = micAudioContext.createScriptProcessor(4096, 1, 1);
+        micRecordedSamples = [];
+
+        micScriptProcessor.onaudioprocess = (e) => {
+            if (!micIsRecording) return;
+            const channelData = e.inputBuffer.getChannelData(0);
+            // Float32Array 转为普通数组追加（避免引用被覆盖）
+            for (let i = 0; i < channelData.length; i++) {
+                micRecordedSamples.push(channelData[i]);
+            }
+        };
+
+        source.connect(micScriptProcessor);
+        // 必须连接到 destination 才能触发 onaudioprocess
+        micScriptProcessor.connect(micAudioContext.destination);
+
+        micIsRecording = true;
+        setMicState('recording');
+        console.log('[ASR] 开始录音（16kHz）');
+
+    } catch (err) {
+        console.error('[ASR] 麦克风权限获取失败:', err);
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            addSystemMessage('⚠️ 请在浏览器中允许麦克风权限后再使用语音功能');
+        } else if (err.name === 'NotFoundError') {
+            addSystemMessage('⚠️ 未检测到麦克风设备，请连接麦克风后重试');
+        } else {
+            addSystemMessage('⚠️ 麦克风启动失败：' + err.message);
+        }
+        setMicState('idle');
+        _cleanupMic();
+    }
+}
+
+/**
+ * 停止录音，将采集的 PCM 样本打包为 WAV Blob，提交识别。
+ */
+async function stopRecordingAndSend() {
+    if (!micIsRecording) return;
+
+    micIsRecording = false;
+
+    // 停止 AudioContext 和媒体流
+    if (micScriptProcessor) {
+        micScriptProcessor.disconnect();
+        micScriptProcessor = null;
+    }
+    if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+    }
+    if (micAudioContext) {
+        try { await micAudioContext.close(); } catch (_) {}
+        micAudioContext = null;
+    }
+
+    const samples = micRecordedSamples;
+    micRecordedSamples = [];
+
+    console.log(`[ASR] 停止录音，采集 ${samples.length} 个样本（约 ${(samples.length / 16000).toFixed(1)}s）`);
+
+    // 样本太少（< 0.3s）直接忽略
+    if (samples.length < 4800) {
+        addSystemMessage('⚠️ 录音时间太短，请按住按钮说话');
+        setMicState('idle');
+        return;
+    }
+
+    // 打包 WAV Blob
+    const wavBlob = _createWAVBlob(new Float32Array(samples), 16000);
+
+    // 提交识别
+    micIsProcessing = true;
+    setMicState('processing');
+    await _sendAudioForTranscription(wavBlob);
+    micIsProcessing = false;
+    setMicState('idle');
+}
+
+/**
+ * 将 WAV Blob POST 到后端 /api/asr/transcribe，成功后自动发送消息。
+ * @param {Blob} wavBlob
+ */
+async function _sendAudioForTranscription(wavBlob) {
+    try {
+        const formData = new FormData();
+        formData.append('audio', wavBlob, 'recording.wav');
+
+        const res = await fetch('/api/asr/transcribe', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.text) {
+            const recognizedText = data.text.trim();
+            console.log('[ASR] 识别结果:', recognizedText);
+
+            if (recognizedText) {
+                // 填入输入框并自动发送
+                userInput.value = recognizedText;
+                await sendMessage();
+            }
+        } else {
+            // 服务端返回错误
+            const errCode = data.error_code || '';
+            const errMsg = data.message || '识别失败';
+            console.warn('[ASR] 识别失败:', errCode, errMsg);
+
+            if (errCode === 'NO_SPEECH_DETECTED') {
+                addSystemMessage('⚠️ 未检测到语音，请按住按钮说话后再松开');
+            } else if (errCode === 'AUDIO_TOO_SHORT') {
+                addSystemMessage('⚠️ 录音时间太短，请按住按钮后再说话');
+            } else {
+                addSystemMessage(`⚠️ 语音识别失败：${errMsg}`);
+            }
+        }
+    } catch (err) {
+        console.error('[ASR] 请求失败:', err);
+        addSystemMessage('❌ 语音识别服务暂时不可用，请改用文字输入');
+    }
+}
+
+/**
+ * 将 Float32 PCM 数组打包为标准 WAV Blob（无需任何外部库）。
+ * WAV 格式 = 44字节 RIFF/fmt/data 头 + int16 小端序 PCM 数据。
+ *
+ * @param {Float32Array} float32Samples - Float32 PCM 样本（-1.0 ~ 1.0）
+ * @param {number} sampleRate - 采样率（Hz）
+ * @returns {Blob} audio/wav
+ */
+function _createWAVBlob(float32Samples, sampleRate) {
+    const numSamples = float32Samples.length;
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    const dataSize = numSamples * blockAlign;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    function writeStr(offset, str) {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+        }
+    }
+
+    // RIFF chunk descriptor
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);       // ChunkSize
+    writeStr(8, 'WAVE');
+
+    // fmt sub-chunk
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);                 // Subchunk1Size (PCM = 16)
+    view.setUint16(20, 1, true);                  // AudioFormat (PCM = 1)
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+
+    // data sub-chunk
+    writeStr(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // 写入 PCM 数据（Float32 → Int16）
+    const pcmView = new Int16Array(buffer, 44);
+    for (let i = 0; i < numSamples; i++) {
+        const s = Math.max(-1, Math.min(1, float32Samples[i]));
+        pcmView[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+/**
+ * 清理麦克风资源（异常情况使用）。
+ */
+function _cleanupMic() {
+    micIsRecording = false;
+    if (micScriptProcessor) { micScriptProcessor.disconnect(); micScriptProcessor = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (micAudioContext) { micAudioContext.close().catch(() => {}); micAudioContext = null; }
+    micRecordedSamples = [];
+}
