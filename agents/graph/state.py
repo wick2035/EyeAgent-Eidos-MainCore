@@ -81,6 +81,10 @@ class MedicalState(TypedDict):
     security_blocked: bool                   # 是否被安全拦截
     security_events: List[Dict[str, Any]]    # 安全事件记录
 
+    # ========== 多模态附件 ==========
+    attachments: Optional[List[Dict[str, Any]]]  # 附件引用列表（AttachmentRef 序列化）
+    attachment_analysis: Optional[str]           # 附件预分析文字结果（由 chat_router 注入）
+
     # ========== 响应输出 ==========
     response: str                            # 最终响应文本
     error: Optional[str]                     # 错误信息
@@ -171,6 +175,10 @@ def create_initial_state(
         # 安全
         security_blocked=False,
         security_events=[],
+
+        # 多模态附件
+        attachments=kwargs.get("attachments", None),
+        attachment_analysis=kwargs.get("attachment_analysis", None),
 
         # 响应
         response="",

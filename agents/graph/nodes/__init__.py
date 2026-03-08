@@ -11,6 +11,9 @@ from agents.graph.nodes.research_node import research_agent_node
 from agents.graph.nodes.compliance_node import compliance_agent_node
 from agents.graph.nodes.recommendation_node import recommendation_agent_node
 from agents.graph.nodes.response_node import response_node
+# 附件分析注入工具（避免循环导入，定义在 utils 层）
+from utils.attachment_analyzer import inject_attachment_analysis
+
 
 __all__ = [
     "router_node",
@@ -21,4 +24,5 @@ __all__ = [
     "compliance_agent_node",
     "recommendation_agent_node",
     "response_node",
+    "inject_attachment_analysis",
 ]

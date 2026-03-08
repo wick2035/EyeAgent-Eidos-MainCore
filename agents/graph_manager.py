@@ -906,7 +906,7 @@ class GraphManager:
         Returns:
             输入状态字典
         """
-        # 创建初始状态
+        # 创建初始状态（kwargs 透传支持 attachments/attachment_analysis 等扩展字段）
         state = create_initial_state(
             patient_id=patient_id,
             session_id=session_id,
@@ -914,6 +914,7 @@ class GraphManager:
             doctor_id=doctor_id,
             conversation_id=conversation_id,
             agent_type=agent_type,
+            **kwargs,
         )
 
         # 添加用户消息

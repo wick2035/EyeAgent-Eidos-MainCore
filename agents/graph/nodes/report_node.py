@@ -22,6 +22,7 @@ from agents.prompts.report_prompts import (
 )
 from agents.tools.agent_tools import AGENT_2_TOOLS
 from utils.llm_config import get_llm, get_streaming_llm
+from utils.attachment_analyzer import inject_attachment_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,12 @@ def report_agent_node(state: MedicalState) -> Dict[str, Any]:
     logger.debug(f"[ReportNode] role={role}, stage={stage}, patient_id={patient_id}")
 
     try:
+        # 注入附件分析结果（如有）
+        attachment_analysis = state.get("attachment_analysis") or ""
+        messages = inject_attachment_analysis(list(messages), attachment_analysis)
+        if attachment_analysis:
+            logger.info(f"[ReportNode] 已注入附件分析，长度={len(attachment_analysis)}")
+
         # 根据流式标志选择 LLM
         is_streaming = state.get("is_streaming", False)
         llm = get_streaming_llm() if is_streaming else get_llm()

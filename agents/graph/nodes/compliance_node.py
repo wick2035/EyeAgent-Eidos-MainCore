@@ -23,6 +23,7 @@ from agents.prompts.compliance_prompts import (
 )
 from agents.tools.compliance_tools import AGENT_5_TOOLS
 from utils.llm_config import get_llm, get_streaming_llm
+from utils.attachment_analyzer import inject_attachment_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,12 @@ def compliance_agent_node(state: MedicalState) -> Dict[str, Any]:
     )
 
     try:
+        # 注入附件分析结果（如有）
+        attachment_analysis = state.get("attachment_analysis") or ""
+        messages = inject_attachment_analysis(list(messages), attachment_analysis)
+        if attachment_analysis:
+            logger.info(f"[ComplianceNode] 已注入附件分析，长度={len(attachment_analysis)}")
+
         # 根据流式标志选择 LLM
         is_streaming = state.get("is_streaming", False)
         llm = get_streaming_llm() if is_streaming else get_llm()

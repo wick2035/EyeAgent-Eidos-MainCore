@@ -8,6 +8,7 @@ let selectedUserId = null; // 选中的用户ID
 let selectedUserPhone = null; // 选中的用户手机号
 let currentRole = 'patient'; // 当前身份：patient 或 doctor
 let useStreaming = true; // 是否使用流式模式
+let pendingAttachments = []; // 待发送的附件列表（已上传完毕的附件数据）
 
 // 测试用医生ID（实际应从登录系统获取）
 const TEST_DOCTOR_ID = "00000000-0000-0000-0000-000000000001";
@@ -240,6 +241,21 @@ async function sendMessage() {
         // 医生模式下添加 doctor_id
         if (currentRole === 'doctor') {
             requestBody.doctor_id = TEST_DOCTOR_ID;
+        }
+
+        // 携带附件（如有）
+        if (pendingAttachments.length > 0) {
+            requestBody.attachments = pendingAttachments.map(att => ({
+                file_type: att.file_type,
+                filename: att.filename,
+                minio_url: att.minio_url || null,
+                base64: att.base64 || null,
+                mime_type: att.mime_type || null,
+                page_images: att.page_images || null,
+            }));
+            // 发送后清空
+            pendingAttachments = [];
+            clearAttachmentPreview();
         }
 
         // 根据开关选择接口
@@ -1222,3 +1238,170 @@ function _cleanupMic() {
     if (micAudioContext) { micAudioContext.close().catch(() => {}); micAudioContext = null; }
     micRecordedSamples = [];
 }
+
+// =====================================================================
+// 附件上传功能
+// =====================================================================
+
+/**
+ * 上传单个文件到 /api/upload，结果放入 pendingAttachments[]
+ * @param {File} file
+ */
+async function uploadAttachment(file) {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!allowedTypes.includes(file.type)) {
+        addSystemMessage(`⚠️ 不支持的文件类型：${file.type}，请上传图片（JPG/PNG/WebP）或 PDF`);
+        return;
+    }
+
+    const maxSize = file.type === 'application/pdf' ? 30 * 1024 * 1024 : 10 * 1024 * 1024;
+    if (file.size > maxSize) {
+        const limitMB = file.type === 'application/pdf' ? 30 : 10;
+        addSystemMessage(`⚠️ 文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），上限 ${limitMB}MB`);
+        return;
+    }
+
+    // 显示上传中占位
+    const previewId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    renderAttachmentPreviewItem(previewId, file.name, '上传中...', null);
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: '上传失败' }));
+            updateAttachmentPreviewItem(previewId, file.name, `❌ ${err.detail || '上传失败'}`, null);
+            return;
+        }
+
+        const data = await res.json();
+        pendingAttachments.push(data);
+
+        // 图片显示缩略图，PDF 显示图标
+        if (data.file_type === 'image' && data.base64) {
+            const src = `data:${data.mime_type};base64,${data.base64.slice(0, 200)}`;
+            // 只预览，不用完整 base64 影响 DOM
+            updateAttachmentPreviewItem(previewId, data.filename, null, `data:${data.mime_type};base64,${data.base64}`);
+        } else {
+            updateAttachmentPreviewItem(previewId, data.filename, `📄 ${data.page_count || '?'} 页`, null);
+        }
+
+        console.log(`[Attachment] 上传成功: ${data.filename}, type=${data.file_type}`);
+
+    } catch (e) {
+        console.error('[Attachment] 上传异常:', e);
+        updateAttachmentPreviewItem(previewId, file.name, '❌ 网络错误', null);
+    }
+}
+
+/**
+ * 渲染附件预览项
+ */
+function renderAttachmentPreviewItem(id, filename, text, imgSrc) {
+    const preview = document.getElementById('attachmentPreview');
+    if (!preview) return;
+
+    const item = document.createElement('div');
+    item.id = id;
+    item.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:12px;max-width:160px;';
+
+    if (imgSrc) {
+        const img = document.createElement('img');
+        img.src = imgSrc;
+        img.style.cssText = 'width:32px;height:32px;object-fit:cover;border-radius:4px;flex-shrink:0;';
+        item.appendChild(img);
+    } else {
+        const span = document.createElement('span');
+        span.textContent = text || '...';
+        item.appendChild(span);
+    }
+
+    const name = document.createElement('span');
+    name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+    name.title = filename;
+    name.textContent = filename.length > 12 ? filename.slice(0, 10) + '…' : filename;
+    item.appendChild(name);
+
+    const del = document.createElement('span');
+    del.textContent = '×';
+    del.style.cssText = 'cursor:pointer;color:#999;flex-shrink:0;';
+    del.onclick = () => {
+        item.remove();
+        // 从 pendingAttachments 移除对应项
+        pendingAttachments = pendingAttachments.filter(a => a.filename !== filename);
+        if (document.getElementById('attachmentPreview').children.length === 0) {
+            document.getElementById('attachmentPreview').style.display = 'none';
+        }
+    };
+    item.appendChild(del);
+
+    preview.appendChild(item);
+    preview.style.display = 'flex';
+}
+
+/**
+ * 更新预览项内容（上传完成后替换"上传中..."状态）
+ */
+function updateAttachmentPreviewItem(id, filename, text, imgSrc) {
+    const item = document.getElementById(id);
+    if (!item) return;
+    // 清空重建
+    item.innerHTML = '';
+
+    if (imgSrc) {
+        const img = document.createElement('img');
+        img.src = imgSrc;
+        img.style.cssText = 'width:32px;height:32px;object-fit:cover;border-radius:4px;flex-shrink:0;';
+        item.appendChild(img);
+    } else if (text) {
+        const span = document.createElement('span');
+        span.textContent = text;
+        item.appendChild(span);
+    }
+
+    const name = document.createElement('span');
+    name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+    name.title = filename;
+    name.textContent = filename.length > 12 ? filename.slice(0, 10) + '…' : filename;
+    item.appendChild(name);
+
+    const del = document.createElement('span');
+    del.textContent = '×';
+    del.style.cssText = 'cursor:pointer;color:#999;flex-shrink:0;';
+    del.onclick = () => {
+        item.remove();
+        pendingAttachments = pendingAttachments.filter(a => a.filename !== filename);
+        if (document.getElementById('attachmentPreview').children.length === 0) {
+            document.getElementById('attachmentPreview').style.display = 'none';
+        }
+    };
+    item.appendChild(del);
+}
+
+/**
+ * 清空附件预览区
+ */
+function clearAttachmentPreview() {
+    const preview = document.getElementById('attachmentPreview');
+    if (preview) {
+        preview.innerHTML = '';
+        preview.style.display = 'none';
+    }
+}
+
+// 绑定文件选择事件
+document.addEventListener('DOMContentLoaded', () => {
+    const attachmentInput = document.getElementById('attachmentInput');
+    if (attachmentInput) {
+        attachmentInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || []);
+            for (const file of files) {
+                await uploadAttachment(file);
+            }
+            // 清空 input 以允许重复选同一文件
+            attachmentInput.value = '';
+        });
+    }
+});
