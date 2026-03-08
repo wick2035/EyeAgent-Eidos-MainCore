@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
 from presentation.routers import chat_router, conversation_router, research_router, compliance_router, recommendation_router
+from presentation.routers import asr_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
 
@@ -71,6 +72,7 @@ app.include_router(conversation_router.router)
 app.include_router(research_router.router)
 app.include_router(compliance_router.router)
 app.include_router(recommendation_router.router)
+app.include_router(asr_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")
