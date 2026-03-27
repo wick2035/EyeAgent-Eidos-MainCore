@@ -4,11 +4,16 @@ DashScope 实时语音识别客户端
 
 该模型使用 OpenAI Realtime API 兼容协议，不是 DashScope 传统 NLS 协议。
 
-协议流程：
+协议流程（Manual 模式，turn_detection=null）：
   连接 → 收到 session.created
-  → 发送 input_audio_buffer.append（base64 PCM 音频）
+  → 发送 session.update（turn_detection: null, language 等）
+  → 收到 session.updated
+  → 发送 input_audio_buffer.append（base64 PCM 音频，每帧 3200 字节，间隔 0.1s）
   → 发送 input_audio_buffer.commit
+  → 发送 session.finish
+  → 收到 input_audio_buffer.committed
   → 收到 conversation.item.input_audio_transcription.completed
+  → 收到 session.finished
   → 返回 transcript 文本
 """
 
@@ -22,8 +27,8 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# 每帧 base64 前 PCM 大小：6400 bytes = 200ms @ 16kHz 16-bit mono
-CHUNK_SIZE = 6400
+# 每帧 base64 前 PCM 大小：3200 bytes = 100ms @ 16kHz 16-bit mono（官方推荐）
+CHUNK_SIZE = 3200
 # 等待 session.created 的超时（秒）
 SESSION_TIMEOUT = 10.0
 # 等待转写结果的超时（秒）
@@ -66,7 +71,10 @@ class DashScopeASRClient:
             return ""
 
         url = f"{self.WS_URL}?model={self.MODEL}"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "OpenAI-Beta": "realtime=v1",
+        }
 
         duration_s = len(pcm_data) / 32000  # 16000Hz * 2bytes
         logger.info(
@@ -81,9 +89,25 @@ class DashScopeASRClient:
                     if not session_ok:
                         raise RuntimeError("DashScope 未返回 session.created")
 
-                    # ── 第二步（可选）：更新 session 配置 ────────────────────
-                    # 如需覆盖 VAD 或语言设置，在此发送 session.update
-                    # 默认 session 已配置 pcm + 16000Hz，通常无需修改
+                    # ── 第二步：发送 session.update 配置音频格式和语言 ────
+                    await ws.send_json({
+                        "type": "session.update",
+                        "session": {
+                            "modalities": ["text"],
+                            "input_audio_format": "pcm",
+                            "sample_rate": 16000,
+                            "input_audio_transcription": {
+                                "language": self.language,
+                            },
+                            "turn_detection": None,
+                        },
+                    })
+                    logger.info(f"[ASR] session.update 已发送 (lang={self.language})")
+
+                    # 等待 session.updated 确认配置生效
+                    updated_ok = await self._wait_for_session_updated(ws)
+                    if not updated_ok:
+                        raise RuntimeError("DashScope 未返回 session.updated")
 
                     # ── 第三步：分块发送 PCM 音频（base64 编码）────────────
                     total_chunks = 0
@@ -95,6 +119,7 @@ class DashScopeASRClient:
                             "audio": audio_b64,
                         })
                         total_chunks += 1
+                        await asyncio.sleep(0.1)
 
                     logger.info(f"[ASR] 已发送 {total_chunks} 帧音频")
 
@@ -102,7 +127,11 @@ class DashScopeASRClient:
                     await ws.send_json({"type": "input_audio_buffer.commit"})
                     logger.info("[ASR] input_audio_buffer.commit 已发送")
 
-                    # ── 第五步：等待转写结果 ─────────────────────────────────
+                    # ── 第五步：发送 session.finish 通知服务端音频结束 ──────
+                    await ws.send_json({"type": "session.finish"})
+                    logger.info("[ASR] session.finish 已发送")
+
+                    # ── 第六步：等待转写结果 ─────────────────────────────────
                     text = await self._collect_transcription(ws)
                     logger.info(f"[ASR] 识别完成 text='{text}'")
                     return text
@@ -156,6 +185,46 @@ class DashScopeASRClient:
 
         except TimeoutError:
             logger.error(f"[ASR] 等待 session.created 超时（>{SESSION_TIMEOUT}s）")
+            return False
+
+        return False
+
+    async def _wait_for_session_updated(self, ws) -> bool:
+        """等待 session.updated 事件，确认 session 配置已生效。"""
+        try:
+            async with asyncio.timeout(SESSION_TIMEOUT):
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        logger.info(f"[ASR][DashScope←] {msg.data}")
+                        try:
+                            data = json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = data.get("type", "")
+
+                        if event_type == "session.updated":
+                            logger.info("[ASR] session.updated 确认配置生效")
+                            return True
+
+                        if event_type == "error":
+                            err = data.get("error", {})
+                            logger.error(f"[ASR] DashScope 错误: {err}")
+                            raise RuntimeError(
+                                f"DashScope 错误: {err.get('message', str(err))}"
+                            )
+
+                        logger.info(f"[ASR] 等待 session.updated 期间收到: type={event_type}")
+
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        logger.error(f"[ASR] WebSocket 错误: {msg.data}")
+                        return False
+                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
+                        logger.error(f"[ASR] 连接被关闭 code={ws.close_code}")
+                        return False
+
+        except TimeoutError:
+            logger.error(f"[ASR] 等待 session.updated 超时（>{SESSION_TIMEOUT}s）")
             return False
 
         return False

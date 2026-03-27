@@ -1156,9 +1156,10 @@ async function _sendAudioForTranscription(wavBlob) {
                 await sendMessage();
             }
         } else {
-            // 服务端返回错误
-            const errCode = data.error_code || '';
-            const errMsg = data.message || '识别失败';
+            // 服务端返回错误（FastAPI HTTPException 将错误信息放在 detail 字段中）
+            const detail = data.detail || data;
+            const errCode = detail.error_code || '';
+            const errMsg = detail.message || '识别失败';
             console.warn('[ASR] 识别失败:', errCode, errMsg);
 
             if (errCode === 'NO_SPEECH_DETECTED') {

@@ -48,6 +48,12 @@ def _extract_pcm_from_wav(wav_bytes: bytes) -> bytes:
                 f"framerate={wf.getframerate()}, "
                 f"nframes={wf.getnframes()}"
             )
+            if wf.getframerate() != 16000:
+                raise ValueError(f"采样率必须为 16000Hz，实际 {wf.getframerate()}Hz")
+            if wf.getnchannels() != 1:
+                raise ValueError(f"声道数必须为 1（单声道），实际 {wf.getnchannels()}")
+            if wf.getsampwidth() != 2:
+                raise ValueError(f"位深必须为 16-bit，实际 {wf.getsampwidth() * 8}-bit")
             return wf.readframes(wf.getnframes())
     except wave.Error as e:
         raise ValueError(f"WAV 格式解析失败: {e}") from e
