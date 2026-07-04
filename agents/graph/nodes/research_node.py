@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 
 # 兼容不同版本的 langgraph
 try:
@@ -27,16 +28,8 @@ from utils.llm_config import get_llm, get_streaming_llm
 logger = logging.getLogger(__name__)
 
 
-def research_agent_node(state: MedicalState) -> Dict[str, Any]:
-    """
-    ResearchAgent 节点 - 处理科研助手、文献搜索、统计分析
-
-    Args:
-        state: 当前状态
-
-    Returns:
-        状态更新字典
-    """
+def _prepare_research(state: MedicalState):
+    """构建 ResearchAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "doctor")  # 科研模式通常是医生
     stage = state.get("stage", "greeting")
     messages = state.get("messages", [])
@@ -65,75 +58,117 @@ def research_agent_node(state: MedicalState) -> Dict[str, Any]:
 
     logger.debug(f"[ResearchNode] role={role}, stage={stage}, doctor_id={doctor_id}")
 
+    # 根据流式标志选择 LLM
+    is_streaming = state.get("is_streaming", False)
+    llm = get_streaming_llm() if is_streaming else get_llm()
+
+    # 根据权限过滤工具
+    available_tools = _filter_tools_by_permission(
+        RESEARCH_AGENT_TOOLS,
+        enable_institution_data,
+        enable_web_search,
+    )
+
+    # 创建 ReAct Agent
+    agent = create_react_agent(
+        model=llm,
+        tools=available_tools,
+    )
+
+    # 准备输入消息
+    input_messages = [SystemMessage(content=full_system_prompt)]
+
+    # 添加对话历史
+    for msg in messages:
+        if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+            input_messages.append(msg)
+        elif isinstance(msg, dict):
+            msg_type = msg.get("type", "")
+            content = msg.get("content", "")
+            if msg_type == "human":
+                input_messages.append(HumanMessage(content=content))
+            elif msg_type == "ai":
+                input_messages.append(AIMessage(content=content))
+
+    return agent, input_messages
+
+
+def _finalize_research(state: MedicalState, result: Dict[str, Any], input_messages: list) -> Dict[str, Any]:
+    """处理 ResearchAgent 的执行结果（sync/async 共用）"""
+    # 提取响应
+    response_messages = result.get("messages", [])
+    ai_response = ""
+    tool_calls = []
+
+    for msg in response_messages:
+        if isinstance(msg, AIMessage):
+            if msg.content:
+                ai_response = msg.content
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tool_calls.extend(msg.tool_calls)
+
+    # 检测新阶段
+    last_user_message = _get_last_user_message(state.get("messages", []))
+    new_stage = _detect_research_stage(state, ai_response, tool_calls, last_user_message)
+
+    logger.info(f"[ResearchNode] 响应生成完成, new_stage={new_stage}")
+
+    # 返回状态更新
+    return {
+        "messages": [AIMessage(content=ai_response)] if ai_response else [],
+        "stage": new_stage,
+        "last_response": ai_response,
+    }
+
+
+def _research_error(e: Exception) -> Dict[str, Any]:
+    """ResearchAgent 异常兜底（sync/async 共用）"""
+    logger.error(f"[ResearchNode] 处理失败: {e}", exc_info=True)
+    error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
+    return {
+        "messages": [AIMessage(content=error_response)],
+        "last_response": error_response,
+        "error": str(e),
+    }
+
+
+def research_agent_node(state: MedicalState) -> Dict[str, Any]:
+    """
+    ResearchAgent 节点（同步）- 非流式路径 /api/chat 使用
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        状态更新字典
+    """
     try:
-        # 根据流式标志选择 LLM
-        is_streaming = state.get("is_streaming", False)
-        llm = get_streaming_llm() if is_streaming else get_llm()
-
-        # 根据权限过滤工具
-        available_tools = _filter_tools_by_permission(
-            RESEARCH_AGENT_TOOLS,
-            enable_institution_data,
-            enable_web_search,
-        )
-
-        # 创建 ReAct Agent
-        agent = create_react_agent(
-            model=llm,
-            tools=available_tools,
-        )
-
-        # 准备输入消息
-        input_messages = [SystemMessage(content=full_system_prompt)]
-
-        # 添加对话历史
-        for msg in messages:
-            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
-                input_messages.append(msg)
-            elif isinstance(msg, dict):
-                msg_type = msg.get("type", "")
-                content = msg.get("content", "")
-                if msg_type == "human":
-                    input_messages.append(HumanMessage(content=content))
-                elif msg_type == "ai":
-                    input_messages.append(AIMessage(content=content))
-
-        # 调用 Agent
+        agent, input_messages = _prepare_research(state)
         result = agent.invoke({"messages": input_messages})
-
-        # 提取响应
-        response_messages = result.get("messages", [])
-        ai_response = ""
-        tool_calls = []
-
-        for msg in response_messages:
-            if isinstance(msg, AIMessage):
-                if msg.content:
-                    ai_response = msg.content
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tool_calls.extend(msg.tool_calls)
-
-        # 检测新阶段
-        last_user_message = _get_last_user_message(messages)
-        new_stage = _detect_research_stage(state, ai_response, tool_calls, last_user_message)
-
-        logger.info(f"[ResearchNode] 响应生成完成, new_stage={new_stage}")
-
-        # 返回状态更新
-        return {
-            "messages": [AIMessage(content=ai_response)] if ai_response else [],
-            "stage": new_stage,
-            "last_response": ai_response,
-        }
-
+        return _finalize_research(state, result, input_messages)
     except Exception as e:
-        logger.error(f"[ResearchNode] 处理失败: {e}", exc_info=True)
-        error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
-        return {
-            "messages": [AIMessage(content=error_response)],
-            "last_response": error_response,
-            "error": str(e),
-        }
+        return _research_error(e)
+
+
+async def research_agent_node_async(state: MedicalState, config: RunnableConfig) -> Dict[str, Any]:
+    """
+    ResearchAgent 节点（异步）- 流式路径 /api/chat/stream 使用
+
+    使用 await agent.ainvoke 并显式透传 config，使外层 astream_events 能逐 token 捕获。
+
+    Args:
+        state: 当前状态
+        config: LangGraph 注入的运行配置（携带 astream_events 回调）
+
+    Returns:
+        状态更新字典
+    """
+    try:
+        agent, input_messages = _prepare_research(state)
+        result = await agent.ainvoke({"messages": input_messages}, config=config)
+        return _finalize_research(state, result, input_messages)
+    except Exception as e:
+        return _research_error(e)
 
 
 def _build_permission_note(enable_institution_data: bool, enable_web_search: bool) -> str:
