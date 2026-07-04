@@ -86,7 +86,8 @@ class MedicalState(TypedDict):
     attachment_analysis: Optional[str]           # 附件预分析文字结果（由 chat_router 注入）
 
     # ========== 响应输出 ==========
-    response: str                            # 最终响应文本
+    response: str                            # 最终响应文本（旧字段，保留兼容）
+    last_response: str                       # 各 Agent 节点写入的最终响应文本，response_node / graph_manager 读取
     error: Optional[str]                     # 错误信息
 
 
@@ -182,6 +183,7 @@ def create_initial_state(
 
         # 响应
         response="",
+        last_response="",
         error=None,
     )
 

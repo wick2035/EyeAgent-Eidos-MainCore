@@ -704,6 +704,27 @@ class GraphManager:
                 "metadata": {"error": str(e)},
             }
 
+        # 兜底：节点内部使用阻塞 agent.invoke 时，astream_events 捕获不到 on_chat_model_stream，
+        # full_response 会为空。此时从最终状态取 last_response 补发一次，保证回复能到达前端。
+        if not full_response and not stream_error:
+            try:
+                final_state = streaming_graph.get_state(thread_config)
+                fallback_resp = ""
+                if final_state and getattr(final_state, "values", None):
+                    fallback_resp = final_state.values.get("last_response", "") or ""
+                if fallback_resp:
+                    full_response = fallback_resp
+                    logger.info(
+                        f"[GraphManager] 流式未捕获 token，回退 last_response（{len(fallback_resp)} 字）"
+                    )
+                    yield {
+                        "type": "token",
+                        "content": fallback_resp,
+                        "metadata": {"node": current_agent},
+                    }
+            except Exception as e:
+                logger.warning(f"[GraphManager] 流式回退 last_response 失败: {e}")
+
         # === 两阶段写入 - 第二阶段：流结束后保存完整回复 ===
         if assistant_msg_id and conversation_id:
             try:
