@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 
 # 兼容不同版本的 langgraph
 try:
@@ -28,16 +29,8 @@ from utils.attachment_analyzer import inject_attachment_analysis
 logger = logging.getLogger(__name__)
 
 
-def compliance_agent_node(state: MedicalState) -> Dict[str, Any]:
-    """
-    ComplianceAgent 节点 - 处理合规性审查（仅医生可用）
-
-    Args:
-        state: 当前状态
-
-    Returns:
-        状态更新字典
-    """
+def _prepare_compliance(state: MedicalState):
+    """构建 ComplianceAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "patient")
     stage = state.get("stage", "greeting")
     messages = state.get("messages", [])
@@ -61,86 +54,128 @@ def compliance_agent_node(state: MedicalState) -> Dict[str, Any]:
         f"patient_id={patient_id}, doctor_id={doctor_id}"
     )
 
+    # 注入附件分析结果（如有）
+    attachment_analysis = state.get("attachment_analysis") or ""
+    messages = inject_attachment_analysis(list(messages), attachment_analysis)
+    if attachment_analysis:
+        logger.info(f"[ComplianceNode] 已注入附件分析，长度={len(attachment_analysis)}")
+
+    # 根据流式标志选择 LLM
+    is_streaming = state.get("is_streaming", False)
+    llm = get_streaming_llm() if is_streaming else get_llm()
+
+    # 创建 ReAct Agent
+    agent = create_react_agent(
+        model=llm,
+        tools=AGENT_5_TOOLS,
+    )
+
+    # 准备输入消息
+    input_messages = [SystemMessage(content=full_system_prompt)]
+
+    # 添加对话历史
+    for msg in messages:
+        if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+            input_messages.append(msg)
+        elif isinstance(msg, dict):
+            msg_type = msg.get("type", "")
+            content = msg.get("content", "")
+            if msg_type == "human":
+                input_messages.append(HumanMessage(content=content))
+            elif msg_type == "ai":
+                input_messages.append(AIMessage(content=content))
+
+    return agent, input_messages
+
+
+def _finalize_compliance(state: MedicalState, result: Dict[str, Any], input_messages: list) -> Dict[str, Any]:
+    """处理 ComplianceAgent 的执行结果（sync/async 共用）"""
+    # 提取响应
+    response_messages = result.get("messages", [])
+    ai_response = ""
+    tool_calls = []
+
+    for msg in response_messages:
+        if isinstance(msg, AIMessage):
+            if msg.content:
+                ai_response = msg.content
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tool_calls.extend(msg.tool_calls)
+
+    # 检测状态变更
+    new_stage = _detect_compliance_stage(state, ai_response, tool_calls)
+    review_completed = _check_review_completed(tool_calls, response_messages)
+
+    # 检测审查类型
+    review_type = _detect_review_type(state, ai_response)
+
+    logger.info(
+        f"[ComplianceNode] 响应生成完成, new_stage={new_stage}, "
+        f"review_completed={review_completed}"
+    )
+
+    # 返回状态更新
+    update = {
+        "messages": [AIMessage(content=ai_response)] if ai_response else [],
+        "stage": new_stage,
+        "compliance_review_completed": review_completed,
+        "last_response": ai_response,
+    }
+
+    if review_type:
+        update["compliance_review_type"] = review_type
+
+    return update
+
+
+def _compliance_error(e: Exception) -> Dict[str, Any]:
+    """ComplianceAgent 异常兜底（sync/async 共用）"""
+    logger.error(f"[ComplianceNode] 处理失败: {e}", exc_info=True)
+    error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
+    return {
+        "messages": [AIMessage(content=error_response)],
+        "last_response": error_response,
+        "error": str(e),
+    }
+
+
+def compliance_agent_node(state: MedicalState) -> Dict[str, Any]:
+    """
+    ComplianceAgent 节点（同步）- 非流式路径 /api/chat 使用（仅医生可用）
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        状态更新字典
+    """
     try:
-        # 注入附件分析结果（如有）
-        attachment_analysis = state.get("attachment_analysis") or ""
-        messages = inject_attachment_analysis(list(messages), attachment_analysis)
-        if attachment_analysis:
-            logger.info(f"[ComplianceNode] 已注入附件分析，长度={len(attachment_analysis)}")
-
-        # 根据流式标志选择 LLM
-        is_streaming = state.get("is_streaming", False)
-        llm = get_streaming_llm() if is_streaming else get_llm()
-
-        # 创建 ReAct Agent
-        agent = create_react_agent(
-            model=llm,
-            tools=AGENT_5_TOOLS,
-        )
-
-        # 准备输入消息
-        input_messages = [SystemMessage(content=full_system_prompt)]
-
-        # 添加对话历史
-        for msg in messages:
-            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
-                input_messages.append(msg)
-            elif isinstance(msg, dict):
-                msg_type = msg.get("type", "")
-                content = msg.get("content", "")
-                if msg_type == "human":
-                    input_messages.append(HumanMessage(content=content))
-                elif msg_type == "ai":
-                    input_messages.append(AIMessage(content=content))
-
-        # 调用 Agent
+        agent, input_messages = _prepare_compliance(state)
         result = agent.invoke({"messages": input_messages})
-
-        # 提取响应
-        response_messages = result.get("messages", [])
-        ai_response = ""
-        tool_calls = []
-
-        for msg in response_messages:
-            if isinstance(msg, AIMessage):
-                if msg.content:
-                    ai_response = msg.content
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tool_calls.extend(msg.tool_calls)
-
-        # 检测状态变更
-        new_stage = _detect_compliance_stage(state, ai_response, tool_calls)
-        review_completed = _check_review_completed(tool_calls, response_messages)
-
-        # 检测审查类型
-        review_type = _detect_review_type(state, ai_response)
-
-        logger.info(
-            f"[ComplianceNode] 响应生成完成, new_stage={new_stage}, "
-            f"review_completed={review_completed}"
-        )
-
-        # 返回状态更新
-        update = {
-            "messages": [AIMessage(content=ai_response)] if ai_response else [],
-            "stage": new_stage,
-            "compliance_review_completed": review_completed,
-            "last_response": ai_response,
-        }
-
-        if review_type:
-            update["compliance_review_type"] = review_type
-
-        return update
-
+        return _finalize_compliance(state, result, input_messages)
     except Exception as e:
-        logger.error(f"[ComplianceNode] 处理失败: {e}", exc_info=True)
-        error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
-        return {
-            "messages": [AIMessage(content=error_response)],
-            "last_response": error_response,
-            "error": str(e),
-        }
+        return _compliance_error(e)
+
+
+async def compliance_agent_node_async(state: MedicalState, config: RunnableConfig) -> Dict[str, Any]:
+    """
+    ComplianceAgent 节点（异步）- 流式路径 /api/chat/stream 使用（仅医生可用）
+
+    使用 await agent.ainvoke 并显式透传 config，使外层 astream_events 能逐 token 捕获。
+
+    Args:
+        state: 当前状态
+        config: LangGraph 注入的运行配置（携带 astream_events 回调）
+
+    Returns:
+        状态更新字典
+    """
+    try:
+        agent, input_messages = _prepare_compliance(state)
+        result = await agent.ainvoke({"messages": input_messages}, config=config)
+        return _finalize_compliance(state, result, input_messages)
+    except Exception as e:
+        return _compliance_error(e)
 
 
 def _detect_compliance_stage(

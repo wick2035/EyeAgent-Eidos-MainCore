@@ -7,17 +7,24 @@ import logging
 from typing import Optional
 
 from langgraph.graph import StateGraph, START, END
+from langchain_core.runnables import RunnableLambda
 
 from agents.graph.state import MedicalState
 from agents.graph.checkpointer import MySQLCheckpointSaver, get_checkpointer
 from agents.graph.nodes import (
     router_node,
     health_agent_node,
+    health_agent_node_async,
     report_agent_node,
+    report_agent_node_async,
     reminder_agent_node,
+    reminder_agent_node_async,
     research_agent_node,
+    research_agent_node_async,
     compliance_agent_node,
+    compliance_agent_node_async,
     recommendation_agent_node,
+    recommendation_agent_node_async,
     response_node,
 )
 from agents.graph.edges.routing import (
@@ -65,13 +72,17 @@ class MedicalGraphBuilder:
         graph = StateGraph(MedicalState)
 
         # 添加节点
+        # 6 个业务 Agent 节点用 RunnableLambda 同时注册 sync(func) + async(afunc) 两种实现：
+        #   - 非流式图 .invoke() → 走同步 func（agent.invoke）
+        #   - 流式图 .astream_events() → 走异步 afunc（await agent.ainvoke 并透传 config），
+        #     从而外层能逐 token 捕获 on_chat_model_stream，实现真正的打字机效果。
         graph.add_node("router", router_node)
-        graph.add_node("health", health_agent_node)
-        graph.add_node("report", report_agent_node)
-        graph.add_node("reminder", reminder_agent_node)
-        graph.add_node("research", research_agent_node)
-        graph.add_node("compliance", compliance_agent_node)
-        graph.add_node("recommendation", recommendation_agent_node)
+        graph.add_node("health", RunnableLambda(health_agent_node, afunc=health_agent_node_async, name="health"))
+        graph.add_node("report", RunnableLambda(report_agent_node, afunc=report_agent_node_async, name="report"))
+        graph.add_node("reminder", RunnableLambda(reminder_agent_node, afunc=reminder_agent_node_async, name="reminder"))
+        graph.add_node("research", RunnableLambda(research_agent_node, afunc=research_agent_node_async, name="research"))
+        graph.add_node("compliance", RunnableLambda(compliance_agent_node, afunc=compliance_agent_node_async, name="compliance"))
+        graph.add_node("recommendation", RunnableLambda(recommendation_agent_node, afunc=recommendation_agent_node_async, name="recommendation"))
         graph.add_node("output_handler", response_node)  # 避免与状态键 response 冲突
 
         # 添加入口边
