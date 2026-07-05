@@ -88,7 +88,7 @@ class ChatMessageEntity(BaseModel):
         解析 context JSON 字符串为列表
 
         Returns:
-            List[Dict]: 上下文列表 [patient_info, stage, tool_results]
+            List[Dict]: 上下文列表 [patient_info, stage, tool_results, citations]
         """
         if not self.context:
             return []
@@ -114,7 +114,8 @@ class MessageContext(BaseModel):
     """
     patient_info: Optional[Dict[str, Any]] = Field(default=None, description="患者信息")
     conversation_stage: Optional[str] = Field(default=None, description="对话阶段")
-    tool_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具调用结果")
+    tool_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="统一结构的工具调用结果")
+    citations: Optional[List[Dict[str, Any]]] = Field(default=None, description="前端 CitationBlock 引用来源")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="其他元数据")
 
     def to_context_list(self) -> List[Dict[str, Any]]:
@@ -122,7 +123,7 @@ class MessageContext(BaseModel):
         转换为 context 列表格式
 
         Returns:
-            List[Dict]: [{"patient_info": ...}, {"conversation_stage": ...}, {"tool_results": ...}]
+            List[Dict]: [{"patient_info": ...}, {"conversation_stage": ...}, {"tool_results": ...}, {"citations": ...}]
         """
         context_list = []
         if self.patient_info:
@@ -131,6 +132,8 @@ class MessageContext(BaseModel):
             context_list.append({"conversation_stage": self.conversation_stage})
         if self.tool_results:
             context_list.append({"tool_results": self.tool_results})
+        if self.citations:
+            context_list.append({"citations": self.citations})
         if self.metadata:
             context_list.append({"metadata": self.metadata})
         return context_list
@@ -158,6 +161,7 @@ class MessageContext(BaseModel):
         patient_info = None
         conversation_stage = None
         tool_results = None
+        citations = None
         metadata = None
 
         for item in context_list:
@@ -167,6 +171,8 @@ class MessageContext(BaseModel):
                 conversation_stage = item["conversation_stage"]
             elif "tool_results" in item:
                 tool_results = item["tool_results"]
+            elif "citations" in item:
+                citations = item["citations"]
             elif "metadata" in item:
                 metadata = item["metadata"]
 
@@ -174,5 +180,6 @@ class MessageContext(BaseModel):
             patient_info=patient_info,
             conversation_stage=conversation_stage,
             tool_results=tool_results,
+            citations=citations,
             metadata=metadata
         )
