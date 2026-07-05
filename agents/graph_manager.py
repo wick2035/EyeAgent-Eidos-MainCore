@@ -618,6 +618,9 @@ class GraphManager:
         current_stage = "greeting"
         stream_error = None
 
+        # 收集工具调用事件，流结束后持久化到 context.tool_results
+        collected_tool_calls: List[Dict[str, Any]] = []
+
         try:
             streaming_graph = get_streaming_medical_graph()
 
@@ -663,25 +666,53 @@ class GraphManager:
                             "metadata": {"node": node_name, "stage": current_stage},
                         }
 
-                # 工具调用开始
+                # 工具调用开始。在 LangGraph 流式事件序列中，
+                # agent 节点先通过 on_chat_model_stream 流式输出前置文本，
+                # 然后 emit AIMessage(tool_calls)，再路由到 ToolNode 触发 on_tool_start。
+                # 因此用此时的 full_response 长度作为 text_offset，
+                # 持久化后前端可在该位置精确切分"前置文本"与"工具调用"，恢复流式 block 顺序。
                 elif event_type == "on_tool_start":
+                    tool_name = event.get("name", "unknown")
+                    tool_input = event.get("data", {}).get("input", {})
+                    collected_tool_calls.append({
+                        "tool": tool_name,
+                        "status": "start",
+                        "input": tool_input,
+                        "text_offset": len(full_response),
+                    })
                     yield {
                         "type": "tool_start",
                         "content": "",
                         "metadata": {
-                            "tool": event.get("name", "unknown"),
-                            "input": event.get("data", {}).get("input", {}),
+                            "tool": tool_name,
+                            "input": tool_input,
                         },
                     }
 
-                # 工具调用结束
+                # 工具调用结束。匹配 tool_start 设置的条目，
+                # 把 status/input 升级为 end/output，text_offset 保留不变；
+                # 若找不到匹配(异常序列)，用当前文本位置兜底附加。
                 elif event_type == "on_tool_end":
+                    tool_name = event.get("name", "unknown")
+                    tool_output = str(event.get("data", {}).get("output", ""))[:500]
+                    for tc in reversed(collected_tool_calls):
+                        if tc.get("tool") == tool_name and tc.get("status") == "start":
+                            tc["status"] = "end"
+                            tc["output"] = tool_output
+                            break
+                    else:
+                        collected_tool_calls.append({
+                            "tool": tool_name,
+                            "status": "end",
+                            "output": tool_output,
+                            "text_offset": len(full_response),
+                        })
                     yield {
                         "type": "tool_end",
                         "content": "",
                         "metadata": {
-                            "tool": event.get("name", "unknown"),
-                            "output": str(event.get("data", {}).get("output", ""))[:500],
+                            "tool": tool_name,
+                            "output": tool_output,
                         },
                     }
 
@@ -738,7 +769,7 @@ class GraphManager:
                         message_id=assistant_msg_id,
                         content=full_response,
                         token_used=None,
-                        tool_results=None,
+                        tool_results=collected_tool_calls if collected_tool_calls else None,
                         context={
                             "stage": current_stage,
                             "agent_type": current_agent,
