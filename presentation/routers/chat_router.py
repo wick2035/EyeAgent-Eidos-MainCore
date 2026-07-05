@@ -5,6 +5,7 @@
 import uuid
 import json
 import logging
+import asyncio
 from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -119,6 +120,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 "role": role,
                 "thread_id": result.get("thread_id", ""),
                 "version": "langgraph",
+                "citations": result.get("citations", []),
             }
         )
 
@@ -416,6 +418,7 @@ async def chat_stream(request: ChatRequest):
             full_response = ""
             current_agent = request.agent_type or "health"
             current_stage = "greeting"
+            citations = []
 
             async for chunk in graph_manager.chat_stream_async(
                 patient_id=request.patient_id,
@@ -457,6 +460,7 @@ async def chat_stream(request: ChatRequest):
                     full_response = content
                     current_agent = metadata.get("agent_type", current_agent)
                     current_stage = metadata.get("stage", current_stage)
+                    citations = chunk.get("citations") or metadata.get("citations") or []
 
                 elif event_type == "error":
                     yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
@@ -478,10 +482,22 @@ async def chat_stream(request: ChatRequest):
                 'stage': current_stage,
                 'session_id': session_id,
                 'conversation_id': conversation_id,
+                'citations': citations,
+                'metadata': {
+                    'citations': citations,
+                },
             }
             if ui_elements_data:
                 done_data['ui_elements'] = ui_elements_data
             yield f"data: {json.dumps(done_data)}\n\n"
+
+        except GeneratorExit:
+            logger.info("[ChatRouter] SSE 生成器关闭，取消流式对话")
+            raise
+
+        except asyncio.CancelledError:
+            logger.info("[ChatRouter] SSE 客户端断开，取消流式对话")
+            raise
 
         except Exception as e:
             logger.error(f"[ChatRouter] 流式对话失败: {e}", exc_info=True)

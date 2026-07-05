@@ -7,13 +7,26 @@ import logging
 from typing import Dict, Any, Optional, Generator, AsyncGenerator, List
 import asyncio
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agents.graph.state import MedicalState, create_initial_state
 from agents.graph.graph_builder import get_medical_graph, create_medical_graph
 from agents.graph.id_mapping import ThreadIDManager, get_thread_config
 from agents.graph.checkpointer import get_checkpointer
 from agents.graph.persistence_adapter import PersistenceAdapter, NullPersistenceAdapter
+from agents.graph.token_usage_extractor import (
+    extract_token_used_from_ai_message,
+    extract_token_used_from_stream_event,
+    merge_token_used,
+)
+from agents.graph.tool_result_normalizer import (
+    normalize_from_stream_events,
+    normalize_from_tool_calls,
+)
+from agents.graph.citation_extractor import (
+    deduplicate_citations,
+    extract_citations_from_search_results,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +221,7 @@ class GraphManager:
         try:
             # 获取当前 Agent（切换前）
             previous_agent = self.checkpointer.get_current_agent(thread_id)
+            previous_message_count = self._get_state_message_count(self.graph, thread_config)
 
             # 调用图
             result = self.graph.invoke(
@@ -215,24 +229,27 @@ class GraphManager:
                 config=thread_config,
             )
 
-            # 提取响应
+            # 提取响应和本轮 token usage
             response = self._extract_response(result)
+            token_used = self._extract_token_used_from_result(result, previous_message_count)
 
             # 获取结果中的 Agent 类型
             current_agent = result.get("current_agent", agent_type)
             current_stage = result.get("stage", "greeting")
+            citations = self._extract_citations(result, previous_message_count)
 
             # === 两阶段写入 - 第二阶段：更新 AI 回复为成功 ===
             if assistant_msg_id and conversation_id:
                 try:
-                    # 提取工具调用结果
-                    tool_results = self._extract_tool_results(result)
+                    # 提取工具调用结果，CitationBlock 来源已在落库前统一抽取
+                    tool_results = self._extract_tool_results(result, previous_message_count)
 
                     self.persistence.update_assistant_success(
                         message_id=assistant_msg_id,
                         content=response,
-                        token_used=result.get("token_used"),
+                        token_used=token_used,
                         tool_results=tool_results,
+                        citations=citations,
                         context={
                             "stage": current_stage,
                             "agent_type": current_agent,
@@ -279,6 +296,7 @@ class GraphManager:
                 "stage": current_stage,
                 "is_completed": result.get("is_completed", False),
                 "thread_id": thread_id,
+                "citations": citations,
             }
 
         except Exception as e:
@@ -414,6 +432,7 @@ class GraphManager:
         current_stage = "greeting"
         current_agent = agent_type
         stream_error = None
+        token_used = None
 
         try:
             # 流式调用图
@@ -442,6 +461,10 @@ class GraphManager:
                     messages = node_output.get("messages", [])
                     for msg in messages:
                         if isinstance(msg, AIMessage):
+                            token_used = merge_token_used(
+                                token_used,
+                                extract_token_used_from_ai_message(msg),
+                            )
                             full_response += msg.content
                             yield {
                                 "type": "token",
@@ -491,7 +514,7 @@ class GraphManager:
                     self.persistence.update_assistant_success(
                         message_id=assistant_msg_id,
                         content=full_response,
-                        token_used=None,  # 流式模式无法准确获取 token
+                        token_used=token_used,
                         tool_results=None,
                         context={
                             "stage": current_stage,
@@ -573,8 +596,17 @@ class GraphManager:
             }
             return
 
+        # === 运行时状态：用于 finally 中统一终态落库 ===
+        assistant_message_id = None
+        full_response = ""
+        stream_completed = False
+        cancelled = False
+        last_error = None
+        token_used = None
+        usage_event_run_ids = set()
+        previous_message_count = 0
+
         # === 两阶段写入 - 第一阶段：保存用户消息 ===
-        assistant_msg_id = None
         if conversation_id:
             try:
                 is_first = self.persistence.is_first_message(conversation_id)
@@ -591,7 +623,7 @@ class GraphManager:
                     is_first_message=is_first,
                 )
 
-                assistant_msg_id = self.persistence.create_assistant_placeholder(
+                assistant_message_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
                 )
@@ -612,17 +644,18 @@ class GraphManager:
             **kwargs,
         )
 
-        # 用于拼接完整响应
-        full_response = ""
         current_agent = agent_type
         current_stage = "greeting"
-        stream_error = None
+        streaming_graph = None
 
         # 收集工具调用事件，流结束后持久化到 context.tool_results
         collected_tool_calls: List[Dict[str, Any]] = []
+        # 收集搜索工具来源，流结束后持久化到 context.citations
+        collected_citations: List[Dict[str, Any]] = []
 
         try:
             streaming_graph = get_streaming_medical_graph()
+            previous_message_count = self._get_state_message_count(streaming_graph, thread_config)
 
             async for event in streaming_graph.astream_events(
                 input_state,
@@ -630,6 +663,15 @@ class GraphManager:
                 version="v2",
             ):
                 event_type = event.get("event", "")
+
+                # 模型结束事件携带完整 AIMessage/metadata，是流式 usage 的最可靠来源。
+                if event_type == "on_chat_model_end":
+                    event_run_id = event.get("run_id")
+                    if event_run_id is None or event_run_id not in usage_event_run_ids:
+                        incoming_token_used = extract_token_used_from_stream_event(event)
+                        token_used = merge_token_used(token_used, incoming_token_used)
+                        if incoming_token_used is not None and event_run_id is not None:
+                            usage_event_run_ids.add(event_run_id)
 
                 # Token 流式输出
                 if event_type == "on_chat_model_stream":
@@ -694,7 +736,12 @@ class GraphManager:
                 # 若找不到匹配(异常序列)，用当前文本位置兜底附加。
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name", "unknown")
-                    tool_output = str(event.get("data", {}).get("output", ""))[:500]
+                    raw_tool_output = event.get("data", {}).get("output", "")
+                    if self._is_search_tool(tool_name) or self._looks_like_search_results(raw_tool_output):
+                        collected_citations.extend(
+                            extract_citations_from_search_results(raw_tool_output)
+                        )
+                    tool_output = str(raw_tool_output)[:500]
                     for tc in reversed(collected_tool_calls):
                         if tc.get("tool") == tool_name and tc.get("status") == "start":
                             tc["status"] = "end"
@@ -726,8 +773,17 @@ class GraphManager:
                 agent_type=current_agent,
             )
 
+        except (asyncio.CancelledError, GeneratorExit) as e:
+            cancelled = True
+            last_error = e
+            logger.info(
+                f"[GraphManager] chat_stream_async 已取消: conversation_id={conversation_id}, "
+                f"assistant_message_id={assistant_message_id}"
+            )
+            raise
+
         except Exception as e:
-            stream_error = e
+            last_error = e
             logger.error(f"[GraphManager] chat_stream_async 失败: {e}", exc_info=True)
             yield {
                 "type": "error",
@@ -735,14 +791,55 @@ class GraphManager:
                 "metadata": {"error": str(e)},
             }
 
+        finally:
+            # best-effort：取消或异常时，尽量把 running 占位推进到最终状态。
+            if assistant_message_id and conversation_id and (cancelled or last_error):
+                try:
+                    final_status = "cancelled" if cancelled else "failed"
+                    error_message = "client disconnected" if cancelled else str(last_error)
+                    self.persistence.update_assistant_final_status(
+                        message_id=assistant_message_id,
+                        status=final_status,
+                        content=full_response,
+                        error_message=error_message,
+                        token_used=token_used,
+                        tool_results=(
+                            normalize_from_stream_events(collected_tool_calls)
+                            if collected_tool_calls else None
+                        ),
+                        citations=(
+                            deduplicate_citations(collected_citations)
+                            if collected_citations else None
+                        ),
+                        context={
+                            "stage": current_stage,
+                            "agent_type": current_agent,
+                        },
+                    )
+                    logger.info(
+                        f"[GraphManager] 流式 - AI回复终态已保存: "
+                        f"message_id={assistant_message_id}, status={final_status}"
+                    )
+                except Exception as persist_error:
+                    logger.error(
+                        f"[GraphManager] 流式 - 保存 AI 回复终态失败: {persist_error}",
+                        exc_info=True,
+                    )
+
         # 兜底：节点内部使用阻塞 agent.invoke 时，astream_events 捕获不到 on_chat_model_stream，
         # full_response 会为空。此时从最终状态取 last_response 补发一次，保证回复能到达前端。
-        if not full_response and not stream_error:
+        if not full_response and not last_error and streaming_graph is not None:
             try:
                 final_state = streaming_graph.get_state(thread_config)
                 fallback_resp = ""
                 if final_state and getattr(final_state, "values", None):
-                    fallback_resp = final_state.values.get("last_response", "") or ""
+                    final_values = final_state.values
+                    fallback_resp = final_values.get("last_response", "") or ""
+                    if token_used is None:
+                        token_used = self._extract_token_used_from_result(
+                            final_values,
+                            previous_message_count,
+                        )
                 if fallback_resp:
                     full_response = fallback_resp
                     logger.info(
@@ -756,37 +853,54 @@ class GraphManager:
             except Exception as e:
                 logger.warning(f"[GraphManager] 流式回退 last_response 失败: {e}")
 
-        # === 两阶段写入 - 第二阶段：流结束后保存完整回复 ===
-        if assistant_msg_id and conversation_id:
+        if token_used is None and not last_error and streaming_graph is not None:
             try:
-                if stream_error:
-                    self.persistence.update_assistant_failed(
-                        message_id=assistant_msg_id,
-                        error_message=str(stream_error),
+                final_state = streaming_graph.get_state(thread_config)
+                if final_state and getattr(final_state, "values", None):
+                    token_used = self._extract_token_used_from_result(
+                        final_state.values,
+                        previous_message_count,
                     )
-                else:
-                    self.persistence.update_assistant_success(
-                        message_id=assistant_msg_id,
-                        content=full_response,
-                        token_used=None,
-                        tool_results=collected_tool_calls if collected_tool_calls else None,
-                        context={
-                            "stage": current_stage,
-                            "agent_type": current_agent,
-                        },
-                    )
-                    logger.debug(f"[GraphManager] 流式 - AI回复已保存: {assistant_msg_id}")
+            except Exception as e:
+                logger.debug(f"[GraphManager] 流式回退提取 token_used 失败: {e}")
+
+        stream_completed = not last_error and not cancelled
+
+        # === 两阶段写入 - 第二阶段：流结束后保存完整回复 ===
+        if assistant_message_id and conversation_id and stream_completed:
+            try:
+                self.persistence.update_assistant_success(
+                    message_id=assistant_message_id,
+                    content=full_response,
+                    token_used=token_used,
+                    tool_results=(
+                        normalize_from_stream_events(collected_tool_calls)
+                        if collected_tool_calls else None
+                    ),
+                    citations=(
+                        deduplicate_citations(collected_citations)
+                        if collected_citations else None
+                    ),
+                    context={
+                        "stage": current_stage,
+                        "agent_type": current_agent,
+                    },
+                )
+                logger.debug(f"[GraphManager] 流式 - AI回复已保存: {assistant_message_id}")
 
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
 
         # 发送完成事件
+        final_citations = deduplicate_citations(collected_citations) if collected_citations else []
         yield {
             "type": "done",
             "content": full_response,
+            "citations": final_citations,
             "metadata": {
                 "agent_type": current_agent,
                 "stage": current_stage,
+                "citations": final_citations,
             },
         }
 
@@ -1053,36 +1167,172 @@ class GraphManager:
 
         return ""
 
-    def _extract_tool_results(self, result: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    def _extract_token_used_from_result(
+        self,
+        result: Dict[str, Any],
+        previous_message_count: int = 0,
+    ) -> Optional[int]:
         """
-        从结果中提取工具调用结果
+        从图执行结果中提取本轮 AIMessage 的 token_used。
 
-        Args:
-            result: 图执行结果
-
-        Returns:
-            工具调用结果列表，如果没有则返回 None
+        优先检查本轮新增消息，避免把历史消息 usage 误写到当前 assistant 消息；
+        如果没有新增范围或新增消息没有 usage，再回退到最终 assistant 消息和旧的 state 字段。
         """
-        tool_results = []
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        if not isinstance(messages, list):
+            messages = []
 
-        # 从消息中提取工具调用
-        messages = result.get("messages", [])
-        for msg in messages:
-            if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+        candidate_groups = []
+        if previous_message_count and len(messages) > previous_message_count:
+            candidate_groups.append(messages[previous_message_count:])
+        candidate_groups.append(messages)
+
+        seen_groups = set()
+        for candidates in candidate_groups:
+            group_id = id(candidates)
+            if group_id in seen_groups:
+                continue
+            seen_groups.add(group_id)
+            for msg in reversed(candidates):
+                token_used = extract_token_used_from_ai_message(msg)
+                if token_used is not None:
+                    return token_used
+
+        return merge_token_used(None, result.get("token_used") if isinstance(result, dict) else None)
+
+    def _get_state_message_count(self, graph, thread_config: Dict[str, Any]) -> int:
+        """读取图当前 checkpoint 中的消息数量；失败时返回 0，不阻断对话。"""
+        try:
+            state = graph.get_state(thread_config)
+            values = getattr(state, "values", None)
+            if not isinstance(values, dict):
+                return 0
+            messages = values.get("messages", [])
+            return len(messages) if isinstance(messages, list) else 0
+        except Exception as e:
+            logger.debug(f"[GraphManager] 读取历史消息数量失败，跳过本轮范围判断: {e}")
+            return 0
+
+    def _extract_citations(
+        self,
+        result: Dict[str, Any],
+        previous_message_count: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """从本轮搜索工具结果中抽取并去重 citations。"""
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        if not isinstance(messages, list):
+            messages = []
+
+        candidate_messages = messages
+        if previous_message_count and len(messages) > previous_message_count:
+            candidate_messages = messages[previous_message_count:]
+
+        citations: List[Dict[str, Any]] = []
+        tool_names_by_id: Dict[Any, str] = {}
+
+        for msg in candidate_messages:
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                 for tool_call in msg.tool_calls:
-                    tool_results.append({
-                        "tool": tool_call.get("name", "unknown"),
-                        "args": tool_call.get("args", {}),
-                    })
+                    tool_call_id = self._get_value(tool_call, "id") or self._get_value(tool_call, "tool_call_id")
+                    tool_name = self._get_tool_call_name(tool_call)
+                    if tool_call_id and tool_name:
+                        tool_names_by_id[tool_call_id] = tool_name
 
-        # 从状态中提取（如果有）
-        if result.get("tool_results"):
-            if isinstance(result["tool_results"], list):
-                tool_results.extend(result["tool_results"])
-            else:
-                tool_results.append(result["tool_results"])
+        for msg in candidate_messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            tool_call_id = self._get_value(msg, "tool_call_id")
+            tool_name = self._get_value(msg, "name") or tool_names_by_id.get(tool_call_id, "")
+            content = self._get_value(msg, "content")
+            if self._is_search_tool(tool_name) or self._looks_like_search_results(content):
+                citations.extend(extract_citations_from_search_results(content))
 
-        return tool_results if tool_results else None
+        # 兼容旧状态字段和 A2 统一 tool_results 结构。
+        raw_tool_results = result.get("tool_results") if isinstance(result, dict) else None
+        for tool_result in raw_tool_results if isinstance(raw_tool_results, list) else []:
+            tool_name = self._get_value(tool_result, "name") or self._get_value(tool_result, "tool")
+            content = self._get_value(tool_result, "content")
+            if content is None:
+                content = self._get_value(tool_result, "output")
+            if self._is_search_tool(tool_name) or self._looks_like_search_results(content):
+                citations.extend(extract_citations_from_search_results(content))
+
+        return deduplicate_citations(citations)
+
+    @staticmethod
+    def _is_search_tool(tool_name: Any) -> bool:
+        """判断工具名是否属于搜索类工具。"""
+        name = str(tool_name or "").lower()
+        return "search" in name or name in {"web_search_medical"}
+
+    @staticmethod
+    def _looks_like_search_results(value: Any) -> bool:
+        """在工具名缺失时，用结构特征兜底识别搜索结果。"""
+        if value is None:
+            return False
+        if hasattr(value, "content"):
+            value = getattr(value, "content")
+        if isinstance(value, dict):
+            return "results_by_type" in value or any(
+                key in value for key in ("results", "items", "sources", "citations")
+            )
+        if isinstance(value, str):
+            return "results_by_type" in value or '"url"' in value and '"title"' in value
+        return False
+
+    @staticmethod
+    def _get_value(source: Any, key: str, default: Any = None) -> Any:
+        if source is None:
+            return default
+        if isinstance(source, dict):
+            return source.get(key, default)
+        return getattr(source, key, default)
+
+    def _get_tool_call_name(self, tool_call: Any) -> str:
+        function_info = self._get_value(tool_call, "function")
+        return (
+            self._get_value(tool_call, "name")
+            or self._get_value(function_info, "name")
+            or ""
+        )
+
+    def _extract_tool_results(
+        self,
+        result: Dict[str, Any],
+        previous_message_count: int = 0,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        从非流式图结果中提取并归一化工具调用结果。
+
+        只优先处理本轮新增消息，避免把历史 tool_results 重复写入当前 assistant 消息。
+        """
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        if not isinstance(messages, list):
+            messages = []
+
+        candidate_messages = messages
+        if previous_message_count and len(messages) > previous_message_count:
+            candidate_messages = messages[previous_message_count:]
+
+        tool_calls = []
+        tool_messages = []
+        for msg in candidate_messages:
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                tool_calls.extend(msg.tool_calls)
+            elif isinstance(msg, ToolMessage):
+                tool_messages.append(msg)
+
+        normalized = normalize_from_tool_calls(tool_calls, tool_messages)
+        if normalized:
+            return normalized
+
+        # 兼容旧状态字段：若图节点直接写入 tool_results，也统一走同一结构。
+        raw_tool_results = result.get("tool_results") if isinstance(result, dict) else None
+        if raw_tool_results:
+            normalized_from_state = normalize_from_stream_events(raw_tool_results)
+            return normalized_from_state if normalized_from_state else None
+
+        return None
 
 
 # 单例实例
