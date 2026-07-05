@@ -7,6 +7,7 @@
 import uuid
 import json
 import logging
+import asyncio
 import re
 from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException, status
@@ -118,6 +119,7 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
                 "enable_web_search": request.enable_web_search,
                 "web_search_types": request.web_search_types,
                 "thread_id": result.get("thread_id", ""),
+                "citations": result.get("citations", []),
             }
         )
 
@@ -191,6 +193,7 @@ async def research_chat_stream(request: ResearchChatRequest):
             # 调用异步流式对话（Token 级别）
             full_response = ""
             current_stage = "greeting"
+            citations = []
 
             async for chunk in graph_manager.chat_stream_async(
                 patient_id=request.patient_id or request.doctor_id,
@@ -225,12 +228,37 @@ async def research_chat_stream(request: ResearchChatRequest):
                 elif event_type == "done":
                     full_response = content
                     current_stage = metadata.get("stage", current_stage)
+                    citations = chunk.get("citations") or metadata.get("citations") or []
 
                 elif event_type == "error":
                     yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
 
             # 发送完成事件
-            yield f"data: {json.dumps({'event': 'done', 'response': full_response, 'session_id': session_id, 'conversation_id': conversation_id, 'stage': current_stage, 'agent_type': 'research', 'metadata': {'doctor_id': request.doctor_id, 'patient_id': request.patient_id, 'enable_institution_data': request.enable_institution_data, 'enable_web_search': request.enable_web_search}})}\n\n"
+            done_data = {
+                'event': 'done',
+                'response': full_response,
+                'session_id': session_id,
+                'conversation_id': conversation_id,
+                'stage': current_stage,
+                'agent_type': 'research',
+                'citations': citations,
+                'metadata': {
+                    'doctor_id': request.doctor_id,
+                    'patient_id': request.patient_id,
+                    'enable_institution_data': request.enable_institution_data,
+                    'enable_web_search': request.enable_web_search,
+                    'citations': citations,
+                },
+            }
+            yield f"data: {json.dumps(done_data)}\n\n"
+
+        except GeneratorExit:
+            logger.info("[ResearchRouter] SSE 生成器关闭，取消科研流式对话")
+            raise
+
+        except asyncio.CancelledError:
+            logger.info("[ResearchRouter] SSE 客户端断开，取消科研流式对话")
+            raise
 
         except Exception as e:
             logger.error(f"[ResearchRouter] SSE生成错误: {e}", exc_info=True)
