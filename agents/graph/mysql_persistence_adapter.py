@@ -100,29 +100,35 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         content: str,
         token_used: Optional[int] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """更新 AI 回复为成功"""
+        """更新 AI 回复为成功，tool_results/citations 由 GraphManager 统一归一化。"""
         try:
             # 构建更新的上下文
             updated_context = None
-            if context or tool_results:
+            if context or tool_results or citations:
                 updated_context = MessageContext(
                     patient_info=None,
                     conversation_stage=context.get("stage") if context else None,
                     tool_results=tool_results if tool_results else None,
+                    citations=citations if citations else None,
                     metadata={
                         "agent_type": context.get("agent_type") if context else None,
                     } if context else None,
                 )
 
-            success = self.service.update_message(
-                message_id=message_id,
-                content=content,
-                status="success",
-                token_used=token_used,
-                context=updated_context,
-            )
+            update_kwargs = {
+                "message_id": message_id,
+                "content": content,
+                "status": "success",
+                "context": updated_context,
+            }
+            # provider 未返回 usage 时保持 token_used 不更新，避免用 None 覆盖已有值。
+            if token_used is not None:
+                update_kwargs["token_used"] = token_used
+
+            success = self.service.update_message(**update_kwargs)
 
             logger.debug(
                 f"[MySQLPersistenceAdapter] 更新 AI 成功: message_id={message_id}, "
@@ -155,6 +161,53 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
 
         except Exception as e:
             logger.error(f"[MySQLPersistenceAdapter] 更新 AI 失败状态失败: {e}", exc_info=True)
+            return False
+
+    def update_assistant_final_status(
+        self,
+        message_id: str,
+        status: str,
+        content: str,
+        error_message: Optional[str] = None,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """更新 AI 回复为最终状态，tool_results/citations 由 GraphManager 统一归一化。"""
+        try:
+            updated_context = None
+            if context or tool_results or citations:
+                updated_context = MessageContext(
+                    patient_info=None,
+                    conversation_stage=context.get("stage") if context else None,
+                    tool_results=tool_results if tool_results else None,
+                    citations=citations if citations else None,
+                    metadata={
+                        "agent_type": context.get("agent_type") if context else None,
+                    } if context else None,
+                )
+
+            update_kwargs = {
+                "message_id": message_id,
+                "content": content,
+                "status": status,
+                "context": updated_context,
+                "error_message": error_message,
+            }
+            # provider 未返回 usage 时保持 token_used 不更新，避免用 None 覆盖已有值。
+            if token_used is not None:
+                update_kwargs["token_used"] = token_used
+
+            success = self.service.update_message(**update_kwargs)
+
+            logger.info(
+                f"[MySQLPersistenceAdapter] 更新 AI 最终状态: message_id={message_id}, status={status}"
+            )
+            return success
+
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 最终状态失败: {e}", exc_info=True)
             return False
 
     def update_conversation_title(
@@ -202,6 +255,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             patient_info=context.get("patient_info") if is_first_message else None,
             conversation_stage=context.get("stage"),
             tool_results=None,  # 用户消息无 tool_results
+            citations=None,  # 用户消息无 citations
             metadata={
                 "agent_type": context.get("agent_type"),
             } if context.get("agent_type") else None,
@@ -227,6 +281,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             patient_info=None,  # AI 消息不保存 patient_info
             conversation_stage=context.get("stage"),
             tool_results=None,  # 占位时无结果，成功后更新
+            citations=None,  # 占位时无引用来源，成功后更新
             metadata={
                 "agent_type": context.get("agent_type"),
             } if context.get("agent_type") else None,

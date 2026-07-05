@@ -296,6 +296,7 @@ class ChatPersistenceService:
         patient_info: Optional[Dict[str, Any]] = None,
         conversation_stage: Optional[str] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> MessageContext:
         """
@@ -305,6 +306,7 @@ class ChatPersistenceService:
             patient_info: 患者信息
             conversation_stage: 对话阶段
             tool_results: 工具调用结果
+            citations: 前端 CitationBlock 引用来源
             metadata: 其他元数据
 
         Returns:
@@ -314,6 +316,7 @@ class ChatPersistenceService:
             patient_info=patient_info,
             conversation_stage=conversation_stage,
             tool_results=tool_results,
+            citations=citations,
             metadata=metadata
         )
 
