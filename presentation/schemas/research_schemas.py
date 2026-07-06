@@ -4,7 +4,7 @@ ResearchAgent API Schemas
 """
 import re
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from enum import Enum
 from datetime import datetime
 
@@ -30,6 +30,11 @@ class ResearchChatRequest(BaseModel):
     patient_id: Optional[str] = Field(None, description="患者UUID（查看特定患者数据时需要）")
     session_id: Optional[str] = Field(None, description="会话ID")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID")
+    parent_anchor_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("parent_anchor_id", "parentAnchorId"),
+        description="编辑重发时传入新 user sibling 的 ID",
+    )
     enable_institution_data: bool = Field(False, description="机构数据库访问开关")
     enable_web_search: bool = Field(False, description="网页搜索开关")
     web_search_types: List[str] = Field(
