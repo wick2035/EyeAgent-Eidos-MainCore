@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Any, Optional, Generator, AsyncGenerator, List
 import asyncio
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage  # type: ignore[reportMissingImports]
 
 from agents.graph.state import MedicalState, create_initial_state
 from agents.graph.graph_builder import get_medical_graph, create_medical_graph
@@ -104,6 +104,7 @@ class GraphManager:
         doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
+        parent_anchor_id: Optional[str] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -117,6 +118,7 @@ class GraphManager:
             doctor_id: 医生UUID（医生模式）
             conversation_id: 数据库会话ID（继续对话）
             agent_type: 初始 Agent 类型
+            parent_anchor_id: 父消息锚点ID（编辑重发时 assistant 挂到该 user sibling 下）
             **kwargs: 其他状态参数
 
         Returns:
@@ -171,11 +173,16 @@ class GraphManager:
         assistant_msg_id = None
         if conversation_id:
             try:
-                # 判断是否首条消息
+                # 判断是否首条消息，并在普通发送前捕获 previousActiveNode
                 is_first = self.persistence.is_first_message(conversation_id)
+                previous_message_id = (
+                    None
+                    if parent_anchor_id
+                    else self.persistence.get_latest_message_id(conversation_id)
+                )
 
                 # 确定发送者 ID
-                sender_id = doctor_id if role == "doctor" else patient_id
+                sender_id = doctor_id if role == "doctor" and doctor_id else patient_id
 
                 # 构建用户消息上下文
                 user_context = {
@@ -183,19 +190,24 @@ class GraphManager:
                     "agent_type": agent_type,
                 }
 
-                # 保存用户消息
-                self.persistence.save_user_message(
-                    chat_id=conversation_id,
-                    content=message,
-                    sender_id=sender_id,
-                    context=user_context,
-                    is_first_message=is_first,
-                )
+                # 普通发送由 MainCore 创建 user；编辑重发的 user sibling 已由后端创建。
+                user_message_id = None
+                if not parent_anchor_id:
+                    user_message_id = self.persistence.save_user_message(
+                        chat_id=conversation_id,
+                        content=message,
+                        sender_id=sender_id,
+                        context=user_context,
+                        is_first_message=is_first,
+                        parent_id=previous_message_id,
+                    )
 
                 # 创建 AI 回复占位
                 assistant_msg_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
+                    parent_anchor_id=parent_anchor_id,
+                    parent_id=user_message_id,
                 )
 
                 logger.debug(
@@ -330,6 +342,7 @@ class GraphManager:
         doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
+        parent_anchor_id: Optional[str] = None,
         **kwargs,
     ) -> Generator[Dict[str, Any], None, None]:
         """
@@ -392,24 +405,34 @@ class GraphManager:
         if conversation_id:
             try:
                 is_first = self.persistence.is_first_message(conversation_id)
-                sender_id = doctor_id if role == "doctor" else patient_id
+                previous_message_id = (
+                    None
+                    if parent_anchor_id
+                    else self.persistence.get_latest_message_id(conversation_id)
+                )
+                sender_id = doctor_id if role == "doctor" and doctor_id else patient_id
 
                 user_context = {
                     "stage": "greeting" if is_first else None,
                     "agent_type": agent_type,
                 }
 
-                self.persistence.save_user_message(
-                    chat_id=conversation_id,
-                    content=message,
-                    sender_id=sender_id,
-                    context=user_context,
-                    is_first_message=is_first,
-                )
+                user_message_id = None
+                if not parent_anchor_id:
+                    user_message_id = self.persistence.save_user_message(
+                        chat_id=conversation_id,
+                        content=message,
+                        sender_id=sender_id,
+                        context=user_context,
+                        is_first_message=is_first,
+                        parent_id=previous_message_id,
+                    )
 
                 assistant_msg_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
+                    parent_anchor_id=parent_anchor_id,
+                    parent_id=user_message_id,
                 )
 
             except Exception as e:
@@ -535,6 +558,7 @@ class GraphManager:
         doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
+        parent_anchor_id: Optional[str] = None,
         **kwargs,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -610,22 +634,32 @@ class GraphManager:
         if conversation_id:
             try:
                 is_first = self.persistence.is_first_message(conversation_id)
-                sender_id = doctor_id if role == "doctor" else patient_id
-
-                self.persistence.save_user_message(
-                    chat_id=conversation_id,
-                    content=message,
-                    sender_id=sender_id,
-                    context={
-                        "stage": "greeting" if is_first else None,
-                        "agent_type": agent_type,
-                    },
-                    is_first_message=is_first,
+                previous_message_id = (
+                    None
+                    if parent_anchor_id
+                    else self.persistence.get_latest_message_id(conversation_id)
                 )
+                sender_id = doctor_id if role == "doctor" and doctor_id else patient_id
+
+                user_message_id = None
+                if not parent_anchor_id:
+                    user_message_id = self.persistence.save_user_message(
+                        chat_id=conversation_id,
+                        content=message,
+                        sender_id=sender_id,
+                        context={
+                            "stage": "greeting" if is_first else None,
+                            "agent_type": agent_type,
+                        },
+                        is_first_message=is_first,
+                        parent_id=previous_message_id,
+                    )
 
                 assistant_message_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
+                    parent_anchor_id=parent_anchor_id,
+                    parent_id=user_message_id,
                 )
 
             except Exception as e:
@@ -908,7 +942,7 @@ class GraphManager:
         self,
         session_id: str,
         conversation_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Any]:
         """
         获取会话状态
 
@@ -1126,7 +1160,7 @@ class GraphManager:
             if key in state:
                 state[key] = value
 
-        return state
+        return state  # type: ignore[reportReturnType]
 
     def _extract_response(self, result: Dict[str, Any]) -> str:
         """

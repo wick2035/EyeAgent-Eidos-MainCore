@@ -167,6 +167,19 @@ class IChatMessageRepository(ABC):
         pass
 
     @abstractmethod
+    def get_by_id(self, message_id: str) -> Optional[ChatMessageEntity]:
+        """
+        根据ID获取消息
+
+        Args:
+            message_id: 消息UUID
+
+        Returns:
+            Optional[ChatMessageEntity]: 消息实体，不存在返回 None
+        """
+        pass
+
+    @abstractmethod
     def get_latest_order(self, chat_id: str) -> int:
         """
         获取会话中最新的消息序号
@@ -176,6 +189,19 @@ class IChatMessageRepository(ABC):
 
         Returns:
             int: 最新消息序号，无消息返回 0
+        """
+        pass
+
+    @abstractmethod
+    def get_latest_message(self, chat_id: str) -> Optional[ChatMessageEntity]:
+        """
+        获取会话中最新的一条消息
+
+        Args:
+            chat_id: 会话UUID
+
+        Returns:
+            Optional[ChatMessageEntity]: 最新消息实体，无消息返回 None
         """
         pass
 

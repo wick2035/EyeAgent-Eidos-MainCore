@@ -93,6 +93,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             doctor_id=request.doctor_id,
             conversation_id=conversation_id,
             agent_type=request.agent_type or "health",
+            parent_anchor_id=request.parent_anchor_id,
             attachments=attachments_raw,
             attachment_analysis=attachment_analysis,
         )
@@ -428,6 +429,7 @@ async def chat_stream(request: ChatRequest):
                 doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 agent_type=request.agent_type or "health",
+                parent_anchor_id=request.parent_anchor_id,
                 attachments=attachments_raw,
                 attachment_analysis=attachment_analysis,
             ):

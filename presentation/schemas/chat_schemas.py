@@ -3,7 +3,7 @@
 """
 import re
 from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from presentation.schemas.ui_schemas import UIElements
 
@@ -43,6 +43,11 @@ class ChatRequest(BaseModel):
     agent_type: Optional[str] = Field("health", description="Agent类型 (health/report/reminder/research/compliance/recommendation)")
     role: Optional[str] = Field("patient", description="用户角色 (patient/doctor)")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID（用于继续对话，为空则创建新会话）")
+    parent_anchor_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("parent_anchor_id", "parentAnchorId"),
+        description="编辑重发时传入新 user sibling 的 ID",
+    )
     attachments: Optional[List[AttachmentRef]] = Field(None, description="附件列表（图片/PDF），由前端通过 /api/upload 上传后附带")
 
     @field_validator('patient_id')
@@ -72,7 +77,8 @@ class ChatRequest(BaseModel):
                         "patient_id": "550e8400-e29b-41d4-a716-446655440000",
                         "agent_type": "health",
                         "role": "patient",
-                        "conversation_id": None
+                        "conversation_id": None,
+                        "parent_anchor_id": None
                     }
                 },
                 {
@@ -84,7 +90,8 @@ class ChatRequest(BaseModel):
                         "doctor_id": "660e8400-e29b-41d4-a716-446655440001",
                         "agent_type": "report",
                         "role": "doctor",
-                        "conversation_id": None
+                        "conversation_id": None,
+                        "parent_anchor_id": None
                     }
                 }
             ]
@@ -118,4 +125,3 @@ class ChatResponse(BaseModel):
                 }
             }
         }
-

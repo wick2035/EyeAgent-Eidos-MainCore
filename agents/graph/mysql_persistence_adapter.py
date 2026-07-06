@@ -36,6 +36,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
+        parent_id: Optional[str] = None,
     ) -> str:
         """保存用户消息"""
         try:
@@ -49,6 +50,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
                 content=content,
                 sender_id=sender_id,
                 context=msg_context,
+                parent_id=parent_id,
                 status="success",
             )
 
@@ -70,6 +72,8 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         self,
         chat_id: str,
         context: Optional[Dict[str, Any]] = None,
+        parent_anchor_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> str:
         """创建 AI 回复占位"""
         try:
@@ -81,6 +85,8 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
                 content="",  # 占位，后续更新
                 sender_id=None,
                 context=msg_context,
+                parent_anchor_id=parent_anchor_id,
+                parent_id=parent_id,
                 status="running",
             )
 
@@ -93,6 +99,14 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         except Exception as e:
             logger.error(f"[MySQLPersistenceAdapter] 创建 AI 占位失败: {e}", exc_info=True)
             raise
+
+    def get_latest_message_id(self, chat_id: str) -> Optional[str]:
+        """获取会话最新消息ID。"""
+        try:
+            return self.service.get_latest_message_id(chat_id)
+        except Exception as e:
+            logger.error(f"[MySQLPersistenceAdapter] 获取最新消息失败: {e}", exc_info=True)
+            return None
 
     def update_assistant_success(
         self,

@@ -96,6 +96,8 @@ class ChatPersistenceService:
         sender_id: Optional[str] = None,
         context: Optional[MessageContext] = None,
         token_used: Optional[int] = None,
+        parent_anchor_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
         status: str = "success",
     ) -> ChatMessageEntity:
         """
@@ -108,6 +110,8 @@ class ChatPersistenceService:
             sender_id: 发送者ID
             context: 上下文信息
             token_used: 使用的token数
+            parent_anchor_id: 父消息锚点ID（编辑重发时用于树形分支）
+            parent_id: 显式父消息ID（普通发送时用于连接 previous -> user -> assistant）
             status: 消息状态 (running/success/failed/cancelled)
 
         Returns:
@@ -120,6 +124,10 @@ class ChatPersistenceService:
         message_id = str(uuid.uuid4())
         now = datetime.now()
 
+        effective_parent_id = parent_anchor_id or parent_id
+        if parent_anchor_id:
+            self._validate_parent_anchor(chat_id, parent_anchor_id)
+
         # 序列化上下文
         context_json = None
         if context:
@@ -128,6 +136,7 @@ class ChatPersistenceService:
         message = ChatMessageEntity(
             id=message_id,
             chat_id=chat_id,
+            parent_id=effective_parent_id,
             message_order=message_order,
             message_content=content,
             message_type=role,
@@ -153,6 +162,21 @@ class ChatPersistenceService:
 
         logger.debug(f"[ChatPersistenceService] 保存消息: {message_id}, order={message_order}, status={status}")
         return message
+
+    def _validate_parent_anchor(self, chat_id: str, parent_anchor_id: str) -> None:
+        """验证编辑重发锚点存在且属于当前会话，防止跨会话 parent 链。"""
+        anchor_message = self.message_repo.get_by_id(parent_anchor_id)
+        if not anchor_message:
+            raise ValueError(f"parent_anchor_id 不存在: {parent_anchor_id}")
+        if anchor_message.chat_id != chat_id:
+            raise ValueError(
+                f"parent_anchor_id 不属于当前会话: anchor={parent_anchor_id}, chat_id={chat_id}"
+            )
+
+    def get_latest_message_id(self, chat_id: str) -> Optional[str]:
+        """获取当前会话最新消息ID；无消息时返回 None。"""
+        latest_message = self.message_repo.get_latest_message(chat_id)
+        return latest_message.id if latest_message else None
 
     def update_conversation_title(self, chat_id: str, first_user_message: str) -> bool:
         """

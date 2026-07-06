@@ -31,6 +31,7 @@ class PersistenceAdapter(ABC):
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
+        parent_id: Optional[str] = None,
     ) -> str:
         """
         保存用户消息
@@ -41,6 +42,7 @@ class PersistenceAdapter(ABC):
             sender_id: 发送者ID
             context: 上下文信息 {patient_info, stage, agent_type}
             is_first_message: 是否为首条消息
+            parent_id: 父消息ID，普通发送时指向前一条消息
 
         Returns:
             str: 消息ID
@@ -52,6 +54,8 @@ class PersistenceAdapter(ABC):
         self,
         chat_id: str,
         context: Optional[Dict[str, Any]] = None,
+        parent_anchor_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> str:
         """
         创建 AI 回复占位（status=running）
@@ -61,11 +65,17 @@ class PersistenceAdapter(ABC):
         Args:
             chat_id: 会话ID
             context: 上下文信息
+            parent_anchor_id: 父消息锚点ID（编辑重发时用于树形分支）
+            parent_id: 父消息ID（普通发送时指向刚创建的 user 消息）
 
         Returns:
             str: 消息ID（用于后续更新）
         """
         pass
+
+    def get_latest_message_id(self, chat_id: str) -> Optional[str]:
+        """获取会话最新消息ID；适配器不支持时返回 None。"""
+        return None
 
     @abstractmethod
     def update_assistant_success(
@@ -179,6 +189,7 @@ class NullPersistenceAdapter(PersistenceAdapter):
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
+        parent_id: Optional[str] = None,
     ) -> str:
         logger.debug(f"[NullAdapter] save_user_message: chat_id={chat_id}")
         return "null-msg-id"
@@ -187,6 +198,8 @@ class NullPersistenceAdapter(PersistenceAdapter):
         self,
         chat_id: str,
         context: Optional[Dict[str, Any]] = None,
+        parent_anchor_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> str:
         logger.debug(f"[NullAdapter] create_assistant_placeholder: chat_id={chat_id}")
         return "null-assistant-id"
@@ -258,6 +271,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
+        parent_id: Optional[str] = None,
     ) -> str:
         import uuid
         message_id = str(uuid.uuid4())
@@ -267,6 +281,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
             "chat_id": chat_id,
             "content": content,
             "sender_id": sender_id,
+            "parent_id": parent_id,
             "message_type": "user",
             "context": context,
             "status": "success",
@@ -284,6 +299,8 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         self,
         chat_id: str,
         context: Optional[Dict[str, Any]] = None,
+        parent_anchor_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> str:
         import uuid
         message_id = str(uuid.uuid4())
@@ -291,6 +308,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         self.messages[message_id] = {
             "id": message_id,
             "chat_id": chat_id,
+            "parent_id": parent_anchor_id or parent_id,
             "content": "",
             "message_type": "assistant",
             "context": context,
@@ -298,6 +316,10 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         }
 
         return message_id
+
+    def get_latest_message_id(self, chat_id: str) -> Optional[str]:
+        messages = [m for m in self.messages.values() if m["chat_id"] == chat_id]
+        return messages[-1]["id"] if messages else None
 
     def update_assistant_success(
         self,

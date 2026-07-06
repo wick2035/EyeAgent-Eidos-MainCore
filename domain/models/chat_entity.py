@@ -50,6 +50,7 @@ class ChatMessageEntity(BaseModel):
     """
     id: str = Field(..., description="消息UUID")
     chat_id: str = Field(..., description="所属会话ID (FK -> chat_conversation)")
+    parent_id: Optional[str] = Field(default=None, description="父消息ID，None 表示根消息")
     message_order: int = Field(..., description="消息顺序")
     message_content: str = Field(..., description="消息内容")
     message_type: str = Field(..., description="消息类型 (user/assistant/system)")
@@ -70,6 +71,7 @@ class ChatMessageEntity(BaseModel):
             "example": {
                 "id": "550e8400-e29b-41d4-a716-446655440002",
                 "chat_id": "550e8400-e29b-41d4-a716-446655440000",
+                "parent_id": None,
                 "message_order": 1,
                 "message_content": "我眼睛最近很干涩",
                 "message_type": "user",
