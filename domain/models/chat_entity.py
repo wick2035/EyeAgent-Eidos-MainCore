@@ -51,6 +51,7 @@ class ChatMessageEntity(BaseModel):
     id: str = Field(..., description="消息UUID")
     chat_id: str = Field(..., description="所属会话ID (FK -> chat_conversation)")
     parent_id: Optional[str] = Field(default=None, description="父消息ID，None 表示根消息")
+    siblings_group_id: Optional[str] = Field(default=None, description="兄弟分支组ID，None 表示未分支")
     message_order: int = Field(..., description="消息顺序")
     message_content: str = Field(..., description="消息内容")
     message_type: str = Field(..., description="消息类型 (user/assistant/system)")

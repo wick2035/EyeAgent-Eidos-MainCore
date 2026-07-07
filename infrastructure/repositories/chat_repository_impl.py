@@ -195,15 +195,16 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 INSERT INTO chat_message
-                (id, chat_id, parent_id, message_order, message_content, message_type,
+                (id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                  sender_id, context, token_used, status, error_message,
                  create_time, create_by, update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params = (
                 message.id,
                 message.chat_id,
                 message.parent_id,
+                message.siblings_group_id,
                 message.message_order,
                 message.message_content,
                 message.message_type,
@@ -239,7 +240,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 SELECT id, chat_id, message_order, message_content, message_type,
-                       parent_id, sender_id, context, token_used, status, error_message,
+                       parent_id, siblings_group_id, sender_id, context, token_used, status, error_message,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
                 WHERE id = %s AND deleted = 0
@@ -308,7 +309,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 SELECT id, chat_id, message_order, message_content, message_type,
-                       parent_id, sender_id, context, token_used, status, error_message,
+                       parent_id, siblings_group_id, sender_id, context, token_used, status, error_message,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
                 WHERE chat_id = %s AND deleted = 0
@@ -342,7 +343,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 SELECT id, chat_id, message_order, message_content, message_type,
-                       parent_id, sender_id, context, token_used, status, error_message,
+                       parent_id, siblings_group_id, sender_id, context, token_used, status, error_message,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
                 WHERE chat_id = %s AND deleted = 0
@@ -377,16 +378,17 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 INSERT INTO chat_message
-                (id, chat_id, parent_id, message_order, message_content, message_type,
+                (id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                  sender_id, context, token_used, create_time, create_by,
                  update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params_list = [
                 (
                     msg.id,
                     msg.chat_id,
                     msg.parent_id,
+                    msg.siblings_group_id,
                     msg.message_order,
                     msg.message_content,
                     msg.message_type,
@@ -431,6 +433,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
             id=row["id"],
             chat_id=row["chat_id"],
             parent_id=row.get("parent_id"),
+            siblings_group_id=row.get("siblings_group_id"),
             message_order=row["message_order"] or 0,
             message_content=row["message_content"] or "",
             message_type=row["message_type"] or "user",
