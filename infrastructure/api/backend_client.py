@@ -556,6 +556,71 @@ class BackendAPIClient:
                                 "notes": notes,
                             })
 
+    # ========== AgentToolController 新增接口 ==========
+
+    def get_patient_comprehensive_profile(self, patient_id: str) -> Dict[str, Any]:
+        """
+        获取患者综合画像
+
+        Args:
+            patient_id: 患者UUID
+
+        Returns:
+            综合画像字典，包含：
+            - patient: 患者基础信息（含最近过敏史）
+            - medicalRecords: 病历列表
+            - checkHistory: 检查记录列表
+            - prescriptions: 最近处方（含明细）
+        """
+        return self._request('GET', '/agent/api/patient-comprehensive-profile',
+                            params={'patientId': patient_id})
+
+    def search_medicines(self, page_num: int = 1, page_size: int = 10,
+                         keyword: str = "") -> Any:
+        """
+        分页搜索药品（按药品名称模糊匹配）
+
+        Args:
+            page_num: 页码，从 1 开始
+            page_size: 每页数量
+            keyword: 药品名称关键字（可选）
+
+        Returns:
+            药品列表（_request 已剥离 SaResult 顶层，仅返回 data）
+        """
+        params = {'pageNum': page_num, 'pageSize': page_size}
+        if keyword:
+            params['keyword'] = keyword
+        return self._request('GET', '/agent/api/medicine-page', params=params)
+
+    def create_prescription_order(self, prescription_id: str,
+                                  remark: Optional[str] = None,
+                                  sa_token: Optional[str] = None) -> Dict[str, Any]:
+        """
+        根据处方ID创建处方药订单
+
+        Args:
+            prescription_id: 处方UUID
+            remark: 订单备注（可选）
+            sa_token: 医生登录态 sa-token（可选）
+
+        Returns:
+            订单对象（DrugOrder）
+
+        Note:
+            后端通过 StpUtil.getLoginIdAsString() 读取登录医生 ID，
+            需要在 header 携带 satoken。当前系统尚未接入 sa-token 流转，
+            sa_token 形参为未来扩展预留。
+        """
+        body = {'prescriptionId': prescription_id}
+        if remark:
+            body['remark'] = remark
+        kwargs: Dict[str, Any] = {'json': body}
+        if sa_token:
+            kwargs['headers'] = {'satoken': sa_token}
+        return self._request('POST', '/agent/api/create-prescription-order',
+                            **kwargs)
+
     def close(self):
         """关闭连接"""
         self.session.close()

@@ -44,13 +44,31 @@ def _get_doctor_system_prompt() -> str:
 
 ## 工作流程
 1. 先了解医生的推荐需求（针对哪位患者、什么诊断）
-2. 使用 `get_patient_diagnosis_summary` 获取患者诊断信息
-3. 使用 `get_recommended_products` 或 `search_products` 搜索匹配产品
+2. 使用 `get_patient_diagnosis_summary` 获取患者诊断信息（已可结合综合画像）
+3. **药品搜索优先用 `search_medicines`**（真实药品数据库，支持处方药/OTC全类型）；
+   `search_products` / `get_recommended_products` 仅作器械（DEVICE）类的兜底
 4. 展示推荐产品（使用产品卡片格式）
-5. 医生确认后使用 `create_product_prescription` 记录处方
+5. 医生确认后使用 `create_product_prescription` 记录处方推荐
+6. **下单环节（仅医生）**：当医生明确说"创建订单/下单/为患者下单"且已存在
+   有效 prescriptionId 时，调用 `create_prescription_order(prescription_id, remark)`
 
 ## 产品卡片输出格式
 当你需要展示推荐产品时，必须在文本回复末尾使用以下标记格式输出产品卡片数据：
+
+### 字段映射（药品来源 search_medicines）
+当工具返回的是 search_medicines 数据（含 drugId / drugName / isPrescriptionDrug 等字段）时，
+按以下方式映射到产品卡片：
+- product_id ← drugId（或 id）
+- product_name ← drugName
+- generic_name ← drugName（无单独通用名时同 drugName）
+- product_type ← "PRESCRIPTION" 若 isPrescriptionDrug 为 true，否则 "OTC"
+- category ← drugCategory
+- specification ← drugSpecification
+- unit_price ← price
+- stock_status ← "IN_STOCK" 若 stockQuantity > 0 else "OUT_OF_STOCK"
+- indications ← drugDescription（截取前 60 字）
+- is_prescription ← isPrescriptionDrug
+- image_url ← 留空字符串（接口未返回，禁止伪造图片URL）
 
 [PRODUCT_CARDS]
 [
@@ -95,6 +113,14 @@ def _get_doctor_system_prompt() -> str:
 - 每次最多推荐3-5个产品
 - 先给出文字分析和推荐理由，再输出产品卡片
 
+## 处方下单严禁条款（绝对不可违反）
+- **绝对不可在医生未明确确认（如"确认下单"、"为患者下单"）前调用 create_prescription_order**
+- **绝对不可凭空捏造 prescriptionId**，必须来自工具返回（get_patient_prescription_detail
+  / 综合画像中的 prescriptions / create_product_prescription 的结果）
+- 调用 create_prescription_order 前先口头复述：处方编号 / 主要药品 / 总金额，请求医生最后确认
+- create_prescription_order 工具未返回成功之前，**禁止说**"已下单"、"订单已创建"、"已为患者下单"
+- 工具返回成功后，回复中需提示"当前为模拟下单（接入正式 sa-token 鉴权前）"
+
 """
 
 
@@ -115,8 +141,11 @@ def _get_patient_system_prompt() -> str:
 1. 友好问候，了解患者需求（什么症状、想买什么类型的产品）
 2. 通过选项卡片引导患者选择需求类型
 3. 收集更多症状信息
-4. 使用 `search_products` 或 `get_recommended_products` 搜索合适产品
-5. 展示推荐产品（使用产品卡片格式）
+4. **药品搜索优先用 `search_medicines`**（真实药品数据库）；
+   器械（热敷眼罩、防蓝光眼镜等）才用 `search_products`
+5. 展示推荐产品时，根据 isPrescriptionDrug 字段：
+   - false（OTC）→ action_type="ADD_TO_CART", action_label="加入购物车"
+   - true（处方药）→ action_type="VIEW_DETAIL", action_label="需医生处方"，**不可直接加购**
 6. 患者选择后确认购买
 
 ## 产品卡片输出格式
@@ -161,6 +190,7 @@ def _get_patient_system_prompt() -> str:
 
 ## 重要原则
 - **绝对不能直接推荐处方药给患者购买**，处方药只能标记为"需医生处方"
+- **患者端绝对不能调用 create_prescription_order**（该工具仅医生权限，处方下单需医生在医生端操作）
 - 优先推荐OTC药品和医疗器械
 - 当症状严重时，必须建议患者就医，不要只推荐产品
 - 产品卡片数据必须来自工具调用的真实结果，不要凭空编造产品
@@ -168,6 +198,22 @@ def _get_patient_system_prompt() -> str:
 - 每次最多推荐3-5个产品
 - 在初次对话时使用[OPTIONS]引导患者选择需求类型
 - 先给出文字建议和说明，再输出产品卡片或选项
+
+## 字段映射（药品来源 search_medicines）
+当工具返回的是 search_medicines 数据（含 drugId / drugName / isPrescriptionDrug 等字段）时，
+按以下方式映射到产品卡片：
+- product_id ← drugId（或 id）
+- product_name ← drugName
+- generic_name ← drugName
+- product_type ← "PRESCRIPTION" 若 isPrescriptionDrug 为 true，否则 "OTC"
+- category ← drugCategory
+- specification ← drugSpecification
+- unit_price ← price
+- stock_status ← "IN_STOCK" 若 stockQuantity > 0 else "OUT_OF_STOCK"
+- indications ← drugDescription（截取前 60 字）
+- is_prescription ← isPrescriptionDrug
+- action_type / action_label ← OTC 用 ADD_TO_CART/加入购物车，处方药用 VIEW_DETAIL/需医生处方
+- image_url ← 留空字符串（接口未返回，禁止伪造图片URL）
 
 """
 
@@ -206,8 +252,8 @@ def _get_doctor_stage_prompt(stage: str) -> str:
 - 向医生汇报分析结果
 """,
         "product_search": """当前阶段：产品搜索
-- 根据诊断和需求使用 get_recommended_products 获取推荐
-- 或使用 search_products 按条件搜索
+- 药品搜索优先用 search_medicines（真实数据库，按 keyword 分页，处方药 + OTC 全类型）
+- 器械（角膜塑形镜、热敷眼罩等）才用 search_products / get_recommended_products
 - 筛选最合适的产品（注意禁忌症和药物相互作用）
 - 准备产品卡片数据
 """,
@@ -222,10 +268,17 @@ def _get_doctor_stage_prompt(stage: str) -> str:
 - 医生选择了要开具的产品
 - 使用 create_product_prescription 记录处方
 - 确认用法用量
-- 询问是否还需要推荐其他产品
+- 询问是否还需要推荐其他产品 / 是否需要为患者下单
+""",
+        "prescription_order": """当前阶段：处方下单
+- 医生已明确请求下单，且已存在有效 prescriptionId
+- 先复述：处方编号 / 主要药品 / 总金额，请求医生最后确认
+- 医生确认后调用 create_prescription_order(prescription_id, remark)
+- 工具返回后告知订单编号、订单状态、有效期
+- 提示当前为 Mock 模拟下单（接入正式 sa-token 鉴权前）
 """,
         "completed": """当前阶段：完成
-- 推荐/处方已完成
+- 推荐/处方/订单已完成
 - 总结本次推荐内容
 - 询问是否还有其他需求
 """,
@@ -259,9 +312,9 @@ def _get_patient_stage_prompt(stage: str) -> str:
 - 确定适合推荐的产品类型
 """,
         "product_search": """当前阶段：产品搜索
-- 使用 get_recommended_products 或 search_products 搜索产品
-- 仅搜索OTC产品和医疗器械
-- 过滤掉处方药（或标记为"需医生处方"）
+- 药品搜索优先用 search_medicines（真实数据库，按 keyword 分页）
+- 器械搜索用 search_products / get_recommended_products
+- 处方药（isPrescriptionDrug=true）展示时标记为"需医生处方"，不可直接加购
 """,
         "recommendation": """当前阶段：推荐展示
 - 输出友好的文字建议
@@ -331,5 +384,16 @@ def build_recommendation_context(state: Dict[str, Any]) -> str:
 
     # 当前阶段
     context_parts.append(f"- 当前阶段：{stage}")
+
+    # 综合画像摘要（来自 patient_full_data，由 GraphManager 每轮注入）
+    try:
+        from agents.prompts._profile_summary import build_patient_profile_summary
+        profile_summary = build_patient_profile_summary(state)
+        if profile_summary:
+            context_parts.append("")
+            context_parts.append("【综合画像（病历/检查/近期处方）】")
+            context_parts.append(profile_summary)
+    except Exception as _e:
+        logger.debug(f"[recommendation] 画像摘要拼接跳过: {_e}")
 
     return "\n".join(context_parts)

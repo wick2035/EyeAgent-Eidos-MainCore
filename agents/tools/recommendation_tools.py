@@ -7,7 +7,7 @@ RecommendationAgent 专用工具
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
@@ -374,6 +374,133 @@ def get_patient_diagnosis_summary(patient_id: str) -> str:
         return error_msg
 
 
+# ========== AgentToolController 新接口工具 ==========
+
+@tool
+def search_medicines(
+    page_num: int = 1,
+    page_size: int = 10,
+    keyword: str = "",
+) -> str:
+    """搜索药品（连接真实药品数据库 medicine-page）。
+
+    Args:
+        page_num: 页码，从 1 开始
+        page_size: 每页数量，默认 10，建议 5-20
+        keyword: 药品名称关键字（模糊匹配 drugName），为空则返回全部药品
+
+    Returns:
+        JSON 字符串，每个药品包含：
+        - id: 药品主键
+        - drugId: 业务编号
+        - drugName: 药品名称
+        - drugCategory: 分类（如"眼科用药"）
+        - drugSpecification: 规格
+        - drugDosageForm: 剂型（如"滴眼液"）
+        - manufacturer: 生产厂家
+        - price: 价格
+        - stockQuantity: 库存数量
+        - isPrescriptionDrug: 是否处方药（true/false）
+        - drugStatus: 药品状态
+        - insuranceCategory: 医保类别
+        - warningInfo: 警告信息
+        - drugDescription: 药品说明
+
+    使用场景：
+    - 医生：根据诊断搜索可开具的药品（处方药 + OTC 全类型均可）
+    - 患者：搜索 OTC 药品自购（处方药需标注"需医生处方"，不可直接加购）
+    - 药品搜索请优先使用本工具；search_products 仅作器械（DEVICE）类的兜底
+    """
+    try:
+        logger.info(
+            f"[Tool] search_medicines: page_num={page_num}, page_size={page_size}, keyword={keyword}"
+        )
+        from infrastructure.api.backend_client import get_api_client
+        client = get_api_client()
+        result = client.search_medicines(page_num, page_size, keyword)
+        if not isinstance(result, list):
+            result = result if result is not None else []
+
+        logger.info(f"[Tool Success] search_medicines: 找到 {len(result)} 个药品")
+        return json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        error_msg = f"搜索药品失败: {str(e)}"
+        logger.error(f"[Tool Error] {error_msg}")
+        return error_msg
+
+
+@tool
+def create_prescription_order(
+    prescription_id: str,
+    remark: str = "",
+) -> str:
+    """根据已存在的处方ID创建药品订单（仅医生权限）。
+
+    Args:
+        prescription_id: 处方UUID（必须来自工具返回，不可凭空捏造）
+        remark: 订单备注（可选）
+
+    Returns:
+        JSON字符串，包含订单信息：id（订单ID）、orderNo、prescriptionId、
+        orderStatus、totalAmount、expireTime、createTime 等
+
+    使用场景：
+    - 仅医生模式（role="doctor"）可调用
+    - 必须在医生**显式确认**（如"确认下单"、"为患者下单"）后调用
+    - 调用前应先用 get_patient_prescription_detail 确认处方真实存在
+    - 工具未返回成功之前禁止说"已下单"
+
+    ⚠️ 当前实现说明：
+    - 真实接口 POST /agent/api/create-prescription-order 需 sa-token 医生登录态
+      （后端 StpUtil.getLoginIdAsString），系统尚未接入 sa-token 流转
+    - 本工具暂为 Mock 实现，返回模拟订单数据（含 _mock=true 标记）
+    - 等 sa-token 方案落地后，将切换为 client.create_prescription_order(...) 真实调用
+    """
+    try:
+        if not prescription_id:
+            return "处方ID不能为空"
+
+        logger.info(
+            f"[Tool] create_prescription_order(MOCK): prescription_id={prescription_id}, remark={remark}"
+        )
+
+        # TODO(sa-token): 接入医生登录态 sa-token 后，切换为真实调用：
+        #   from infrastructure.api.backend_client import get_api_client
+        #   client = get_api_client()
+        #   result = client.create_prescription_order(prescription_id, remark, sa_token=...)
+        #   return json.dumps(result, ensure_ascii=False)
+
+        order_id = str(uuid.uuid4())
+        now = datetime.now()
+        result = {
+            "id": order_id,
+            "orderNo": now.strftime("%Y%m%d%H%M%S") + order_id[:5],
+            "prescriptionId": prescription_id,
+            "orderType": "PRESCRIPTION",
+            "orderStatus": "PENDING_PAYMENT",
+            "totalAmount": 0.0,
+            "paymentMethod": None,
+            "paidTime": None,
+            "expireTime": (now + timedelta(days=1)).isoformat(timespec="seconds"),
+            "remark": remark or "AI工具代医生创建处方订单",
+            "createTime": now.isoformat(timespec="seconds"),
+            "updateTime": now.isoformat(timespec="seconds"),
+            "_mock": True,
+            "_note": "当前为 Mock 实现，sa-token 鉴权方案落地后将切换为真实接口",
+        }
+
+        logger.info(
+            f"[Tool Success] create_prescription_order(MOCK): order_id={order_id}"
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        error_msg = f"创建处方订单失败: {str(e)}"
+        logger.error(f"[Tool Error] {error_msg}")
+        return error_msg
+
+
 # ========== Mock 数据生成 ==========
 
 def _get_mock_products(query: str, category: str, product_type: str, limit: int) -> list:
@@ -710,15 +837,17 @@ RECOMMENDATION_DATA_TOOLS = [
 
 # 产品搜索工具
 RECOMMENDATION_PRODUCT_TOOLS = [
-    search_products,
-    get_product_detail,
-    get_recommended_products,
+    search_medicines,         # 真实药品搜索（首选，处方药 + OTC 全类型）
+    search_products,          # Mock，主要用于器械（DEVICE）兜底
+    get_product_detail,       # Mock 详情
+    get_recommended_products, # Mock 智能推荐
 ]
 
 # 操作工具
 RECOMMENDATION_ACTION_TOOLS = [
     add_to_cart,
     create_product_prescription,
+    create_prescription_order,  # 由处方ID创建订单（Mock，待 sa-token 鉴权方案落地）
 ]
 
 # RecommendationAgent 完整工具列表

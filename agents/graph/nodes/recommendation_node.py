@@ -101,6 +101,9 @@ def recommendation_agent_node(state: MedicalState) -> Dict[str, Any]:
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     tool_calls.extend(msg.tool_calls)
 
+        # 下单兜底：拦截 AI 在工具未成功时宣称"已下单"
+        ai_response = _sanitize_premature_order_claim(ai_response, tool_calls, response_messages)
+
         # 检测状态变更
         new_stage = _detect_recommendation_stage(state, ai_response, tool_calls)
         recommendation_completed = _check_recommendation_completed(tool_calls, response_messages)
@@ -143,6 +146,9 @@ def _detect_recommendation_stage(
     # 检测工具调用
     tool_names = [tc.get("name", "") for tc in tool_calls if isinstance(tc, dict)]
 
+    # 处方下单工具被调用 -> 完成阶段
+    if "create_prescription_order" in tool_names:
+        return "completed"
     # 开具处方或加入购物车 -> 对应确认阶段
     if "create_product_prescription" in tool_names:
         return "completed"
@@ -150,7 +156,7 @@ def _detect_recommendation_stage(
         return "purchase_confirm"
 
     # 产品搜索/推荐工具 -> recommendation 阶段
-    product_tools = {"search_products", "get_recommended_products", "get_product_detail"}
+    product_tools = {"search_products", "get_recommended_products", "get_product_detail", "search_medicines"}
     if product_tools & set(tool_names):
         # 检查响应是否包含产品卡片标记
         if "[PRODUCT_CARDS]" in ai_response:
@@ -193,7 +199,11 @@ def _detect_recommendation_stage(
 
 def _check_recommendation_completed(tool_calls: list, messages: list) -> bool:
     """检查推荐流程是否完成"""
-    completion_tools = {"create_product_prescription", "add_to_cart"}
+    completion_tools = {
+        "create_product_prescription",
+        "add_to_cart",
+        "create_prescription_order",
+    }
 
     for tc in tool_calls:
         if isinstance(tc, dict) and tc.get("name") in completion_tools:
@@ -206,3 +216,40 @@ def _check_recommendation_completed(tool_calls: list, messages: list) -> bool:
                 return True
 
     return False
+
+
+def _sanitize_premature_order_claim(
+    ai_response: str,
+    tool_calls: list,
+    messages: list,
+) -> str:
+    """若 AI 宣称"已下单/订单已创建"但 create_prescription_order 工具未真正成功，
+    将该宣称替换为"待确认"提示，避免误导医生。
+
+    参照 health_node._sanitize_premature_confirmation 模式。
+    """
+    if not ai_response:
+        return ai_response
+
+    claim_patterns = ["已下单", "下单成功", "订单已创建", "已为患者下单", "处方订单已创建"]
+    if not any(p in ai_response for p in claim_patterns):
+        return ai_response
+
+    tool_names = {tc.get("name", "") for tc in tool_calls if isinstance(tc, dict)}
+    if "create_prescription_order" not in tool_names:
+        # AI 还没调用工具就宣称下单
+        return (
+            "（系统提示：检测到下单尚未真实执行。请确认处方编号、药品和金额后，"
+            "明确告诉我\"确认下单\"，我再为您创建订单。）"
+        )
+
+    # 检查 ToolMessage 是否包含成功标志（订单 ID 或订单号）
+    for msg in messages:
+        if hasattr(msg, "name") and getattr(msg, "name", "") == "create_prescription_order":
+            content = getattr(msg, "content", "") or ""
+            if '"id"' in content or '"orderNo"' in content:
+                return ai_response
+
+    return (
+        "（系统提示：下单工具未返回成功结果，请稍后重试或核对处方信息。）"
+    )
