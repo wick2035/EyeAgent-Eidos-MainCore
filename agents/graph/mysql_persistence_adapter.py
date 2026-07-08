@@ -27,6 +27,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             persistence_service: ChatPersistenceService 实例
         """
         self.service = persistence_service
+        self._pending_assistant_ids: Dict[str, str] = {}
         logger.info("[MySQLPersistenceAdapter] 初始化完成")
 
     def save_user_message(
@@ -39,28 +40,20 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> str:
         """保存用户消息"""
         try:
-            # 构建 MessageContext
-            msg_context = self._build_user_context(context, is_first_message)
-
-            # 保存消息
-            message = self.service.save_message(
+            ids = self.prepare_normal_turn(
                 chat_id=chat_id,
-                role="user",
                 content=content,
                 sender_id=sender_id,
-                context=msg_context,
-                status="success",
+                context=context,
+                is_first_message=is_first_message,
             )
-
-            # 首条消息更新标题
-            if is_first_message:
-                self.update_conversation_title(chat_id, content)
+            self._pending_assistant_ids[chat_id] = ids["assistant_message_id"]
 
             logger.debug(
                 f"[MySQLPersistenceAdapter] 保存用户消息: chat_id={chat_id}, "
-                f"message_id={message.id}, is_first={is_first_message}"
+                f"message_id={ids['user_message_id']}, is_first={is_first_message}"
             )
-            return message.id
+            return ids["user_message_id"]
 
         except Exception as e:
             logger.error(f"[MySQLPersistenceAdapter] 保存用户消息失败: {e}", exc_info=True)
@@ -73,15 +66,22 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> str:
         """创建 AI 回复占位"""
         try:
-            msg_context = self._build_assistant_context(context)
+            pending_id = self._pending_assistant_ids.pop(chat_id, None)
+            if pending_id:
+                logger.debug(
+                    f"[MySQLPersistenceAdapter] 复用 AI 占位: chat_id={chat_id}, "
+                    f"message_id={pending_id}"
+                )
+                return pending_id
 
-            message = self.service.save_message(
+            msg_context = self._build_assistant_context(context)
+            conversation = self.service._must_get_conversation(chat_id)
+            if not conversation.active_node_id:
+                raise ValueError("会话缺少 active_node_id")
+            message = self.service.create_assistant_regeneration(
                 chat_id=chat_id,
-                role="assistant",
-                content="",  # 占位，后续更新
-                sender_id=None,
+                source_assistant_id=conversation.active_node_id,
                 context=msg_context,
-                status="running",
             )
 
             logger.debug(
@@ -93,6 +93,48 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         except Exception as e:
             logger.error(f"[MySQLPersistenceAdapter] 创建 AI 占位失败: {e}", exc_info=True)
             raise
+
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        msg_context = self._build_user_context(context, is_first_message)
+        user, assistant = self.service.create_turn(chat_id, content, sender_id, msg_context)
+        if is_first_message:
+            self.update_conversation_title(chat_id, content)
+        return {"user_message_id": user.id, "assistant_message_id": assistant.id}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        msg_context = self._build_user_context(context, False)
+        user, assistant = self.service.create_turn(
+            chat_id,
+            content,
+            sender_id,
+            msg_context,
+            source_message_id=source_message_id,
+            mode="edit",
+        )
+        return {"user_message_id": user.id, "assistant_message_id": assistant.id}
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        assistant = self.service.create_assistant_regeneration(chat_id, source_assistant_id)
+        return {"assistant_message_id": assistant.id}
 
     def update_assistant_success(
         self,

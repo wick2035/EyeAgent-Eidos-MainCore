@@ -68,6 +68,40 @@ class PersistenceAdapter(ABC):
         pass
 
     @abstractmethod
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        """创建普通用户消息和助手占位。"""
+        pass
+
+    @abstractmethod
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        """创建编辑重发的用户消息和助手占位。"""
+        pass
+
+    @abstractmethod
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        """创建重新生成的助手占位。"""
+        pass
+
+    @abstractmethod
     def update_assistant_success(
         self,
         message_id: str,
@@ -191,6 +225,37 @@ class NullPersistenceAdapter(PersistenceAdapter):
         logger.debug(f"[NullAdapter] create_assistant_placeholder: chat_id={chat_id}")
         return "null-assistant-id"
 
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        logger.debug(f"[NullAdapter] prepare_normal_turn: chat_id={chat_id}")
+        return {"user_message_id": "null-msg-id", "assistant_message_id": "null-assistant-id"}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        logger.debug(f"[NullAdapter] prepare_edit_resend_turn: chat_id={chat_id}")
+        return {"user_message_id": "null-msg-id", "assistant_message_id": "null-assistant-id"}
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        logger.debug(f"[NullAdapter] prepare_regenerate_turn: chat_id={chat_id}")
+        return {"assistant_message_id": "null-assistant-id"}
+
     def update_assistant_success(
         self,
         message_id: str,
@@ -298,6 +363,43 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         }
 
         return message_id
+
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        user_message_id = self.save_user_message(
+            chat_id=chat_id,
+            content=content,
+            sender_id=sender_id,
+            context=context,
+            is_first_message=is_first_message,
+        )
+        assistant_message_id = self.create_assistant_placeholder(chat_id=chat_id, context=context)
+        return {"user_message_id": user_message_id, "assistant_message_id": assistant_message_id}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        return self.prepare_normal_turn(chat_id, content, sender_id, context, False)
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        assistant_message_id = self.create_assistant_placeholder(chat_id=chat_id, context=context)
+        return {"assistant_message_id": assistant_message_id}
 
     def update_assistant_success(
         self,

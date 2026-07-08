@@ -85,8 +85,212 @@ class ChatPersistenceService:
         )
 
         self.conversation_repo.create(conversation)
+        root_id = str(uuid.uuid4())
+        root = ChatMessageEntity(
+            id=root_id,
+            chat_id=conversation_id,
+            parent_id=None,
+            siblings_group_id=None,
+            message_order=1,
+            message_content="",
+            message_type="root",
+            sender_id=None,
+            context=None,
+            token_used=None,
+            status="success",
+            error_message=None,
+            create_time=now,
+            create_by=host_id,
+            update_time=now,
+            update_by=host_id,
+            deleted=False,
+            version=1,
+        )
+        self.message_repo.create(root)
+        self.conversation_repo.update_active_node(conversation_id, root_id)
         logger.info(f"[ChatPersistenceService] 创建会话: {conversation_id}")
         return conversation_id
+
+    def _sibling_group_id(self, parent_id: str, message_type: str) -> str:
+        return f"sg:{parent_id}:{message_type}"
+
+    def _next_order(self, chat_id: str) -> int:
+        return self.message_repo.get_latest_order(chat_id) + 1
+
+    def _count_visible_messages(self, chat_id: str) -> int:
+        messages = self.message_repo.get_by_chat_id(chat_id)
+        total = self.message_repo.count_by_chat_id(chat_id)
+        root_count = len([m for m in messages if m.message_type == "root"])
+        if root_count and total >= len(messages):
+            return max(total - root_count, 0)
+        return total
+
+    def _must_get_conversation(self, chat_id: str) -> ChatConversationEntity:
+        conversation = self.conversation_repo.get_by_id(chat_id)
+        if not conversation:
+            raise ValueError(f"会话不存在: {chat_id}")
+        return conversation
+
+    def _must_get_message(self, message_id: str) -> ChatMessageEntity:
+        message = self.message_repo.get_by_id(message_id)
+        if not message:
+            raise ValueError(f"消息不存在: {message_id}")
+        return message
+
+    def create_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: Optional[str],
+        context: Optional[MessageContext] = None,
+        source_message_id: Optional[str] = None,
+        mode: str = "normal",
+    ) -> Tuple[ChatMessageEntity, ChatMessageEntity]:
+        conversation = self._must_get_conversation(chat_id)
+        now = datetime.now()
+
+        if mode == "edit":
+            if not source_message_id:
+                raise ValueError("编辑重发必须提供 source_message_id")
+            source = self._must_get_message(source_message_id)
+            if source.chat_id != chat_id or source.message_type != "user":
+                raise ValueError("source_message_id 必须是当前会话的用户消息")
+            user_parent_id = source.parent_id
+            user_group_id = source.siblings_group_id or self._sibling_group_id(user_parent_id, "user")
+            if not source.siblings_group_id:
+                self.message_repo.update(source.id, {"siblings_group_id": user_group_id})
+        else:
+            user_parent_id = conversation.active_node_id
+            if not user_parent_id:
+                raise ValueError("会话缺少 active_node_id")
+            user_group_id = self._sibling_group_id(user_parent_id, "user")
+
+        user = ChatMessageEntity(
+            id=str(uuid.uuid4()),
+            chat_id=chat_id,
+            parent_id=user_parent_id,
+            siblings_group_id=user_group_id,
+            message_order=self._next_order(chat_id),
+            message_content=content,
+            message_type="user",
+            sender_id=sender_id,
+            context=context.to_json() if context else None,
+            token_used=None,
+            status="success",
+            create_time=now,
+            create_by=sender_id,
+            update_time=now,
+            update_by=sender_id,
+            deleted=False,
+            version=1,
+        )
+        self.message_repo.create(user)
+
+        assistant = ChatMessageEntity(
+            id=str(uuid.uuid4()),
+            chat_id=chat_id,
+            parent_id=user.id,
+            siblings_group_id=self._sibling_group_id(user.id, "assistant"),
+            message_order=self._next_order(chat_id),
+            message_content="",
+            message_type="assistant",
+            sender_id=None,
+            context=None,
+            token_used=None,
+            status="streaming",
+            create_time=now,
+            create_by=sender_id,
+            update_time=now,
+            update_by=sender_id,
+            deleted=False,
+            version=1,
+        )
+        self.message_repo.create(assistant)
+        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        return user, assistant
+
+    def create_assistant_regeneration(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[MessageContext] = None,
+    ) -> ChatMessageEntity:
+        source = self._must_get_message(source_assistant_id)
+        if source.chat_id != chat_id or source.message_type != "assistant":
+            raise ValueError("source_assistant_id 必须是当前会话的助手消息")
+        group_id = source.siblings_group_id or self._sibling_group_id(source.parent_id, "assistant")
+        if not source.siblings_group_id:
+            self.message_repo.update(source.id, {"siblings_group_id": group_id})
+        now = datetime.now()
+        assistant = ChatMessageEntity(
+            id=str(uuid.uuid4()),
+            chat_id=chat_id,
+            parent_id=source.parent_id,
+            siblings_group_id=group_id,
+            message_order=self._next_order(chat_id),
+            message_content="",
+            message_type="assistant",
+            sender_id=None,
+            context=context.to_json() if context else None,
+            token_used=None,
+            status="streaming",
+            create_time=now,
+            create_by=None,
+            update_time=now,
+            update_by=None,
+            deleted=False,
+            version=1,
+        )
+        self.message_repo.create(assistant)
+        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        return assistant
+
+    def _path_to_root(self, chat_id: str, leaf_id: str) -> List[ChatMessageEntity]:
+        path = []
+        current = self._must_get_message(leaf_id)
+        while current:
+            if current.chat_id != chat_id:
+                raise ValueError("active_node_id 不属于当前会话")
+            path.append(current)
+            if not current.parent_id:
+                break
+            current = self._must_get_message(current.parent_id)
+        path.reverse()
+        return path
+
+    def load_active_path(self, chat_id: str):
+        conversation = self._must_get_conversation(chat_id)
+        if not conversation.active_node_id:
+            return conversation, [], {}
+        path = self._path_to_root(chat_id, conversation.active_node_id)
+        visible = [m for m in path if m.message_type != "root"]
+        sibling_map = {}
+        for message in visible:
+            if message.parent_id:
+                siblings = [
+                    m for m in self.message_repo.get_children(chat_id, message.parent_id)
+                    if m.message_type == message.message_type
+                ]
+                sibling_map[message.id] = siblings
+        return conversation, visible, sibling_map
+
+    def switch_active_branch(self, chat_id: str, through_message_id: str) -> bool:
+        message = self._must_get_message(through_message_id)
+        if message.chat_id != chat_id:
+            raise ValueError("消息不属于当前会话")
+        leaf = self._resolve_branch_leaf(chat_id, message)
+        return self.conversation_repo.update_active_node(chat_id, leaf.id)
+
+    def _resolve_branch_leaf(self, chat_id: str, message: ChatMessageEntity) -> ChatMessageEntity:
+        current = message
+        while True:
+            children = [
+                m for m in self.message_repo.get_children(chat_id, current.id)
+                if m.status in ("success", "done", "streaming", "error", "failed", "cancelled")
+            ]
+            if not children:
+                return current
+            current = children[-1]
 
     def save_message(
         self,
@@ -148,7 +352,7 @@ class ChatPersistenceService:
 
         # 只有成功的消息才更新会话的消息数量（running 状态不计入）
         if status == "success":
-            total_messages = self.message_repo.count_by_chat_id(chat_id)
+            total_messages = self._count_visible_messages(chat_id)
             self.conversation_repo.update_summary_and_count(chat_id, None, total_messages)
 
         logger.debug(f"[ChatPersistenceService] 保存消息: {message_id}, order={message_order}, status={status}")
@@ -369,7 +573,7 @@ class ChatPersistenceService:
                 # 获取消息所属的会话ID
                 message = self.message_repo.get_by_id(message_id)
                 if message:
-                    total_messages = self.message_repo.count_by_chat_id(message.chat_id)
+                    total_messages = self._count_visible_messages(message.chat_id)
                     self.conversation_repo.update_summary_and_count(
                         message.chat_id, None, total_messages
                     )
@@ -391,8 +595,7 @@ class ChatPersistenceService:
         Returns:
             bool: 是否为首条消息
         """
-        count = self.message_repo.count_by_chat_id(chat_id)
-        return count == 0
+        return self._count_visible_messages(chat_id) == 0
 
 
 # 单例实例
