@@ -563,10 +563,46 @@ class GraphManager:
 
         logger.info(f"[GraphManager] chat_stream_async: patient={patient_id}, thread={thread_id}")
 
+        allowed_branch_modes = {"normal", "edit", "regenerate"}
+        if branch_mode not in allowed_branch_modes:
+            yield {
+                "type": "error",
+                "content": f"不支持的分支模式: {branch_mode}",
+                "metadata": {"error": "unsupported_branch_mode"},
+            }
+            return
+
+        regenerate_user_message_id = None
         if branch_mode == "regenerate":
             if not conversation_id or not source_message_id:
-                raise ValueError("重新生成必须提供 conversation_id 和 source_message_id")
-            message = self._get_user_prompt_for_regenerate(conversation_id, source_message_id)
+                yield {
+                    "type": "error",
+                    "content": "重新生成必须提供 conversation_id 和 source_message_id",
+                    "metadata": {"error": "missing_regenerate_source"},
+                }
+                return
+            try:
+                regenerate_user = self._get_user_message_for_regenerate(
+                    conversation_id,
+                    source_message_id,
+                )
+                message = regenerate_user.message_content
+                regenerate_user_message_id = regenerate_user.id
+            except Exception as e:
+                logger.error(f"[GraphManager] 重新生成 - 获取原始用户问题失败: {e}", exc_info=True)
+                yield {
+                    "type": "error",
+                    "content": str(e),
+                    "metadata": {"error": str(e)},
+                }
+                return
+        elif branch_mode == "edit" and not source_message_id:
+            yield {
+                "type": "error",
+                "content": "编辑重发必须提供 source_message_id",
+                "metadata": {"error": "missing_edit_source"},
+            }
+            return
 
         # === 安全检查：角色校验 + 输入防护 ===
         from utils.role_verification import verify_role
@@ -582,27 +618,6 @@ class GraphManager:
             if agent_type in ("compliance", "research"):
                 agent_type = "health"
 
-        guard_result = check_input_safety(message, context={
-            "role": role, "agent_type": agent_type, "patient_id": patient_id,
-        })
-        if not guard_result.is_safe:
-            logger.warning(
-                f"[GraphManager] 安全拦截(async_stream): risk={guard_result.risk_level.value}, "
-                f"category={guard_result.category.value if guard_result.category else 'N/A'}"
-            )
-            blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
-            yield {
-                "type": "token",
-                "content": blocked_response,
-                "metadata": {"security_blocked": True, "risk": guard_result.risk_level.value},
-            }
-            yield {
-                "type": "done",
-                "content": "",
-                "metadata": {"security_blocked": True},
-            }
-            return
-
         # === 运行时状态：用于 finally 中统一终态落库 ===
         assistant_message_id = None
         full_response = ""
@@ -613,6 +628,8 @@ class GraphManager:
         usage_event_run_ids = set()
         previous_message_count = 0
         prepared_message_ids = {}
+        current_agent = agent_type
+        current_stage = "greeting"
 
         # === 消息树写入 - 先准备用户/助手节点，流结束后更新助手终态 ===
         if conversation_id:
@@ -634,6 +651,7 @@ class GraphManager:
                         source_assistant_id=source_message_id,
                         context={"stage": None, "agent_type": agent_type},
                     )
+                    prepared_message_ids.setdefault("user_message_id", regenerate_user_message_id)
                 else:
                     prepared_message_ids = self.persistence.prepare_normal_turn(
                         chat_id=conversation_id,
@@ -646,6 +664,12 @@ class GraphManager:
 
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 准备消息树节点失败: {e}", exc_info=True)
+                yield {
+                    "type": "error",
+                    "content": f"准备消息树节点失败: {str(e)}",
+                    "metadata": {"error": str(e)},
+                }
+                return
 
         yield {
             "type": "start",
@@ -658,6 +682,43 @@ class GraphManager:
                 "active_node_id": prepared_message_ids.get("assistant_message_id"),
             },
         }
+
+        guard_result = check_input_safety(message, context={
+            "role": role, "agent_type": agent_type, "patient_id": patient_id,
+        })
+        if not guard_result.is_safe:
+            logger.warning(
+                f"[GraphManager] 安全拦截(async_stream): risk={guard_result.risk_level.value}, "
+                f"category={guard_result.category.value if guard_result.category else 'N/A'}"
+            )
+            blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
+            if assistant_message_id and conversation_id:
+                try:
+                    self.persistence.update_assistant_success(
+                        message_id=assistant_message_id,
+                        content=blocked_response,
+                        context={
+                            "stage": "security_blocked",
+                            "agent_type": agent_type,
+                        },
+                    )
+                except Exception as e:
+                    logger.error(f"[GraphManager] 流式 - 保存安全拦截回复失败: {e}", exc_info=True)
+            yield {
+                "type": "token",
+                "content": blocked_response,
+                "metadata": {"security_blocked": True, "risk": guard_result.risk_level.value},
+            }
+            yield {
+                "type": "done",
+                "content": blocked_response,
+                "metadata": {
+                    "security_blocked": True,
+                    "agent_type": agent_type,
+                    "stage": "security_blocked",
+                },
+            }
+            return
 
         # 准备输入状态（标记流式模式）
         input_state = self._prepare_input_state(
@@ -672,8 +733,6 @@ class GraphManager:
             **kwargs,
         )
 
-        current_agent = agent_type
-        current_stage = "greeting"
         streaming_graph = None
 
         # 收集工具调用事件，流结束后持久化到 context.tool_results
@@ -932,14 +991,22 @@ class GraphManager:
             },
         }
 
-    def _get_user_prompt_for_regenerate(self, conversation_id: str, source_assistant_id: str) -> str:
+    def _get_user_message_for_regenerate(self, conversation_id: str, source_assistant_id: str):
         message = self.persistence.service.message_repo.get_by_id(source_assistant_id)
+        if message and message.chat_id != conversation_id:
+            raise ValueError("source_assistant_id 必须是当前会话的助手消息")
         if not message or not message.parent_id:
             raise ValueError("无法找到被重生成回答对应的用户问题")
         user = self.persistence.service.message_repo.get_by_id(message.parent_id)
-        if not user or user.message_type != "user":
+        if not user or user.chat_id != conversation_id or user.message_type != "user":
             raise ValueError("被重生成回答的父节点不是用户消息")
-        return user.message_content
+        return user
+
+    def _get_user_prompt_for_regenerate(self, conversation_id: str, source_assistant_id: str) -> str:
+        return self._get_user_message_for_regenerate(
+            conversation_id,
+            source_assistant_id,
+        ).message_content
 
     def get_conversation_state(
         self,

@@ -106,6 +106,12 @@ async def get_conversation_detail(conversation_id: str) -> ConversationDetailRes
         message_responses = []
         for msg in messages:
             siblings = sibling_map.get(msg.id, [])
+            context_list = None
+            if msg.context:
+                try:
+                    context_list = msg.get_context_dict()
+                except Exception:
+                    context_list = None
 
             message_responses.append(MessageResponse(
                 id=msg.id,
@@ -113,7 +119,7 @@ async def get_conversation_detail(conversation_id: str) -> ConversationDetailRes
                 message_content=msg.message_content,
                 message_type=msg.message_type,
                 create_time=msg.create_time,
-                context=msg.get_context_dict() if msg.context else None,
+                context=context_list,
                 parent_id=msg.parent_id,
                 siblings_group_id=msg.siblings_group_id,
                 status=msg.status,

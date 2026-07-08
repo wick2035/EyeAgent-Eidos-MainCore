@@ -464,6 +464,7 @@ def _streaming_response_for_request(
 
                 elif event_type == "error":
                     yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+                    return
 
             # 解析UI元素（仅患者模式的特定Agent）
             role = request.role or "patient"
