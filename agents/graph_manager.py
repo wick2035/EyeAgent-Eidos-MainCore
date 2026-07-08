@@ -535,6 +535,8 @@ class GraphManager:
         doctor_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
+        source_message_id: Optional[str] = None,
+        branch_mode: str = "normal",
         **kwargs,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -560,6 +562,11 @@ class GraphManager:
         thread_id = thread_config["configurable"]["thread_id"]
 
         logger.info(f"[GraphManager] chat_stream_async: patient={patient_id}, thread={thread_id}")
+
+        if branch_mode == "regenerate":
+            if not conversation_id or not source_message_id:
+                raise ValueError("重新生成必须提供 conversation_id 和 source_message_id")
+            message = self._get_user_prompt_for_regenerate(conversation_id, source_message_id)
 
         # === 安全检查：角色校验 + 输入防护 ===
         from utils.role_verification import verify_role
@@ -605,31 +612,52 @@ class GraphManager:
         token_used = None
         usage_event_run_ids = set()
         previous_message_count = 0
+        prepared_message_ids = {}
 
-        # === 两阶段写入 - 第一阶段：保存用户消息 ===
+        # === 消息树写入 - 先准备用户/助手节点，流结束后更新助手终态 ===
         if conversation_id:
             try:
                 is_first = self.persistence.is_first_message(conversation_id)
                 sender_id = doctor_id if role == "doctor" else patient_id
 
-                self.persistence.save_user_message(
-                    chat_id=conversation_id,
-                    content=message,
-                    sender_id=sender_id,
-                    context={
-                        "stage": "greeting" if is_first else None,
-                        "agent_type": agent_type,
-                    },
-                    is_first_message=is_first,
-                )
-
-                assistant_message_id = self.persistence.create_assistant_placeholder(
-                    chat_id=conversation_id,
-                    context={"stage": agent_type, "agent_type": agent_type},
-                )
+                if branch_mode == "edit":
+                    prepared_message_ids = self.persistence.prepare_edit_resend_turn(
+                        chat_id=conversation_id,
+                        source_message_id=source_message_id,
+                        content=message,
+                        sender_id=sender_id,
+                        context={"stage": None, "agent_type": agent_type},
+                    )
+                elif branch_mode == "regenerate":
+                    prepared_message_ids = self.persistence.prepare_regenerate_turn(
+                        chat_id=conversation_id,
+                        source_assistant_id=source_message_id,
+                        context={"stage": None, "agent_type": agent_type},
+                    )
+                else:
+                    prepared_message_ids = self.persistence.prepare_normal_turn(
+                        chat_id=conversation_id,
+                        content=message,
+                        sender_id=sender_id,
+                        context={"stage": "greeting" if is_first else None, "agent_type": agent_type},
+                        is_first_message=is_first,
+                    )
+                assistant_message_id = prepared_message_ids.get("assistant_message_id")
 
             except Exception as e:
-                logger.error(f"[GraphManager] 流式 - 保存用户消息失败: {e}", exc_info=True)
+                logger.error(f"[GraphManager] 流式 - 准备消息树节点失败: {e}", exc_info=True)
+
+        yield {
+            "type": "start",
+            "content": "",
+            "metadata": {
+                "conversation_id": conversation_id,
+                "thread_id": thread_id,
+                "user_message_id": prepared_message_ids.get("user_message_id"),
+                "assistant_message_id": prepared_message_ids.get("assistant_message_id"),
+                "active_node_id": prepared_message_ids.get("assistant_message_id"),
+            },
+        }
 
         # 准备输入状态（标记流式模式）
         input_state = self._prepare_input_state(
@@ -903,6 +931,15 @@ class GraphManager:
                 "citations": final_citations,
             },
         }
+
+    def _get_user_prompt_for_regenerate(self, conversation_id: str, source_assistant_id: str) -> str:
+        message = self.persistence.service.message_repo.get_by_id(source_assistant_id)
+        if not message or not message.parent_id:
+            raise ValueError("无法找到被重生成回答对应的用户问题")
+        user = self.persistence.service.message_repo.get_by_id(message.parent_id)
+        if not user or user.message_type != "user":
+            raise ValueError("被重生成回答的父节点不是用户消息")
+        return user.message_content
 
     def get_conversation_state(
         self,

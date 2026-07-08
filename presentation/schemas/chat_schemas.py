@@ -91,6 +91,36 @@ class ChatRequest(BaseModel):
         }
 
 
+class EditResendRequest(ChatRequest):
+    source_message_id: str = Field(..., description="被编辑的用户消息ID")
+
+
+class RegenerateRequest(BaseModel):
+    session_id: Optional[str] = Field(None, description="会话ID")
+    patient_id: str = Field(..., description="患者UUID")
+    doctor_id: Optional[str] = Field(None, description="医生UUID")
+    agent_type: Optional[str] = Field("health", description="Agent类型")
+    role: Optional[str] = Field("doctor", description="用户角色")
+    conversation_id: str = Field(..., description="数据库会话ID")
+    source_message_id: str = Field(..., description="被重生成的助手消息ID")
+
+    @field_validator('patient_id')
+    @classmethod
+    def validate_patient_uuid(cls, v: str) -> str:
+        """验证patient_id必须是有效的UUID格式"""
+        if not UUID_PATTERN.match(v):
+            raise ValueError(f'patient_id 必须是有效的UUID格式，收到: "{v}"')
+        return v
+
+    @field_validator('doctor_id')
+    @classmethod
+    def validate_doctor_uuid(cls, v: Optional[str]) -> Optional[str]:
+        """验证doctor_id如果提供必须是有效的UUID格式"""
+        if v is not None and not UUID_PATTERN.match(v):
+            raise ValueError(f'doctor_id 必须是有效的UUID格式，收到: "{v}"')
+        return v
+
+
 class ChatResponse(BaseModel):
     """聊天响应"""
 
@@ -118,4 +148,3 @@ class ChatResponse(BaseModel):
                 }
             }
         }
-

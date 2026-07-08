@@ -52,6 +52,13 @@ class ConversationListResponse(BaseModel):
         }
 
 
+class MessageSiblingResponse(BaseModel):
+    id: str
+    message_type: str
+    text_preview: str
+    active: bool
+
+
 class MessageResponse(BaseModel):
     """消息响应"""
     id: str = Field(..., description="消息UUID")
@@ -60,6 +67,11 @@ class MessageResponse(BaseModel):
     message_type: str = Field(..., description="消息类型 (user/assistant/system)")
     create_time: datetime = Field(..., description="创建时间")
     context: Optional[List[Dict[str, Any]]] = Field(None, description="上下文信息")
+    parent_id: Optional[str] = None
+    siblings_group_id: Optional[str] = None
+    status: Optional[str] = None
+    feedback: Optional[int] = None
+    siblings: List[MessageSiblingResponse] = Field(default_factory=list)
 
     class Config:
         json_schema_extra = {
@@ -124,3 +136,7 @@ class DeleteConversationResponse(BaseModel):
     success: bool = Field(..., description="是否成功")
     message: str = Field(..., description="消息")
     conversation_id: str = Field(..., description="会话ID")
+
+
+class ActiveBranchRequest(BaseModel):
+    through_message_id: str = Field(..., description="要切换到的路径经过消息ID")

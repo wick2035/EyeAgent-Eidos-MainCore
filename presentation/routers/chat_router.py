@@ -6,11 +6,16 @@ import uuid
 import json
 import logging
 import asyncio
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
+from presentation.schemas.chat_schemas import (
+    ChatRequest,
+    ChatResponse,
+    EditResendRequest,
+    RegenerateRequest,
+)
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
 from utils.ui_element_parser import parse_options_only
@@ -351,27 +356,17 @@ async def get_messages(session_id: str, conversation_id: str = None):
         )
 
 
-@router.post("/stream")
-async def chat_stream(request: ChatRequest):
-    """
-    流式对话 (SSE)
-
-    使用 Server-Sent Events 实现流式响应，支持：
-    - 实时 token 输出
-    - Agent 切换通知
-    - 工具调用状态
-
-    Args:
-        request: 聊天请求
-
-    Returns:
-        StreamingResponse: SSE 流式响应
-    """
+def _streaming_response_for_request(
+    request,
+    branch_mode: str = "normal",
+    source_message_id: Optional[str] = None,
+) -> StreamingResponse:
     async def generate_sse() -> AsyncGenerator[str, None]:
         """生成 SSE 事件流"""
         try:
             # 生成 session_id
             session_id = request.session_id or f"sess_{uuid.uuid4().hex[:16]}"
+            message = getattr(request, "message", "")
 
             # 获取持久化服务
             persistence_service = get_chat_persistence_service()
@@ -402,14 +397,12 @@ async def chat_stream(request: ChatRequest):
             # 附件预分析（在第一个 SSE token 之前完成）
             attachments_raw = []
             attachment_analysis = ""
-            if request.attachments:
-                attachments_raw = [a.model_dump() for a in request.attachments]
+            attachments = getattr(request, "attachments", None)
+            if attachments:
+                attachments_raw = [a.model_dump() for a in attachments]
                 logger.info(f"[ChatRouter/Stream] 开始预分析附件，数量={len(attachments_raw)}")
-                attachment_analysis = analyze_attachments(attachments_raw, request.message)
+                attachment_analysis = analyze_attachments(attachments_raw, message)
                 logger.info(f"[ChatRouter/Stream] 附件预分析完成，分析长度={len(attachment_analysis)}")
-
-            # 发送开始事件
-            yield f"data: {json.dumps({'event': 'start', 'session_id': session_id, 'conversation_id': conversation_id, 'thread_id': thread_id})}\n\n"
 
             # 获取当前 Agent（用于检测切换）
             previous_agent = graph_manager.checkpointer.get_current_agent(thread_id)
@@ -423,17 +416,24 @@ async def chat_stream(request: ChatRequest):
             async for chunk in graph_manager.chat_stream_async(
                 patient_id=request.patient_id,
                 session_id=session_id,
-                message=request.message,
+                message=message,
                 role=request.role or "patient",
                 doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 agent_type=request.agent_type or "health",
+                source_message_id=source_message_id,
+                branch_mode=branch_mode,
                 attachments=attachments_raw,
                 attachment_analysis=attachment_analysis,
             ):
                 event_type = chunk.get("type", "")
                 content = chunk.get("content", "")
                 metadata = chunk.get("metadata", {})
+
+                if event_type == "start":
+                    payload = {"event": "start", "session_id": session_id, **metadata}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    continue
 
                 if event_type == "token":
                     full_response += content
@@ -511,4 +511,41 @@ async def chat_stream(request: ChatRequest):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         }
+    )
+
+
+@router.post("/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    流式对话 (SSE)
+
+    使用 Server-Sent Events 实现流式响应，支持：
+    - 实时 token 输出
+    - Agent 切换通知
+    - 工具调用状态
+
+    Args:
+        request: 聊天请求
+
+    Returns:
+        StreamingResponse: SSE 流式响应
+    """
+    return _streaming_response_for_request(request)
+
+
+@router.post("/edit-resend/stream")
+async def chat_edit_resend_stream(request: EditResendRequest):
+    return _streaming_response_for_request(
+        request,
+        branch_mode="edit",
+        source_message_id=request.source_message_id,
+    )
+
+
+@router.post("/regenerate/stream")
+async def chat_regenerate_stream(request: RegenerateRequest):
+    return _streaming_response_for_request(
+        request,
+        branch_mode="regenerate",
+        source_message_id=request.source_message_id,
     )
