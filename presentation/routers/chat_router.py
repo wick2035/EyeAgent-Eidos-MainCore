@@ -94,6 +94,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
             conversation_id=conversation_id,
             agent_type=request.agent_type or "health",
             parent_anchor_id=request.parent_anchor_id,
+            dual_answer=request.dual_answer,
+            request_id=request.request_id,
+            client_message_id=request.client_message_id,
+            dual_answer_group_id=request.dual_answer_group_id,
+            dual_answer_index=request.dual_answer_index,
             attachments=attachments_raw,
             attachment_analysis=attachment_analysis,
         )
@@ -430,6 +435,11 @@ async def chat_stream(request: ChatRequest):
                 conversation_id=conversation_id,
                 agent_type=request.agent_type or "health",
                 parent_anchor_id=request.parent_anchor_id,
+                dual_answer=request.dual_answer,
+                request_id=request.request_id,
+                client_message_id=request.client_message_id,
+                dual_answer_group_id=request.dual_answer_group_id,
+                dual_answer_index=request.dual_answer_index,
                 attachments=attachments_raw,
                 attachment_analysis=attachment_analysis,
             ):
