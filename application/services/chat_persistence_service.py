@@ -98,6 +98,7 @@ class ChatPersistenceService:
         token_used: Optional[int] = None,
         parent_anchor_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
         status: str = "success",
     ) -> ChatMessageEntity:
         """
@@ -112,6 +113,7 @@ class ChatPersistenceService:
             token_used: 使用的token数
             parent_anchor_id: 父消息锚点ID（编辑重发时用于树形分支）
             parent_id: 显式父消息ID（普通发送时用于连接 previous -> user -> assistant）
+            siblings_group_id: 兄弟分支组ID
             status: 消息状态 (running/success/failed/cancelled)
 
         Returns:
@@ -127,6 +129,9 @@ class ChatPersistenceService:
         effective_parent_id = parent_anchor_id or parent_id
         if parent_anchor_id:
             self._validate_parent_anchor(chat_id, parent_anchor_id)
+        effective_siblings_group_id = siblings_group_id
+        if effective_siblings_group_id is None and role == "assistant" and parent_anchor_id:
+            effective_siblings_group_id = parent_anchor_id
 
         # 序列化上下文
         context_json = None
@@ -137,6 +142,7 @@ class ChatPersistenceService:
             id=message_id,
             chat_id=chat_id,
             parent_id=effective_parent_id,
+            siblings_group_id=effective_siblings_group_id,
             message_order=message_order,
             message_content=content,
             message_type=role,
@@ -177,6 +183,13 @@ class ChatPersistenceService:
         """获取当前会话最新消息ID；无消息时返回 None。"""
         latest_message = self.message_repo.get_latest_message(chat_id)
         return latest_message.id if latest_message else None
+
+    def get_user_message_by_siblings_group_id(
+        self,
+        chat_id: str,
+        siblings_group_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        return self.message_repo.get_user_by_siblings_group_id(chat_id, siblings_group_id)
 
     def update_conversation_title(self, chat_id: str, first_user_message: str) -> bool:
         """

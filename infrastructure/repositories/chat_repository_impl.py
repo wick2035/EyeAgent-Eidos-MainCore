@@ -253,6 +253,29 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
             logger.error(f"[ChatMessageRepository] 获取消息失败: {e}")
             return None
 
+    def get_user_by_siblings_group_id(
+        self,
+        chat_id: str,
+        siblings_group_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        try:
+            sql = """
+                SELECT id, chat_id, message_order, message_content, message_type,
+                       parent_id, siblings_group_id, sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_message
+                WHERE chat_id = %s AND siblings_group_id = %s AND message_type = 'user' AND deleted = 0
+                ORDER BY message_order ASC, create_time ASC, id ASC
+                LIMIT 1
+            """
+            result = self.db.fetch_one(sql, (chat_id, siblings_group_id))
+            if not result:
+                return None
+            return self._row_to_entity(result)
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 获取用户锚点失败: {e}")
+            return None
+
     def update(self, message_id: str, updates: Dict[str, Any]) -> bool:
         """
         更新消息字段

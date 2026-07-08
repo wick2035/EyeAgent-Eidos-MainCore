@@ -32,6 +32,7 @@ class PersistenceAdapter(ABC):
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         """
         保存用户消息
@@ -43,6 +44,7 @@ class PersistenceAdapter(ABC):
             context: 上下文信息 {patient_info, stage, agent_type}
             is_first_message: 是否为首条消息
             parent_id: 父消息ID，普通发送时指向前一条消息
+            siblings_group_id: 双答案用户锚点与 assistant sibling 共享的组ID
 
         Returns:
             str: 消息ID
@@ -56,6 +58,7 @@ class PersistenceAdapter(ABC):
         context: Optional[Dict[str, Any]] = None,
         parent_anchor_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         """
         创建 AI 回复占位（status=running）
@@ -67,6 +70,7 @@ class PersistenceAdapter(ABC):
             context: 上下文信息
             parent_anchor_id: 父消息锚点ID（编辑重发时用于树形分支）
             parent_id: 父消息ID（普通发送时指向刚创建的 user 消息）
+            siblings_group_id: assistant sibling 共享的组ID
 
         Returns:
             str: 消息ID（用于后续更新）
@@ -190,6 +194,7 @@ class NullPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         logger.debug(f"[NullAdapter] save_user_message: chat_id={chat_id}")
         return "null-msg-id"
@@ -200,6 +205,7 @@ class NullPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         parent_anchor_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         logger.debug(f"[NullAdapter] create_assistant_placeholder: chat_id={chat_id}")
         return "null-assistant-id"
@@ -272,8 +278,17 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         import uuid
+        if siblings_group_id:
+            for message in self.messages.values():
+                if (
+                    message["chat_id"] == chat_id
+                    and message.get("message_type") == "user"
+                    and message.get("siblings_group_id") == siblings_group_id
+                ):
+                    return message["id"]
         message_id = str(uuid.uuid4())
 
         self.messages[message_id] = {
@@ -282,6 +297,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
             "content": content,
             "sender_id": sender_id,
             "parent_id": parent_id,
+            "siblings_group_id": siblings_group_id,
             "message_type": "user",
             "context": context,
             "status": "success",
@@ -301,6 +317,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         parent_anchor_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         import uuid
         message_id = str(uuid.uuid4())
@@ -309,6 +326,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
             "id": message_id,
             "chat_id": chat_id,
             "parent_id": parent_anchor_id or parent_id,
+            "siblings_group_id": siblings_group_id,
             "content": "",
             "message_type": "assistant",
             "context": context,

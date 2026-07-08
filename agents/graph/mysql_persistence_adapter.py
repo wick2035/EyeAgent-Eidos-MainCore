@@ -37,9 +37,18 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         """保存用户消息"""
         try:
+            if siblings_group_id:
+                existing_message = self.service.get_user_message_by_siblings_group_id(
+                    chat_id,
+                    siblings_group_id,
+                )
+                if existing_message:
+                    return existing_message.id
+
             # 构建 MessageContext
             msg_context = self._build_user_context(context, is_first_message)
 
@@ -51,6 +60,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
                 sender_id=sender_id,
                 context=msg_context,
                 parent_id=parent_id,
+                siblings_group_id=siblings_group_id,
                 status="success",
             )
 
@@ -74,6 +84,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         context: Optional[Dict[str, Any]] = None,
         parent_anchor_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        siblings_group_id: Optional[str] = None,
     ) -> str:
         """创建 AI 回复占位"""
         try:
@@ -87,6 +98,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
                 context=msg_context,
                 parent_anchor_id=parent_anchor_id,
                 parent_id=parent_id,
+                siblings_group_id=siblings_group_id,
                 status="running",
             )
 

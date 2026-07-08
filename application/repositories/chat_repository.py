@@ -180,6 +180,14 @@ class IChatMessageRepository(ABC):
         pass
 
     @abstractmethod
+    def get_user_by_siblings_group_id(
+        self,
+        chat_id: str,
+        siblings_group_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        pass
+
+    @abstractmethod
     def get_latest_order(self, chat_id: str) -> int:
         """
         获取会话中最新的消息序号
