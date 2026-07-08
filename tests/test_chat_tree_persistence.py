@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import cast
 
 from application.services.chat_persistence_service import ChatPersistenceService
+from agents.graph_manager import GraphManager
 from domain.models.chat_entity import ChatMessageEntity
 from infrastructure.database.mysql_connection import MySQLConnectionPool
 from infrastructure.repositories.chat_repository_impl import (
@@ -105,6 +106,47 @@ class ChatTreePersistenceTest(unittest.TestCase):
         insert_sql, params = fake_db.calls[0]
         self.assertIn("siblings_group_id", insert_sql)
         self.assertIn("siblings-group-1", params)
+
+    def test_dual_answer_assistants_reuse_one_user_anchor_and_group_key(self):
+        anchor = message_entity("user-anchor-1", chat_id="chat-1")
+        message_repo = FakeMessageRepo(anchor=anchor)
+        service = ChatPersistenceService(
+            cast(ChatConversationRepositoryImpl, FakeConversationRepo()),
+            cast(ChatMessageRepositoryImpl, message_repo),
+        )
+
+        first_answer = service.save_message(
+            chat_id="chat-1",
+            role="assistant",
+            content="answer A",
+            parent_anchor_id="user-anchor-1",
+        )
+        second_answer = service.save_message(
+            chat_id="chat-1",
+            role="assistant",
+            content="answer B",
+            parent_anchor_id="user-anchor-1",
+        )
+
+        self.assertEqual("user-anchor-1", first_answer.parent_id)
+        self.assertEqual("user-anchor-1", second_answer.parent_id)
+        self.assertEqual(
+            ["assistant", "assistant"],
+            [message.message_type for message in message_repo.created],
+        )
+        self.assertIsNotNone(first_answer.siblings_group_id)
+        self.assertEqual(first_answer.siblings_group_id, second_answer.siblings_group_id)
+
+    def test_dual_siblings_group_id_uses_group_index_without_boolean_flag(self):
+        group_id = GraphManager._dual_siblings_group_id(
+            False,
+            "req-001",
+            "client-user-001",
+            "dual-group-001",
+            1,
+        )
+
+        self.assertEqual("dual-group-001", group_id)
 
 
 def message_entity(message_id, chat_id="chat-1", siblings_group_id=None):

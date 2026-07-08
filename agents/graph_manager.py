@@ -105,6 +105,11 @@ class GraphManager:
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
         parent_anchor_id: Optional[str] = None,
+        dual_answer: bool = False,
+        request_id: Optional[str] = None,
+        client_message_id: Optional[str] = None,
+        dual_answer_group_id: Optional[str] = None,
+        dual_answer_index: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -191,7 +196,15 @@ class GraphManager:
                 }
 
                 # 普通发送由 MainCore 创建 user；编辑重发的 user sibling 已由后端创建。
+                siblings_group_id = self._dual_siblings_group_id(
+                    dual_answer,
+                    request_id,
+                    client_message_id,
+                    dual_answer_group_id,
+                    dual_answer_index,
+                )
                 user_message_id = None
+                assistant_parent_anchor_id = parent_anchor_id
                 if not parent_anchor_id:
                     user_message_id = self.persistence.save_user_message(
                         chat_id=conversation_id,
@@ -200,14 +213,18 @@ class GraphManager:
                         context=user_context,
                         is_first_message=is_first,
                         parent_id=previous_message_id,
+                        siblings_group_id=siblings_group_id,
                     )
+                    if siblings_group_id:
+                        assistant_parent_anchor_id = user_message_id
 
                 # 创建 AI 回复占位
                 assistant_msg_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
-                    parent_anchor_id=parent_anchor_id,
+                    parent_anchor_id=assistant_parent_anchor_id,
                     parent_id=user_message_id,
+                    siblings_group_id=siblings_group_id,
                 )
 
                 logger.debug(
@@ -343,6 +360,11 @@ class GraphManager:
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
         parent_anchor_id: Optional[str] = None,
+        dual_answer: bool = False,
+        request_id: Optional[str] = None,
+        client_message_id: Optional[str] = None,
+        dual_answer_group_id: Optional[str] = None,
+        dual_answer_index: Optional[int] = None,
         **kwargs,
     ) -> Generator[Dict[str, Any], None, None]:
         """
@@ -417,7 +439,15 @@ class GraphManager:
                     "agent_type": agent_type,
                 }
 
+                siblings_group_id = self._dual_siblings_group_id(
+                    dual_answer,
+                    request_id,
+                    client_message_id,
+                    dual_answer_group_id,
+                    dual_answer_index,
+                )
                 user_message_id = None
+                assistant_parent_anchor_id = parent_anchor_id
                 if not parent_anchor_id:
                     user_message_id = self.persistence.save_user_message(
                         chat_id=conversation_id,
@@ -426,13 +456,17 @@ class GraphManager:
                         context=user_context,
                         is_first_message=is_first,
                         parent_id=previous_message_id,
+                        siblings_group_id=siblings_group_id,
                     )
+                    if siblings_group_id:
+                        assistant_parent_anchor_id = user_message_id
 
                 assistant_msg_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
-                    parent_anchor_id=parent_anchor_id,
+                    parent_anchor_id=assistant_parent_anchor_id,
                     parent_id=user_message_id,
+                    siblings_group_id=siblings_group_id,
                 )
 
             except Exception as e:
@@ -559,6 +593,11 @@ class GraphManager:
         conversation_id: Optional[str] = None,
         agent_type: str = "health",
         parent_anchor_id: Optional[str] = None,
+        dual_answer: bool = False,
+        request_id: Optional[str] = None,
+        client_message_id: Optional[str] = None,
+        dual_answer_group_id: Optional[str] = None,
+        dual_answer_index: Optional[int] = None,
         **kwargs,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -641,7 +680,15 @@ class GraphManager:
                 )
                 sender_id = doctor_id if role == "doctor" and doctor_id else patient_id
 
+                siblings_group_id = self._dual_siblings_group_id(
+                    dual_answer,
+                    request_id,
+                    client_message_id,
+                    dual_answer_group_id,
+                    dual_answer_index,
+                )
                 user_message_id = None
+                assistant_parent_anchor_id = parent_anchor_id
                 if not parent_anchor_id:
                     user_message_id = self.persistence.save_user_message(
                         chat_id=conversation_id,
@@ -653,13 +700,17 @@ class GraphManager:
                         },
                         is_first_message=is_first,
                         parent_id=previous_message_id,
+                        siblings_group_id=siblings_group_id,
                     )
+                    if siblings_group_id:
+                        assistant_parent_anchor_id = user_message_id
 
                 assistant_message_id = self.persistence.create_assistant_placeholder(
                     chat_id=conversation_id,
                     context={"stage": agent_type, "agent_type": agent_type},
-                    parent_anchor_id=parent_anchor_id,
+                    parent_anchor_id=assistant_parent_anchor_id,
                     parent_id=user_message_id,
+                    siblings_group_id=siblings_group_id,
                 )
 
             except Exception as e:
@@ -1277,6 +1328,18 @@ class GraphManager:
                 citations.extend(extract_citations_from_search_results(content))
 
         return deduplicate_citations(citations)
+
+    @staticmethod
+    def _dual_siblings_group_id(
+        dual_answer: bool,
+        request_id: Optional[str],
+        client_message_id: Optional[str],
+        dual_answer_group_id: Optional[str] = None,
+        dual_answer_index: Optional[int] = None,
+    ) -> Optional[str]:
+        if not dual_answer and dual_answer_group_id is None and dual_answer_index is None:
+            return None
+        return dual_answer_group_id or client_message_id or request_id
 
     @staticmethod
     def _is_search_tool(tool_name: Any) -> bool:
