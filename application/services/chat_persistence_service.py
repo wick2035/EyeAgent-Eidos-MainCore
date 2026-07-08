@@ -149,6 +149,9 @@ class ChatPersistenceService:
         conversation = self._must_get_conversation(chat_id)
         now = datetime.now()
 
+        if mode not in ("normal", "edit"):
+            raise ValueError(f"不支持的消息创建模式: {mode}")
+
         if mode == "edit":
             if not source_message_id:
                 raise ValueError("编辑重发必须提供 source_message_id")

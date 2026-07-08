@@ -4,6 +4,7 @@ MySQL 持久化适配器
 实现 PersistenceAdapter 接口，将消息持久化到 MySQL 数据库
 """
 import logging
+from contextvars import ContextVar
 from typing import Optional, Dict, Any, List
 
 from agents.graph.persistence_adapter import PersistenceAdapter
@@ -27,8 +28,29 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             persistence_service: ChatPersistenceService 实例
         """
         self.service = persistence_service
-        self._pending_assistant_ids: Dict[str, str] = {}
+        self._pending_assistant_ids: ContextVar[Dict[str, List[str]]] = ContextVar(
+            f"mysql_pending_assistant_ids_{id(self)}",
+            default={},
+        )
         logger.info("[MySQLPersistenceAdapter] 初始化完成")
+
+    def _push_pending_assistant_id(self, chat_id: str, assistant_message_id: str) -> None:
+        pending = {key: value.copy() for key, value in self._pending_assistant_ids.get().items()}
+        pending.setdefault(chat_id, []).append(assistant_message_id)
+        self._pending_assistant_ids.set(pending)
+
+    def _pop_pending_assistant_id(self, chat_id: str) -> Optional[str]:
+        pending = {key: value.copy() for key, value in self._pending_assistant_ids.get().items()}
+        ids = pending.get(chat_id)
+        if not ids:
+            return None
+        assistant_message_id = ids.pop(0)
+        if ids:
+            pending[chat_id] = ids
+        else:
+            pending.pop(chat_id, None)
+        self._pending_assistant_ids.set(pending)
+        return assistant_message_id
 
     def save_user_message(
         self,
@@ -47,7 +69,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
                 context=context,
                 is_first_message=is_first_message,
             )
-            self._pending_assistant_ids[chat_id] = ids["assistant_message_id"]
+            self._push_pending_assistant_id(chat_id, ids["assistant_message_id"])
 
             logger.debug(
                 f"[MySQLPersistenceAdapter] 保存用户消息: chat_id={chat_id}, "
@@ -66,7 +88,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> str:
         """创建 AI 回复占位"""
         try:
-            pending_id = self._pending_assistant_ids.pop(chat_id, None)
+            pending_id = self._pop_pending_assistant_id(chat_id)
             if pending_id:
                 logger.debug(
                     f"[MySQLPersistenceAdapter] 复用 AI 占位: chat_id={chat_id}, "
@@ -133,7 +155,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         source_assistant_id: str,
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        assistant = self.service.create_assistant_regeneration(chat_id, source_assistant_id)
+        msg_context = self._build_assistant_context(context)
+        assistant = self.service.create_assistant_regeneration(
+            chat_id,
+            source_assistant_id,
+            msg_context,
+        )
         return {"assistant_message_id": assistant.id}
 
     def update_assistant_success(

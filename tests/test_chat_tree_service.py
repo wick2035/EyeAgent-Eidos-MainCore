@@ -1,9 +1,16 @@
 import unittest
 import uuid
+import json
+import warnings
+from contextvars import copy_context
 from datetime import datetime
 
-from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
+from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity, MessageContext
 from application.services.chat_persistence_service import ChatPersistenceService
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    from agents.graph.mysql_persistence_adapter import MySQLPersistenceAdapter
 
 
 class ChatTreeEntityTest(unittest.TestCase):
@@ -159,6 +166,106 @@ class ChatTreeServiceTest(unittest.TestCase):
         self.assertEqual(regenerated.parent_id, user.id)
         self.assertEqual(regenerated.siblings_group_id, assistant.siblings_group_id)
         self.assertNotEqual(regenerated.id, assistant.id)
+
+    def test_unknown_turn_mode_is_rejected(self):
+        service, _, _ = self.make_service()
+        chat_id = service.create_conversation("doctor-1", "doctor", "新对话")
+
+        with self.assertRaises(ValueError):
+            service.create_turn(chat_id, "问题", "doctor-1", mode="unknown")
+
+
+class FakeTreeService:
+    def __init__(self):
+        self.turns = []
+        self.regenerate_context = None
+        self._counter = 0
+
+    def create_turn(self, chat_id, content, sender_id, context=None, source_message_id=None, mode="normal"):
+        self._counter += 1
+        user = ChatMessageEntity(
+            id=f"user-{self._counter}",
+            chat_id=chat_id,
+            parent_id="root-1",
+            siblings_group_id="sg:root-1:user",
+            message_order=self._counter * 2,
+            message_content=content,
+            message_type="user",
+            sender_id=sender_id,
+        )
+        assistant = ChatMessageEntity(
+            id=f"assistant-{self._counter}",
+            chat_id=chat_id,
+            parent_id=user.id,
+            siblings_group_id=f"sg:{user.id}:assistant",
+            message_order=self._counter * 2 + 1,
+            message_content="",
+            message_type="assistant",
+            status="streaming",
+        )
+        self.turns.append((user, assistant, context, source_message_id, mode))
+        return user, assistant
+
+    def create_assistant_regeneration(self, chat_id, source_assistant_id, context=None):
+        self.regenerate_context = context
+        return ChatMessageEntity(
+            id="assistant-regenerated",
+            chat_id=chat_id,
+            parent_id="user-1",
+            siblings_group_id="sg:user-1:assistant",
+            message_order=10,
+            message_content="",
+            message_type="assistant",
+            status="streaming",
+        )
+
+    def update_conversation_title(self, chat_id, first_message):
+        return True
+
+
+class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
+    def test_two_step_bridge_keeps_pending_assistant_ids_per_execution_context(self):
+        adapter = MySQLPersistenceAdapter(FakeTreeService())
+        ctx1 = copy_context()
+        ctx2 = copy_context()
+
+        first_user_id = ctx1.run(
+            adapter.save_user_message,
+            "chat-1",
+            "第一条",
+            "doctor-1",
+            {"stage": "greeting", "agent_type": "health"},
+            True,
+        )
+        second_user_id = ctx2.run(
+            adapter.save_user_message,
+            "chat-1",
+            "第二条",
+            "doctor-1",
+            {"stage": "health", "agent_type": "health"},
+            False,
+        )
+
+        self.assertEqual(first_user_id, "user-1")
+        self.assertEqual(second_user_id, "user-2")
+        self.assertEqual(ctx1.run(adapter.create_assistant_placeholder, "chat-1"), "assistant-1")
+        self.assertEqual(ctx2.run(adapter.create_assistant_placeholder, "chat-1"), "assistant-2")
+
+    def test_prepare_regenerate_turn_passes_context_to_service(self):
+        service = FakeTreeService()
+        adapter = MySQLPersistenceAdapter(service)
+
+        ids = adapter.prepare_regenerate_turn(
+            "chat-1",
+            "assistant-1",
+            {"stage": "health", "agent_type": "recommendation"},
+        )
+
+        self.assertEqual(ids["assistant_message_id"], "assistant-regenerated")
+        self.assertIsInstance(service.regenerate_context, MessageContext)
+        context_json = json.loads(service.regenerate_context.to_json())
+        self.assertIn({"conversation_stage": "health"}, context_json)
+        self.assertIn({"metadata": {"agent_type": "recommendation"}}, context_json)
 
 
 if __name__ == "__main__":
