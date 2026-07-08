@@ -4,7 +4,7 @@ ResearchAgent API Schemas
 """
 import re
 from typing import Optional, List, Dict, Any
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from datetime import datetime
 
@@ -35,12 +35,60 @@ class ResearchChatRequest(BaseModel):
         validation_alias=AliasChoices("parent_anchor_id", "parentAnchorId"),
         description="编辑重发时传入新 user sibling 的 ID",
     )
+    dual_answer: bool = Field(
+        False,
+        validation_alias=AliasChoices("dual_answer", "dualAnswer"),
+        description="是否为双答案请求",
+    )
+    request_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("request_id", "requestId"),
+        description="客户端请求追踪ID",
+    )
+    client_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("client_message_id", "clientMessageId"),
+        description="客户端用户消息ID，用于双答案复用同一用户锚点",
+    )
+    client_assistant_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("client_assistant_message_id", "clientAssistantMessageId"),
+        description="客户端助手消息ID",
+    )
+    execution_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("execution_id", "executionId"),
+        description="客户端执行ID",
+    )
+    anchor_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("anchor_message_id", "anchorMessageId"),
+        description="客户端锚点消息ID",
+    )
+    dual_answer_group_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("dual_answer_group_id", "dualAnswerGroupId"),
+        description="双答案分组ID",
+    )
+    dual_answer_index: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("dual_answer_index", "dualAnswerIndex"),
+        description="双答案序号",
+    )
     enable_institution_data: bool = Field(False, description="机构数据库访问开关")
     enable_web_search: bool = Field(False, description="网页搜索开关")
     web_search_types: List[str] = Field(
         default_factory=list,
         description="搜索类型列表 ['general', 'pubmed', 'scholar']"
     )
+
+    @model_validator(mode="after")
+    def infer_dual_answer_from_tracking_fields(self) -> "ResearchChatRequest":
+        if not self.dual_answer and (
+            self.dual_answer_group_id is not None or self.dual_answer_index is not None
+        ):
+            self.dual_answer = True
+        return self
 
     @field_validator('doctor_id')
     @classmethod

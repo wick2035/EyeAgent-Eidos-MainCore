@@ -3,7 +3,7 @@
 """
 import re
 from typing import Optional, Dict, Any, List
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from presentation.schemas.ui_schemas import UIElements
 
@@ -48,7 +48,55 @@ class ChatRequest(BaseModel):
         validation_alias=AliasChoices("parent_anchor_id", "parentAnchorId"),
         description="编辑重发时传入新 user sibling 的 ID",
     )
+    dual_answer: bool = Field(
+        False,
+        validation_alias=AliasChoices("dual_answer", "dualAnswer"),
+        description="是否为双答案请求",
+    )
+    request_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("request_id", "requestId"),
+        description="客户端请求追踪ID",
+    )
+    client_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("client_message_id", "clientMessageId"),
+        description="客户端用户消息ID，用于双答案复用同一用户锚点",
+    )
+    client_assistant_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("client_assistant_message_id", "clientAssistantMessageId"),
+        description="客户端助手消息ID",
+    )
+    execution_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("execution_id", "executionId"),
+        description="客户端执行ID",
+    )
+    anchor_message_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("anchor_message_id", "anchorMessageId"),
+        description="客户端锚点消息ID",
+    )
+    dual_answer_group_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("dual_answer_group_id", "dualAnswerGroupId"),
+        description="双答案分组ID",
+    )
+    dual_answer_index: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("dual_answer_index", "dualAnswerIndex"),
+        description="双答案序号",
+    )
     attachments: Optional[List[AttachmentRef]] = Field(None, description="附件列表（图片/PDF），由前端通过 /api/upload 上传后附带")
+
+    @model_validator(mode="after")
+    def infer_dual_answer_from_tracking_fields(self) -> "ChatRequest":
+        if not self.dual_answer and (
+            self.dual_answer_group_id is not None or self.dual_answer_index is not None
+        ):
+            self.dual_answer = True
+        return self
 
     @field_validator('patient_id')
     @classmethod
