@@ -32,9 +32,9 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
         try:
             sql = """
                 INSERT INTO chat_conversation
-                (id, user_type, host_id, title, summary, total_messages,
+                (id, user_type, host_id, title, summary, total_messages, active_node_id,
                  create_time, create_by, update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params = (
                 conversation.id,
@@ -43,6 +43,7 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
                 conversation.title,
                 conversation.summary,
                 conversation.total_messages,
+                conversation.active_node_id,
                 conversation.create_time,
                 conversation.create_by,
                 conversation.update_time,
@@ -61,7 +62,7 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
         """根据ID获取会话"""
         try:
             sql = """
-                SELECT id, user_type, host_id, title, summary, total_messages,
+                SELECT id, user_type, host_id, title, summary, total_messages, active_node_id,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_conversation
                 WHERE id = %s AND deleted = 0
@@ -84,7 +85,7 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
         """获取用户的会话列表"""
         try:
             sql = """
-                SELECT id, user_type, host_id, title, summary, total_messages,
+                SELECT id, user_type, host_id, title, summary, total_messages, active_node_id,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_conversation
                 WHERE host_id = %s AND user_type = %s AND deleted = 0
@@ -146,6 +147,20 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
             logger.error(f"[ChatConversationRepository] 更新摘要失败: {e}")
             return False
 
+    def update_active_node(self, conversation_id: str, active_node_id: str) -> bool:
+        """更新会话当前活跃叶子节点"""
+        try:
+            sql = """
+                UPDATE chat_conversation
+                SET active_node_id = %s, update_time = %s, version = version + 1
+                WHERE id = %s AND deleted = 0
+            """
+            affected = self.db.execute(sql, (active_node_id, datetime.now(), conversation_id))
+            return affected > 0
+        except DatabaseError as e:
+            logger.error(f"[ChatConversationRepository] 更新 active_node_id 失败: {e}")
+            return False
+
     def soft_delete(self, conversation_id: str) -> bool:
         """软删除会话"""
         try:
@@ -171,6 +186,7 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
             title=row["title"] or "Untitled",
             summary=row.get("summary"),
             total_messages=row.get("total_messages") or 0,
+            active_node_id=row.get("active_node_id"),
             create_time=row.get("create_time") or datetime.now(),
             create_by=row.get("create_by"),
             update_time=row.get("update_time") or datetime.now(),
@@ -195,14 +211,16 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 INSERT INTO chat_message
-                (id, chat_id, message_order, message_content, message_type,
+                (id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                  sender_id, context, token_used, status, error_message,
                  create_time, create_by, update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params = (
                 message.id,
                 message.chat_id,
+                message.parent_id,
+                message.siblings_group_id,
                 message.message_order,
                 message.message_content,
                 message.message_type,
@@ -229,7 +247,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         """根据ID获取消息"""
         try:
             sql = """
-                SELECT id, chat_id, message_order, message_content, message_type,
+                SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                        sender_id, context, token_used, status, error_message,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
@@ -242,6 +260,27 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         except DatabaseError as e:
             logger.error(f"[ChatMessageRepository] 获取消息失败: {e}")
             return None
+
+    def get_by_ids(self, chat_id: str, ids: List[str]) -> List[ChatMessageEntity]:
+        """按ID列表获取同一会话内的消息"""
+        if not ids:
+            return []
+
+        try:
+            placeholders = ", ".join(["%s"] * len(ids))
+            sql = f"""
+                SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content,
+                       message_type, sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_message
+                WHERE chat_id = %s AND id IN ({placeholders}) AND deleted = 0
+            """
+            rows = self.db.fetch_all(sql, tuple([chat_id, *ids]))
+            by_id = {row["id"]: self._row_to_entity(row) for row in rows}
+            return [by_id[message_id] for message_id in ids if message_id in by_id]
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 批量获取消息失败: {e}")
+            return []
 
     def update(self, message_id: str, updates: Dict[str, Any]) -> bool:
         """
@@ -298,7 +337,7 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         """获取会话的所有消息"""
         try:
             sql = """
-                SELECT id, chat_id, message_order, message_content, message_type,
+                SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                        sender_id, context, token_used, status, error_message,
                        create_time, create_by, update_time, update_by, deleted, version
                 FROM chat_message
@@ -311,6 +350,37 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         except DatabaseError as e:
             logger.error(f"[ChatMessageRepository] 获取消息列表失败: {e}")
             return []
+
+    def get_children(self, chat_id: str, parent_id: str) -> List[ChatMessageEntity]:
+        """获取某父节点下的直接子消息"""
+        try:
+            sql = """
+                SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content,
+                       message_type, sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_message
+                WHERE chat_id = %s AND parent_id = %s AND deleted = 0
+                ORDER BY message_order ASC, create_time ASC
+            """
+            rows = self.db.fetch_all(sql, (chat_id, parent_id))
+            return [self._row_to_entity(row) for row in rows]
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 获取子消息失败: {e}")
+            return []
+
+    def get_latest_sibling_order(self, chat_id: str, parent_id: str, message_type: str) -> int:
+        """获取同父同角色消息的最大 message_order"""
+        try:
+            sql = """
+                SELECT MAX(message_order) as max_order
+                FROM chat_message
+                WHERE chat_id = %s AND parent_id = %s AND message_type = %s AND deleted = 0
+            """
+            row = self.db.fetch_one(sql, (chat_id, parent_id, message_type))
+            return int(row["max_order"]) if row and row.get("max_order") is not None else 0
+        except DatabaseError as e:
+            logger.error(f"[ChatMessageRepository] 获取兄弟消息最大序号失败: {e}")
+            return 0
 
     def get_latest_order(self, chat_id: str) -> int:
         """获取会话中最新的消息序号"""
@@ -348,15 +418,17 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         try:
             sql = """
                 INSERT INTO chat_message
-                (id, chat_id, message_order, message_content, message_type,
+                (id, chat_id, parent_id, siblings_group_id, message_order, message_content, message_type,
                  sender_id, context, token_used, create_time, create_by,
                  update_time, update_by, deleted, version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             params_list = [
                 (
                     msg.id,
                     msg.chat_id,
+                    msg.parent_id,
+                    msg.siblings_group_id,
                     msg.message_order,
                     msg.message_content,
                     msg.message_type,
@@ -400,6 +472,8 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         return ChatMessageEntity(
             id=row["id"],
             chat_id=row["chat_id"],
+            parent_id=row.get("parent_id"),
+            siblings_group_id=row.get("siblings_group_id"),
             message_order=row["message_order"] or 0,
             message_content=row["message_content"] or "",
             message_type=row["message_type"] or "user",
