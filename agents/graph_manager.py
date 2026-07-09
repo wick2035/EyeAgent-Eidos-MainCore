@@ -143,7 +143,12 @@ class GraphManager:
         from utils.role_verification import verify_role
         from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
 
-        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        verified_role, was_downgraded = verify_role(
+            role,
+            patient_id,
+            doctor_id,
+            allow_same_identity=agent_type == "research",
+        )
         if was_downgraded:
             logger.warning(
                 f"[GraphManager] 角色降级: {role} -> {verified_role}, "
@@ -360,7 +365,12 @@ class GraphManager:
         from utils.role_verification import verify_role
         from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
 
-        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        verified_role, was_downgraded = verify_role(
+            role,
+            patient_id,
+            doctor_id,
+            allow_same_identity=agent_type == "research",
+        )
         if was_downgraded:
             logger.warning(
                 f"[GraphManager] 角色降级: {role} -> {verified_role}, "
@@ -612,7 +622,12 @@ class GraphManager:
         from utils.role_verification import verify_role
         from utils.input_guard import check_input_safety, RiskLevel, HIGH_RISK_RESPONSE, LOW_RISK_RESPONSE
 
-        verified_role, was_downgraded = verify_role(role, patient_id, doctor_id)
+        verified_role, was_downgraded = verify_role(
+            role,
+            patient_id,
+            doctor_id,
+            allow_same_identity=agent_type == "research",
+        )
         if was_downgraded:
             logger.warning(
                 f"[GraphManager] 角色降级: {role} -> {verified_role}, "

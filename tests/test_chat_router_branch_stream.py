@@ -328,6 +328,40 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
             ["前置问题", "前置回答", "编辑后的问题"],
         )
 
+    def test_research_edit_resend_allows_doctor_scoped_conversation(self):
+        from utils.role_verification import clear_cache
+
+        clear_cache()
+        persistence = BranchScopedPersistence()
+        manager = object.__new__(GraphManager)
+        manager.persistence = persistence
+        manager.checkpointer = FakeCheckpointer()
+        manager._get_state_message_count = lambda graph, config: 0
+        manager._extract_token_used_from_result = lambda result, previous_message_count: None
+        graph = FakeStreamingGraph()
+        doctor_id = "660e8400-e29b-41d4-a716-446655440001"
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=graph,
+        ):
+            chunks = collect_async(
+                manager.chat_stream_async(
+                    patient_id=doctor_id,
+                    doctor_id=doctor_id,
+                    session_id="s1",
+                    message="编辑后的科研问题",
+                    role="doctor",
+                    conversation_id="c1",
+                    agent_type="research",
+                    branch_mode="edit",
+                    source_message_id="u1",
+                )
+            )
+
+        self.assertEqual(chunks[0]["type"], "start")
+        self.assertEqual(graph.seen[0]["input_state"]["current_agent"], "research")
+
 
 class BranchConversationRouterTest(unittest.TestCase):
     def test_conversation_detail_ignores_malformed_context_row(self):

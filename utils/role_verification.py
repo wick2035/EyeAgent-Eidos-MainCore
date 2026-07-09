@@ -25,6 +25,7 @@ def verify_role(
     role: str,
     patient_id: str,
     doctor_id: Optional[str] = None,
+    allow_same_identity: bool = False,
 ) -> Tuple[str, bool]:
     """
     服务端角色校验。
@@ -33,7 +34,7 @@ def verify_role(
     1. 若 role != "doctor"，直接返回 "patient"
     2. 若 role == "doctor" 但未提供 doctor_id → 降级
     3. 若 doctor_id 格式不合法 → 降级
-    4. 若 doctor_id == patient_id → 降级（防止自我提权）
+    4. 若 doctor_id == patient_id 且未显式允许 doctor-scoped 会话 → 降级（防止自我提权）
     5. 校验通过 → 返回 "doctor"
 
     验证失败时 fail-closed（降级为 patient）。
@@ -61,7 +62,8 @@ def verify_role(
         return ("patient", True)
 
     # 检查缓存
-    cached = _verified_doctors.get(doctor_id)
+    cache_key = f"{doctor_id}|same:{allow_same_identity}"
+    cached = _verified_doctors.get(cache_key)
     if cached:
         is_valid, timestamp = cached
         if time.time() - timestamp < CACHE_TTL:
@@ -74,10 +76,10 @@ def verify_role(
                 return ("patient", True)
 
     # 验证逻辑
-    is_valid = _validate_doctor_id(doctor_id, patient_id)
+    is_valid = _validate_doctor_id(doctor_id, patient_id, allow_same_identity)
 
     # 写入缓存
-    _verified_doctors[doctor_id] = (is_valid, time.time())
+    _verified_doctors[cache_key] = (is_valid, time.time())
 
     if not is_valid:
         logger.warning(
@@ -88,7 +90,11 @@ def verify_role(
     return ("doctor", False)
 
 
-def _validate_doctor_id(doctor_id: str, patient_id: str) -> bool:
+def _validate_doctor_id(
+    doctor_id: str,
+    patient_id: str,
+    allow_same_identity: bool = False,
+) -> bool:
     """
     验证 doctor_id 的有效性。
 
@@ -104,7 +110,7 @@ def _validate_doctor_id(doctor_id: str, patient_id: str) -> bool:
         return False
 
     # 防止 doctor_id == patient_id 的自我提权
-    if doctor_id == patient_id:
+    if doctor_id == patient_id and not allow_same_identity:
         logger.warning(
             f"[RoleVerification] doctor_id 与 patient_id 相同，疑似提权: {doctor_id}"
         )
