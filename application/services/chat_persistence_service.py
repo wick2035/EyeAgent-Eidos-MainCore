@@ -112,7 +112,7 @@ class ChatPersistenceService:
         return conversation_id
 
     def _sibling_group_id(self, parent_id: str, message_type: str) -> str:
-        return f"sg:{parent_id}:{message_type}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"chat-sibling:{parent_id}:{message_type}"))
 
     def _next_order(self, chat_id: str) -> int:
         return self.message_repo.get_latest_order(chat_id) + 1

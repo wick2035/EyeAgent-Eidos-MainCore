@@ -164,6 +164,17 @@ class ChatTreeServiceTest(unittest.TestCase):
         self.assertEqual(assistant.parent_id, user.id)
         self.assertEqual(conv_repo.get_by_id("external-chat").active_node_id, assistant.id)
 
+    def test_sibling_group_id_fits_db_uuid_column(self):
+        service, _, _ = self.make_service()
+        parent_id = "12345678-1234-1234-1234-123456789012"
+
+        group_id = service._sibling_group_id(parent_id, "assistant")
+
+        self.assertLessEqual(len(group_id), 36)
+        self.assertEqual(str(uuid.UUID(group_id)), group_id)
+        self.assertEqual(group_id, service._sibling_group_id(parent_id, "assistant"))
+        self.assertNotEqual(group_id, service._sibling_group_id(parent_id, "user"))
+
     def test_edit_resend_creates_user_sibling_under_original_parent(self):
         service, _, _ = self.make_service()
         chat_id = service.create_conversation("doctor-1", "doctor", "新对话")
