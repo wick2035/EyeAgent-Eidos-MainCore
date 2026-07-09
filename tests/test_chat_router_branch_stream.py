@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 from agents.graph_manager import GraphManager
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
-from presentation.routers.conversation_router import get_conversation_detail
+from presentation.routers.conversation_router import get_conversation_detail, switch_active_branch
+from presentation.schemas.conversation_schemas import ActiveBranchRequest
 from presentation.schemas.chat_schemas import EditResendRequest, RegenerateRequest
 from utils.input_guard import GuardResult, RiskLevel, ThreatCategory
 
@@ -259,6 +260,31 @@ class BranchConversationRouterTest(unittest.TestCase):
             response = asyncio.run(get_conversation_detail("c1"))
 
         self.assertEqual(response.messages[0].context, None)
+
+    def test_switch_active_branch_returns_resolved_leaf_node(self):
+        conversation = ChatConversationEntity(
+            id="c1",
+            user_type="doctor",
+            host_id="doctor-1",
+            title="新对话",
+            active_node_id="assistant-leaf",
+            create_time=datetime.now(),
+            update_time=datetime.now(),
+        )
+        service = SimpleNamespace(
+            switch_active_branch=lambda conversation_id, message_id: True,
+            get_conversation=lambda conversation_id: conversation,
+        )
+
+        with patch(
+            "presentation.routers.conversation_router.get_chat_persistence_service",
+            return_value=service,
+        ):
+            response = asyncio.run(
+                switch_active_branch("c1", ActiveBranchRequest(through_message_id="user-branch"))
+            )
+
+        self.assertEqual(response["active_node_id"], "assistant-leaf")
 
 
 if __name__ == "__main__":

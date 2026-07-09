@@ -164,7 +164,9 @@ async def switch_active_branch(conversation_id: str, request: ActiveBranchReques
         success = persistence_service.switch_active_branch(conversation_id, request.through_message_id)
         if not success:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="切换分支失败")
-        return {"success": True, "conversation_id": conversation_id, "active_node_id": request.through_message_id}
+        conversation = persistence_service.get_conversation(conversation_id)
+        active_node_id = conversation.active_node_id if conversation else request.through_message_id
+        return {"success": True, "conversation_id": conversation_id, "active_node_id": active_node_id}
 
     except HTTPException:
         raise
