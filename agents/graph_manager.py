@@ -681,7 +681,7 @@ class GraphManager:
                         is_first_message=is_first,
                     )
                 assistant_message_id = prepared_message_ids.get("assistant_message_id")
-                if branch_mode in {"edit", "regenerate"} and assistant_message_id:
+                if assistant_message_id:
                     thread_config = get_branch_thread_config(
                         session_id,
                         conversation_id,
