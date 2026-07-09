@@ -44,11 +44,18 @@ class FakeChunk:
 
 
 class FakeStreamingGraph:
+    def __init__(self):
+        self.seen = []
+
     async def astream_events(self, input_state, config, version):
+        self.seen.append({"input_state": input_state, "config": config})
         yield {
             "event": "on_chat_model_stream",
             "data": {"chunk": FakeChunk("detached answer")},
         }
+
+    def get_state(self, config):
+        return SimpleNamespace(values={})
 
 
 class FailingPreparePersistence:
@@ -108,6 +115,66 @@ class RegeneratePersistence:
 
     def prepare_regenerate_turn(self, **kwargs):
         return {"assistant_message_id": "a2"}
+
+
+class BranchScopedPersistence:
+    def __init__(self):
+        self.success = None
+        self.service = SimpleNamespace(load_active_path=self.load_active_path)
+
+    def is_first_message(self, chat_id):
+        return False
+
+    def prepare_edit_resend_turn(self, **kwargs):
+        return {"user_message_id": "u2", "assistant_message_id": "a2"}
+
+    def load_active_path(self, conversation_id):
+        return None, [
+            ChatMessageEntity(
+                id="root",
+                chat_id=conversation_id,
+                parent_id=None,
+                message_order=0,
+                message_content="",
+                message_type="root",
+            ),
+            ChatMessageEntity(
+                id="u0",
+                chat_id=conversation_id,
+                parent_id="root",
+                message_order=1,
+                message_content="前置问题",
+                message_type="user",
+            ),
+            ChatMessageEntity(
+                id="a0",
+                chat_id=conversation_id,
+                parent_id="u0",
+                message_order=2,
+                message_content="前置回答",
+                message_type="assistant",
+            ),
+            ChatMessageEntity(
+                id="u2",
+                chat_id=conversation_id,
+                parent_id="a0",
+                message_order=3,
+                message_content="编辑后的问题",
+                message_type="user",
+            ),
+            ChatMessageEntity(
+                id="a2",
+                chat_id=conversation_id,
+                parent_id="u2",
+                message_order=4,
+                message_content="",
+                message_type="assistant",
+            ),
+        ], {}
+
+    def update_assistant_success(self, **kwargs):
+        self.success = kwargs
+        return True
 
 
 def make_graph_manager(persistence):
@@ -224,6 +291,42 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
         ))
 
         self.assertEqual(chunks[0]["type"], "error")
+
+    def test_edit_resend_uses_branch_thread_and_active_path_history(self):
+        persistence = BranchScopedPersistence()
+        manager = object.__new__(GraphManager)
+        manager.persistence = persistence
+        manager.checkpointer = FakeCheckpointer()
+        manager._get_state_message_count = lambda graph, config: 0
+        manager._extract_token_used_from_result = lambda result, previous_message_count: None
+        graph = FakeStreamingGraph()
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=graph,
+        ):
+            chunks = collect_async(
+                manager.chat_stream_async(
+                    patient_id="550e8400-e29b-41d4-a716-446655440000",
+                    doctor_id="660e8400-e29b-41d4-a716-446655440001",
+                    session_id="s1",
+                    message="编辑后的问题",
+                    role="doctor",
+                    conversation_id="c1",
+                    branch_mode="edit",
+                    source_message_id="u1",
+                )
+            )
+
+        self.assertEqual(chunks[0]["type"], "start")
+        thread_id = chunks[0]["metadata"]["thread_id"]
+        self.assertIn("a2", thread_id)
+        self.assertNotEqual(thread_id, "conv_c1")
+        graph_messages = graph.seen[0]["input_state"]["messages"]
+        self.assertEqual(
+            [message.content for message in graph_messages],
+            ["前置问题", "前置回答", "编辑后的问题"],
+        )
 
 
 class BranchConversationRouterTest(unittest.TestCase):

@@ -11,7 +11,11 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agents.graph.state import MedicalState, create_initial_state
 from agents.graph.graph_builder import get_medical_graph, create_medical_graph
-from agents.graph.id_mapping import ThreadIDManager, get_thread_config
+from agents.graph.id_mapping import (
+    ThreadIDManager,
+    get_branch_thread_config,
+    get_thread_config,
+)
 from agents.graph.checkpointer import get_checkpointer
 from agents.graph.persistence_adapter import PersistenceAdapter, NullPersistenceAdapter
 from agents.graph.token_usage_extractor import (
@@ -628,6 +632,7 @@ class GraphManager:
         usage_event_run_ids = set()
         previous_message_count = 0
         prepared_message_ids = {}
+        branch_history_messages = None
         current_agent = agent_type
         current_stage = "greeting"
 
@@ -661,6 +666,22 @@ class GraphManager:
                         is_first_message=is_first,
                     )
                 assistant_message_id = prepared_message_ids.get("assistant_message_id")
+                if branch_mode in {"edit", "regenerate"} and assistant_message_id:
+                    thread_config = get_branch_thread_config(
+                        session_id,
+                        conversation_id,
+                        assistant_message_id,
+                    )
+                    thread_id = thread_config["configurable"]["thread_id"]
+                    branch_history_messages = (
+                        self._build_branch_history_messages(
+                            conversation_id=conversation_id,
+                            current_user_message_id=prepared_message_ids.get(
+                                "user_message_id"
+                            ),
+                            current_assistant_message_id=assistant_message_id,
+                        )
+                    )
 
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 准备消息树节点失败: {e}", exc_info=True)
@@ -721,6 +742,9 @@ class GraphManager:
             return
 
         # 准备输入状态（标记流式模式）
+        input_kwargs = dict(kwargs)
+        if branch_history_messages is not None:
+            input_kwargs["history_messages"] = branch_history_messages
         input_state = self._prepare_input_state(
             patient_id=patient_id,
             session_id=session_id,
@@ -730,7 +754,7 @@ class GraphManager:
             conversation_id=conversation_id,
             agent_type=agent_type,
             is_streaming=True,  # 关键：标记流式模式
-            **kwargs,
+            **input_kwargs,
         )
 
         streaming_graph = None
@@ -1008,6 +1032,45 @@ class GraphManager:
             source_assistant_id,
         ).message_content
 
+    def _build_branch_history_messages(
+        self,
+        conversation_id: str,
+        current_user_message_id: Optional[str],
+        current_assistant_message_id: Optional[str],
+    ) -> List[Any]:
+        service = getattr(self.persistence, "service", None)
+        load_active_path = getattr(service, "load_active_path", None)
+        if not load_active_path:
+            return []
+
+        try:
+            _conversation, messages, _sibling_map = load_active_path(conversation_id)
+        except Exception as e:
+            logger.warning(
+                f"[GraphManager] 加载分支 active path 失败，将使用当前消息作为上下文: {e}"
+            )
+            return []
+
+        excluded_ids = {
+            message_id
+            for message_id in (current_user_message_id, current_assistant_message_id)
+            if message_id
+        }
+        history: List[Any] = []
+        for message in messages:
+            message_id = getattr(message, "id", None)
+            if message_id in excluded_ids:
+                continue
+            content = getattr(message, "message_content", "") or ""
+            if not content:
+                continue
+            message_type = getattr(message, "message_type", None)
+            if message_type == "user":
+                history.append(HumanMessage(content=content))
+            elif message_type == "assistant":
+                history.append(AIMessage(content=content))
+        return history
+
     def get_conversation_state(
         self,
         session_id: str,
@@ -1176,6 +1239,7 @@ class GraphManager:
         Returns:
             输入状态字典
         """
+        history_messages = kwargs.pop("history_messages", None) or []
         # 创建初始状态（kwargs 透传支持 attachments/attachment_analysis 等扩展字段）
         state = create_initial_state(
             patient_id=patient_id,
@@ -1188,7 +1252,7 @@ class GraphManager:
         )
 
         # 添加用户消息
-        state["messages"] = [HumanMessage(content=message)]
+        state["messages"] = [*history_messages, HumanMessage(content=message)]
 
         # 加载患者综合画像（每轮注入；agent 处理前必须持有真实患者数据用于个性化）
         try:
