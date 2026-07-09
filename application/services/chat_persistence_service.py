@@ -137,6 +137,50 @@ class ChatPersistenceService:
             raise ValueError(f"消息不存在: {message_id}")
         return message
 
+    def _ensure_active_root(
+        self,
+        conversation: ChatConversationEntity,
+        actor_id: Optional[str],
+        now: datetime,
+    ) -> str:
+        if conversation.active_node_id:
+            return conversation.active_node_id
+
+        roots = [
+            message
+            for message in self.message_repo.get_by_chat_id(conversation.id)
+            if message.message_type == "root"
+        ]
+        if roots:
+            root_id = roots[0].id
+        else:
+            root_id = str(uuid.uuid4())
+            root = ChatMessageEntity(
+                id=root_id,
+                chat_id=conversation.id,
+                parent_id=None,
+                siblings_group_id=None,
+                message_order=self._next_order(conversation.id),
+                message_content="",
+                message_type="root",
+                sender_id=None,
+                context=None,
+                token_used=None,
+                status="success",
+                error_message=None,
+                create_time=now,
+                create_by=actor_id,
+                update_time=now,
+                update_by=actor_id,
+                deleted=False,
+                version=1,
+            )
+            self.message_repo.create(root)
+
+        self.conversation_repo.update_active_node(conversation.id, root_id)
+        conversation.active_node_id = root_id
+        return root_id
+
     def create_turn(
         self,
         chat_id: str,
@@ -163,9 +207,7 @@ class ChatPersistenceService:
             if not source.siblings_group_id:
                 self.message_repo.update(source.id, {"siblings_group_id": user_group_id})
         else:
-            user_parent_id = conversation.active_node_id
-            if not user_parent_id:
-                raise ValueError("会话缺少 active_node_id")
+            user_parent_id = self._ensure_active_root(conversation, sender_id, now)
             user_group_id = self._sibling_group_id(user_parent_id, "user")
 
         user = ChatMessageEntity(

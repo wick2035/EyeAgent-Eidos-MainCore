@@ -138,6 +138,32 @@ class ChatTreeServiceTest(unittest.TestCase):
         self.assertEqual(assistant.parent_id, user.id)
         self.assertEqual(conv_repo.get_by_id(chat_id).active_node_id, assistant.id)
 
+    def test_normal_turn_bootstraps_root_for_external_empty_conversation(self):
+        service, conv_repo, msg_repo = self.make_service()
+        now = datetime.now()
+        conversation = ChatConversationEntity(
+            id="external-chat",
+            user_type="doctor",
+            host_id="doctor-1",
+            title="新对话",
+            total_messages=0,
+            active_node_id=None,
+            create_time=now,
+            update_time=now,
+        )
+        conv_repo.create(conversation)
+
+        user, assistant = service.create_turn("external-chat", "第一条问题", "doctor-1")
+
+        roots = [
+            m for m in msg_repo.items.values()
+            if m.chat_id == "external-chat" and m.message_type == "root"
+        ]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(user.parent_id, roots[0].id)
+        self.assertEqual(assistant.parent_id, user.id)
+        self.assertEqual(conv_repo.get_by_id("external-chat").active_node_id, assistant.id)
+
     def test_edit_resend_creates_user_sibling_under_original_parent(self):
         service, _, _ = self.make_service()
         chat_id = service.create_conversation("doctor-1", "doctor", "新对话")
