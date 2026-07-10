@@ -114,6 +114,33 @@ class InternalAuthSettingsTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         InternalAuthSettings.from_env()
 
+    def test_ttl_cooldown_and_timeout_reject_non_finite_values(self):
+        settings = InternalAuthSettings()
+        guarded_fields = (
+            "cache_ttl_seconds",
+            "negative_cache_seconds",
+            "refresh_cooldown_seconds",
+            "request_timeout_seconds",
+        )
+
+        for field_name in guarded_fields:
+            for invalid_value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(
+                    operation="construct",
+                    field_name=field_name,
+                    invalid_value=invalid_value,
+                ):
+                    with self.assertRaises(ValueError):
+                        InternalAuthSettings(**{field_name: invalid_value})
+
+                with self.subTest(
+                    operation="replace",
+                    field_name=field_name,
+                    invalid_value=invalid_value,
+                ):
+                    with self.assertRaises(ValueError):
+                        replace(settings, **{field_name: invalid_value})
+
     def test_clock_skew_must_be_between_zero_and_thirty_seconds(self):
         for clock_skew_seconds in (0, 30):
             with self.subTest(clock_skew_seconds=clock_skew_seconds):
@@ -140,6 +167,15 @@ class InternalAuthSettingsTest(unittest.TestCase):
         for field_name in positive_fields:
             for invalid_value in (0, -1):
                 with self.subTest(
+                    operation="construct",
+                    field_name=field_name,
+                    invalid_value=invalid_value,
+                ):
+                    with self.assertRaises(ValueError):
+                        InternalAuthSettings(**{field_name: invalid_value})
+
+                with self.subTest(
+                    operation="replace",
                     field_name=field_name,
                     invalid_value=invalid_value,
                 ):

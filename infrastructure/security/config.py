@@ -57,8 +57,9 @@ class InternalAuthSettings:
             "max_token_ttl_seconds",
         )
         for field_name in positive_fields:
-            if getattr(self, field_name) <= 0:
-                raise ValueError(f"{field_name} must be positive")
+            value = getattr(self, field_name)
+            if not (isfinite(value) and value > 0):
+                raise ValueError(f"{field_name} must be finite and positive")
 
         if (
             not isfinite(self.request_timeout_seconds)
