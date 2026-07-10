@@ -26,6 +26,7 @@ class InternalAuthSettingsTest(unittest.TestCase):
         self.assertEqual(settings.algorithm, "RS256")
         self.assertEqual(settings.max_token_ttl_seconds, 300)
         self.assertEqual(settings.negative_cache_max_entries, 256)
+        self.assertFalse(settings.allow_insecure_non_loopback_http_jwks)
 
     def test_off_mode_does_not_require_jwks_url(self):
         settings = InternalAuthSettings(mode=InternalAuthMode.OFF, jwks_url=None)
@@ -48,6 +49,7 @@ class InternalAuthSettingsTest(unittest.TestCase):
             "INTERNAL_JWT_REFRESH_COOLDOWN_SECONDS": "4",
             "INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS": "1.5",
             "INTERNAL_JWT_CLOCK_SKEW_SECONDS": "8",
+            "INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP": "true",
         }
 
         with patch.dict(os.environ, environment, clear=True):
@@ -63,6 +65,43 @@ class InternalAuthSettingsTest(unittest.TestCase):
         self.assertEqual(settings.refresh_cooldown_seconds, 4)
         self.assertEqual(settings.request_timeout_seconds, 1.5)
         self.assertEqual(settings.clock_skew_seconds, 8)
+        self.assertTrue(settings.allow_insecure_non_loopback_http_jwks)
+
+    def test_non_loopback_http_opt_in_uses_strict_boolean_values(self):
+        for raw_value, expected in (("true", True), ("false", False)):
+            with self.subTest(raw_value=raw_value):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP": raw_value
+                    },
+                    clear=True,
+                ):
+                    settings = InternalAuthSettings.from_env()
+                self.assertIs(
+                    settings.allow_insecure_non_loopback_http_jwks,
+                    expected,
+                )
+
+        for invalid_value in ("", "1", "yes", "TRUE", "False", " true "):
+            with self.subTest(invalid_value=invalid_value):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP": invalid_value
+                    },
+                    clear=True,
+                ):
+                    with self.assertRaises(ValueError):
+                        InternalAuthSettings.from_env()
+
+    def test_non_loopback_http_opt_in_must_be_a_boolean(self):
+        for invalid_value in (0, 1, "true", None):
+            with self.subTest(invalid_value=invalid_value):
+                with self.assertRaises(ValueError):
+                    InternalAuthSettings(
+                        allow_insecure_non_loopback_http_jwks=invalid_value
+                    )
 
     def test_from_env_does_not_override_fixed_cross_language_contract(self):
         environment = {

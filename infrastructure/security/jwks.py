@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import time
@@ -26,6 +27,7 @@ MonotonicClock = Callable[[], float]
 
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_KID_BYTES = 128
+_MIN_RSA_BITS = 2048
 _RSA_PRIVATE_PARAMETERS = frozenset({"d", "p", "q", "dp", "dq", "qi", "oth"})
 
 logger = logging.getLogger(__name__)
@@ -235,13 +237,17 @@ class CachedJwksProvider:
                 raise InvalidJwksResponseError("invalid RSA public JWK") from exc
             if not isinstance(parsed.key, RSAPublicKey):
                 raise InvalidJwksResponseError("JWK must contain an RSA public key")
+            if parsed.key.key_size < _MIN_RSA_BITS:
+                raise InvalidJwksResponseError(
+                    "RSA public JWK must be at least 2048 bits"
+                )
             parsed_keys[kid] = parsed
 
         return parsed_keys
 
     @staticmethod
     def _validate_kid(kid: object) -> None:
-        if not isinstance(kid, str) or not kid:
+        if not isinstance(kid, str) or not kid.strip():
             raise InvalidKidError("kid must be a non-empty string")
         try:
             encoded = kid.encode("utf-8")
@@ -250,13 +256,35 @@ class CachedJwksProvider:
         if len(encoded) > _MAX_KID_BYTES:
             raise InvalidKidError("kid must not exceed 128 UTF-8 bytes")
 
-    @staticmethod
-    def _validate_url(url: Optional[str]) -> None:
+    def _validate_url(self, url: Optional[str]) -> None:
         if not url:
             raise ValueError("JWKS URL is required")
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("JWKS URL must use http or https")
+        if parsed.scheme == "https":
+            return
+        try:
+            hostname = parsed.hostname
+        except ValueError as exc:
+            raise ValueError("JWKS URL hostname is invalid") from exc
+        if self._is_loopback_host(hostname):
+            return
+        if not self._settings.allow_insecure_non_loopback_http_jwks:
+            raise ValueError(
+                "non-loopback HTTP JWKS requires explicit insecure opt-in"
+            )
+
+    @staticmethod
+    def _is_loopback_host(hostname: Optional[str]) -> bool:
+        if hostname is None:
+            return False
+        if hostname.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
 
     async def _fetch_remote_jwks(self) -> Mapping[str, Any]:
         url = self._settings.jwks_url

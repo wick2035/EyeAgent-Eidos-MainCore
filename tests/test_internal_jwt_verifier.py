@@ -388,7 +388,7 @@ class RS256JWTVerifierTest(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_kid_does_not_access_jwks(self):
         await self._assert_invalid(self._token(omit_headers=("kid",)))
 
-        for kid in ("", "a" * 129, "界" * 43):
+        for kid in ("", "   ", "a" * 129, "界" * 43):
             with self.subTest(kid=kid):
                 await self._assert_invalid(self._token(headers={"kid": kid}))
 

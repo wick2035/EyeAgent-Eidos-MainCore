@@ -28,5 +28,18 @@ def rsa_jwk(kid: str = "key-1", **overrides: Any) -> dict[str, Any]:
     return deepcopy(jwk)
 
 
+def rsa_jwk_for_key_size(key_size: int, kid: str) -> dict[str, Any]:
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=key_size,
+    )
+    public_numbers = private_key.public_key().public_numbers()
+    return rsa_jwk(
+        kid,
+        n=_base64url_uint(public_numbers.n),
+        e=_base64url_uint(public_numbers.e),
+    )
+
+
 def jwks(*keys: dict[str, Any]) -> dict[str, Any]:
     return {"keys": [deepcopy(key) for key in keys]}

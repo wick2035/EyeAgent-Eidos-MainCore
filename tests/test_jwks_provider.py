@@ -18,7 +18,7 @@ from infrastructure.security.errors import (
     SigningKeyNotFoundError,
 )
 from infrastructure.security.jwks import CachedJwksProvider
-from tests.jwt_test_utils import jwks, rsa_jwk
+from tests.jwt_test_utils import jwks, rsa_jwk, rsa_jwk_for_key_size
 
 
 class FakeClock:
@@ -345,12 +345,47 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
             auth_settings(), fetcher=fetcher, clock=FakeClock()
         )
 
-        for invalid_kid in ("", "a" * 129, "界" * 43, None, 42):
+        for invalid_kid in ("", "   ", "a" * 129, "界" * 43, None, 42):
             with self.subTest(kid=invalid_kid):
                 with self.assertRaises(InvalidKidError):
                     await provider.get_signing_key(invalid_kid)  # type: ignore[arg-type]
 
         self.assertEqual(fetcher.call_count, 0)
+
+    async def test_rejects_blank_kid_in_jwks(self):
+        provider = CachedJwksProvider(
+            auth_settings(),
+            fetcher=SequenceFetcher(jwks(rsa_jwk("   "))),
+            clock=FakeClock(),
+        )
+
+        with self.assertRaises(InvalidJwksResponseError):
+            await provider.get_signing_key("expected")
+
+    async def test_rejects_rsa_key_below_2048_bits(self):
+        provider = CachedJwksProvider(
+            auth_settings(),
+            fetcher=SequenceFetcher(
+                jwks(rsa_jwk_for_key_size(1024, "weak"))
+            ),
+            clock=FakeClock(),
+        )
+
+        with self.assertRaises(InvalidJwksResponseError):
+            await provider.get_signing_key("weak")
+
+    async def test_accepts_rsa_key_at_2048_bit_boundary(self):
+        provider = CachedJwksProvider(
+            auth_settings(),
+            fetcher=SequenceFetcher(
+                jwks(rsa_jwk_for_key_size(2048, "boundary"))
+            ),
+            clock=FakeClock(),
+        )
+
+        key = await provider.get_signing_key("boundary")
+
+        self.assertEqual(key.key.key_size, 2048)
 
     async def test_rejects_jwks_keys_outside_fixed_rsa_signing_contract(self):
         invalid_keys = (
@@ -457,6 +492,40 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
                 auth_settings(jwks_url="file:///tmp/jwks.json"),
                 clock=FakeClock(),
             )
+
+    def test_default_fetcher_allows_https_and_loopback_http_by_default(self):
+        allowed_urls = (
+            "https://backend.example/internal/auth/jwks",
+            "http://localhost:8081/internal/auth/jwks",
+            "http://127.0.0.1:8081/internal/auth/jwks",
+            "http://127.42.0.7/internal/auth/jwks",
+            "http://[::1]:8081/internal/auth/jwks",
+        )
+
+        for jwks_url in allowed_urls:
+            with self.subTest(jwks_url=jwks_url):
+                CachedJwksProvider(
+                    auth_settings(jwks_url=jwks_url),
+                    clock=FakeClock(),
+                )
+
+    def test_default_fetcher_rejects_non_loopback_http_by_default(self):
+        with self.assertRaises(ValueError):
+            CachedJwksProvider(
+                auth_settings(
+                    jwks_url="http://backend.internal/internal/auth/jwks"
+                ),
+                clock=FakeClock(),
+            )
+
+    def test_default_fetcher_allows_non_loopback_http_with_explicit_opt_in(self):
+        CachedJwksProvider(
+            auth_settings(
+                jwks_url="http://backend.internal/internal/auth/jwks",
+                allow_insecure_non_loopback_http_jwks=True,
+            ),
+            clock=FakeClock(),
+        )
 
     async def test_default_fetcher_accumulates_chunked_body_to_eof(self):
         body = json.dumps(jwks(rsa_jwk("current"))).encode("utf-8")

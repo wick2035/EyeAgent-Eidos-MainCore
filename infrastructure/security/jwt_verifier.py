@@ -97,7 +97,7 @@ class RS256JWTVerifier:
             raise TokenValidationError("remote key references are forbidden")
 
         kid = header.get("kid")
-        if not isinstance(kid, str) or not kid:
+        if not isinstance(kid, str) or not kid.strip():
             raise TokenValidationError("token kid is invalid")
         try:
             encoded_kid = kid.encode("utf-8")

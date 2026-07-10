@@ -5,6 +5,23 @@ from math import isfinite
 from typing import Optional
 
 
+_ALLOW_INSECURE_HTTP_ENV = (
+    "INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP"
+)
+
+
+def _parse_strict_boolean(raw_value: Optional[str], *, default: bool) -> bool:
+    if raw_value is None:
+        return default
+    if raw_value == "true":
+        return True
+    if raw_value == "false":
+        return False
+    raise ValueError(
+        f"{_ALLOW_INSECURE_HTTP_ENV} must be exactly 'true' or 'false'"
+    )
+
+
 class InternalAuthMode(str, Enum):
     OFF = "off"
     OBSERVE = "observe"
@@ -26,6 +43,7 @@ class InternalAuthSettings:
     request_timeout_seconds: float = 2.0
     clock_skew_seconds: int = 5
     max_token_ttl_seconds: int = 300
+    allow_insecure_non_loopback_http_jwks: bool = False
 
     def __post_init__(self) -> None:
         mode = InternalAuthMode(self.mode)
@@ -49,6 +67,14 @@ class InternalAuthSettings:
 
         if mode is not InternalAuthMode.OFF and not self.jwks_url:
             raise ValueError("JWKS URL is required when internal auth is enabled")
+
+        if not isinstance(
+            self.allow_insecure_non_loopback_http_jwks,
+            bool,
+        ):
+            raise ValueError(
+                "allow_insecure_non_loopback_http_jwks must be a boolean"
+            )
 
         positive_fields = (
             "cache_ttl_seconds",
@@ -112,5 +138,9 @@ class InternalAuthSettings:
                     "INTERNAL_JWT_CLOCK_SKEW_SECONDS",
                     defaults.clock_skew_seconds,
                 )
+            ),
+            allow_insecure_non_loopback_http_jwks=_parse_strict_boolean(
+                os.environ.get(_ALLOW_INSECURE_HTTP_ENV),
+                default=defaults.allow_insecure_non_loopback_http_jwks,
             ),
         )
