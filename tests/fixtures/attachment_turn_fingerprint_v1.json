@@ -1,0 +1,58 @@
+{
+  "input": {
+    "version": 1,
+    "operation": "normal",
+    "conversation_id": "conversation-1",
+    "session_id": "session-1",
+    "patient_id": "patient-1",
+    "message": "  e\u0301\r\n检查  ",
+    "source_message_id": null,
+    "implicit_prompt_id": null,
+    "attachment_ids": [
+      "att-2",
+      "att-1"
+    ]
+  },
+  "canonical_json": "{\"attachment_ids\":[\"att-2\",\"att-1\"],\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":null,\"message\":\"é\\n检查\",\"operation\":\"normal\",\"patient_id\":\"patient-1\",\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":1}",
+  "sha256": "aafcb764226af516af7c018a246c59340d0275d1232ca46f59d65bc55c1666ed",
+  "boundary_vectors": [
+    {
+      "name": "ascii_edge_whitespace_removed",
+      "input": {
+        "version": 1,
+        "operation": "normal",
+        "conversation_id": "conversation-1",
+        "session_id": "session-1",
+        "patient_id": "patient-1",
+        "message": "\t\n\u000b\f\r 边界 \r\f\u000b\n\t",
+        "source_message_id": null,
+        "implicit_prompt_id": null,
+        "attachment_ids": [
+          "att-2",
+          "att-1"
+        ]
+      },
+      "canonical_json": "{\"attachment_ids\":[\"att-2\",\"att-1\"],\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":null,\"message\":\"边界\",\"operation\":\"normal\",\"patient_id\":\"patient-1\",\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":1}",
+      "sha256": "fea48ac361ebb06fcb4722af3a2b38476b9ba96b66d6c03932990dd998b09513"
+    },
+    {
+      "name": "unicode_edge_whitespace_preserved",
+      "input": {
+        "version": 1,
+        "operation": "normal",
+        "conversation_id": "conversation-1",
+        "session_id": "session-1",
+        "patient_id": "patient-1",
+        "message": "\u0085\u00a0\u2007\u202f边界\u202f\u2007\u00a0\u0085",
+        "source_message_id": null,
+        "implicit_prompt_id": null,
+        "attachment_ids": [
+          "att-2",
+          "att-1"
+        ]
+      },
+      "canonical_json": "{\"attachment_ids\":[\"att-2\",\"att-1\"],\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":null,\"message\":\"\u0085\u00a0\u2007\u202f边界\u202f\u2007\u00a0\u0085\",\"operation\":\"normal\",\"patient_id\":\"patient-1\",\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":1}",
+      "sha256": "6f77cc89f22c5991482dd9494e421d8d67bb3f7c6ded4499a757c46b95dee2df"
+    }
+  ]
+}

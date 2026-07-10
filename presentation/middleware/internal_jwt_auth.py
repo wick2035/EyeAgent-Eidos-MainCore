@@ -32,7 +32,16 @@ _ENFORCED_EXACT_ROUTES = frozenset(
     {
         ("POST", "/api/chat/edit-resend/stream"),
         ("POST", "/api/chat/regenerate/stream"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("POST", "/api/platform/chat/turns/prepare"),
         ("POST", "/api/research/chat/stream"),
+    }
+)
+
+_ENFORCED_DYNAMIC_ROUTES = frozenset(
+    {
+        ("GET", "/api/platform/chat/turns/{request_id}"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
     }
 )
 
@@ -50,6 +59,7 @@ _TELEMETRY_ROUTE_TEMPLATES = frozenset(
         ("GET", "/api/conversations/{conversation_id}"),
         ("GET", "/api/export/{session_id}"),
         ("GET", "/api/info"),
+        ("GET", "/api/platform/chat/turns/{request_id}"),
         ("GET", "/api/recommendation/health"),
         ("GET", "/api/research/conversations"),
         ("GET", "/api/research/conversations/{conversation_id}"),
@@ -62,6 +72,9 @@ _TELEMETRY_ROUTE_TEMPLATES = frozenset(
         ("POST", "/api/chat/stream"),
         ("POST", "/api/compliance/chat"),
         ("POST", "/api/compliance/chat/stream"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
         ("POST", "/api/recommendation/chat"),
         ("POST", "/api/recommendation/chat/stream"),
         ("POST", "/api/research/chat"),
@@ -113,6 +126,12 @@ def effective_auth_mode(
     method = scope.get("method")
     path = scope.get("path", "")
     if (method, path) in _ENFORCED_EXACT_ROUTES:
+        return InternalAuthMode.ENFORCE
+
+    if any(
+        candidate_method == method and _route_matches(path, route_template)
+        for candidate_method, route_template in _ENFORCED_DYNAMIC_ROUTES
+    ):
         return InternalAuthMode.ENFORCE
 
     segments = path.split("/")

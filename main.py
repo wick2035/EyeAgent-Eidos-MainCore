@@ -15,6 +15,9 @@ from presentation.routers import asr_router
 from presentation.routers import file_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
+from presentation.exception_handlers.platform_validation_handler import (
+    install_platform_validation_handler,
+)
 from presentation.middleware.internal_jwt_auth import install_internal_auth
 
 # 配置日志
@@ -52,6 +55,8 @@ app = FastAPI(
     version="3.0.0",
     lifespan=lifespan,
 )
+
+install_platform_validation_handler(app)
 
 # 内部 API 认证先注册，随后注册的 CORS 位于外层并覆盖认证错误响应。
 install_internal_auth(app)
