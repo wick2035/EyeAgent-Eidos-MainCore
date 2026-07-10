@@ -130,8 +130,8 @@ class InternalJWTAuthMiddleware:
                     code="INTERNAL_AUTH_UNAVAILABLE",
                 )
             return
-        except Exception as error:
-            self._log_internal_error(error)
+        except Exception:
+            self._log_internal_error()
             if self._settings.mode is InternalAuthMode.OBSERVE:
                 await self._app(scope, receive, send)
             else:
@@ -179,17 +179,10 @@ class InternalJWTAuthMiddleware:
         logger.warning("internal_auth outcome=%s", outcome)
 
     @staticmethod
-    def _log_internal_error(error: Exception) -> None:
-        sanitized_error = RuntimeError(
-            "internal authentication verifier failed"
-        )
-        logger.exception(
+    def _log_internal_error() -> None:
+        logger.error(
             "internal_auth outcome=internal_error",
-            exc_info=(
-                RuntimeError,
-                sanitized_error,
-                error.__traceback__,
-            ),
+            exc_info=None,
         )
 
     @staticmethod

@@ -23,6 +23,38 @@ _JWKS_URL = "https://backend.example/internal/auth/jwks"
 _LOGGER_NAME = "presentation.middleware.internal_jwt_auth"
 
 
+class RecordingLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def _exception_chain_text(exc_info: Any) -> str:
+    if exc_info is None:
+        return ""
+
+    exception = exc_info[1]
+    seen: set[int] = set()
+    chain: list[str] = []
+    while exception is not None and id(exception) not in seen:
+        seen.add(id(exception))
+        chain.append(repr(exception))
+        exception = exception.__cause__ or exception.__context__
+    return "\n".join(chain)
+
+
+def _traceback_frame_locals_text(exc_info: Any) -> str:
+    traceback = None if exc_info is None else exc_info[2]
+    frame_locals: list[str] = []
+    while traceback is not None:
+        frame_locals.append(repr(dict(traceback.tb_frame.f_locals)))
+        traceback = traceback.tb_next
+    return "\n".join(frame_locals)
+
+
 def _principal() -> CurrentPrincipal:
     return CurrentPrincipal(
         issuer="eye-agent-backend",
@@ -349,6 +381,64 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(scope["state"]["internal_principal"])
         self.assertIn("internal_error", logs)
         self.assertNotIn(token, logs)
+
+    async def test_unexpected_error_log_record_cannot_reveal_raw_token(self):
+        cases = (
+            (InternalAuthMode.OBSERVE, 200, 1),
+            (InternalAuthMode.ENFORCE, 500, 0),
+        )
+
+        for mode, expected_status, downstream_calls in cases:
+            with self.subTest(mode=mode):
+                token = f"signed.raw.token.{mode.value}"
+                verifier = StubVerifier(
+                    error=RuntimeError(f"secret failure: {token}")
+                )
+                app, middleware, _ = self._middleware(
+                    mode,
+                    verifier=verifier,
+                )
+                scope = _scope(headers=_authorization(f"Bearer {token}"))
+                handler = RecordingLogHandler()
+                event_logger = logging.getLogger(_LOGGER_NAME)
+                previous_level = event_logger.level
+                previous_propagate = event_logger.propagate
+                event_logger.setLevel(logging.ERROR)
+                event_logger.propagate = False
+                event_logger.addHandler(handler)
+                try:
+                    messages = await self._call(middleware, scope)
+                finally:
+                    event_logger.removeHandler(handler)
+                    event_logger.setLevel(previous_level)
+                    event_logger.propagate = previous_propagate
+
+                self.assertEqual(self._status(messages), expected_status)
+                self.assertEqual(len(app.scopes), downstream_calls)
+                self.assertEqual(len(handler.records), 1)
+                record = handler.records[0]
+                exposed_surfaces = {
+                    "message": record.getMessage(),
+                    "args": repr(record.args),
+                    "exception_chain": _exception_chain_text(
+                        record.exc_info
+                    ),
+                    "frame_locals": _traceback_frame_locals_text(
+                        record.exc_info
+                    ),
+                    "exc_text": record.exc_text or "",
+                    "stack_info": record.stack_info or "",
+                }
+                leaks = {
+                    surface: token in value
+                    for surface, value in exposed_surfaces.items()
+                }
+                leaks["exc_info_attached"] = record.exc_info is not None
+
+                self.assertEqual(
+                    leaks,
+                    {surface: False for surface in leaks},
+                )
 
     async def test_enforce_missing_token_returns_required_401_before_downstream(self):
         verifier = StubVerifier(principal=_principal())
