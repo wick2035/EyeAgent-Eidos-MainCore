@@ -37,3 +37,6 @@ dist/
 *.tmp
 *.temp
 nul
+
+# Codex 隔离工作区
+.worktrees/
