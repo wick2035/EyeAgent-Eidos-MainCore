@@ -233,6 +233,46 @@ INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-intern
   必须依赖网关与内网访问控制；
 - 生产环境不得把 MainCore 作为公网入口暴露，外部业务请求必须先经过 Java 网关。
 
+### 2026-07-10 自动化验收与部署边界
+
+当前周期已完成平台 7 条 Java 调用与 MainCore 身份桥的代码、自动化验收。Python 全量
+116 项测试通过，Java 指定身份/JWT/provider/平台代理 53 项及排除已知坏夹具后的 67 项
+扩展回归通过，Java 七模块 package 成功。仓库外 2048-bit 临时 RSA 密钥签出的 compact
+JWT 和公开 JWKS 已通过生产 `CachedJwksProvider`、`RS256JWTVerifier` 的离线跨语言验签；
+探针断言主体类型、`aud` 数组、scope 和 `kid` 契约，未记录临时 `kid`、token 或密钥材料。
+
+实际部署只使用以下变量名，secret 值由部署环境提供，不写入 README、镜像或 YAML：
+
+```text
+Java:
+  INTERNAL_JWT_MODE=off
+  INTERNAL_JWT_TTL_SECONDS=300
+  INTERNAL_JWT_KEY_ID
+  INTERNAL_JWT_PRIVATE_KEY_LOCATION
+  INTERNAL_JWT_PUBLIC_KEY_LOCATION
+  INTERNAL_JWT_ADDITIONAL_PUBLIC_JWKS_LOCATION
+
+Python:
+  INTERNAL_AUTH_MODE=off
+  INTERNAL_JWT_JWKS_URL
+  INTERNAL_JWT_CACHE_TTL_SECONDS
+  INTERNAL_JWT_NEGATIVE_CACHE_SECONDS
+  INTERNAL_JWT_REFRESH_COOLDOWN_SECONDS
+  INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS
+  INTERNAL_JWT_CLOCK_SKEW_SECONDS
+```
+
+`off` 是两端默认配置。本次没有 staging/生产访问日志、真实 Sa-Token 或患者流量、部署权限
+及编排环境，因此没有启动任何全局 enforce，也没有完成 staging 30 分钟/生产高峰流量
+gate、真实 SSE 探针、滚动 SSE drain 或前滚/回滚演练。部署状态应判定为：平台范围代码与
+自动化验收完成，外部部署 gate 和演练待执行。
+
+在外部 gate 完成前，五类平台独占路由以外的 `POST /api/chat`、
+`POST /api/chat/stream`、`POST /api/upload`、`POST /api/asr/transcribe` 和未知
+`/api/**` 均继续按 observe 兼容；没有患者端零流量或明确下线证据，全局 enforce gate
+明确未满足。回滚顺序仍为 Python enforce → observe，完成实例 unready、在途 SSE drain
+后再将 Java enforce → observe → off；这套部署回滚流程尚未在外部编排环境实际演练。
+
 ## 快速开始
 
 ### 1. 安装依赖
