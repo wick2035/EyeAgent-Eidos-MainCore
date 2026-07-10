@@ -212,12 +212,25 @@ MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Jav
 其他未盘点 `/api/**`、方法不匹配、额外路径段或尾斜杠变体也默认使用 `observe`，避免
 破坏既有患者调用；已携带合法 JWT 的请求仍会验证并绑定可信主体。
 
-`observe` 和 `enforce` 必须配置 Java 后端的 JWKS URL。例如在容器内网中：
+`observe` 和 `enforce` 必须配置 Java 后端的 JWKS URL。默认示例使用 HTTPS：
 
 ```env
 INTERNAL_AUTH_MODE=observe
-INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-internal-jwks.json
+INTERNAL_JWT_JWKS_URL=https://eye-agent-backend.example/.well-known/eye-agent-internal-jwks.json
 ```
+
+默认只允许 HTTPS，或 `localhost`、IPv4/IPv6 loopback HTTP；例如本机联调可使用
+`http://127.0.0.1:8081/.well-known/eye-agent-internal-jwks.json`。非 loopback HTTP 默认拒绝。
+只有部署方已经证明链路位于已认证 service mesh 或其他有书面证据的受信网络边界时，才可
+显式设置：
+
+```env
+INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP=true
+```
+
+该变量默认 `false`，且只接受精确小写 `true`/`false`；空字符串、大小写变体、`1`、
+`yes` 等值都会 fail-fast。此开关只是显式接受明文传输风险，不会让 HTTP 获得加密、端点
+身份认证或防篡改能力，也不能替代生产 HTTPS/mTLS 或已认证 mesh 的部署证据。
 
 认证中间件输出可按 method+规范化 route 聚合的安全事件：
 
@@ -237,8 +250,9 @@ jwks_refresh_failed
 只记录 key count 与可信 `kid` 指纹。失败事件不记录 token、subject、攻击者原始 `kid`、
 动态路径参数、异常消息/堆栈或上游响应正文。
 
-建议先确认 Java JWKS 仅可被 MainCore 所在内网访问，再按 `off` → `observe` →
-路由级 `enforce` 顺序发布。没有访问日志提供“遗留直连请求为零”的流量证据时，不得宣称
+建议先确认 JWKS 使用 HTTPS/mTLS、已认证 service mesh、loopback 或等效公钥固定，并且
+Java JWKS 仅可被 MainCore 所在网络边界访问，再按 `off` → `observe` → 路由级 `enforce`
+顺序发布。缺少上述传输证据，或没有访问日志提供“遗留直连请求为零”的流量证据时，不得宣称
 或启用全局 `enforce`；即使配置为 `enforce`，上述共享、患者兼容及未盘点 API 仍保持
 `observe`。
 
@@ -260,6 +274,9 @@ Token-Session 单次持久化。仓库外 2048-bit 临时 RSA 密钥签出的 co
 `aud` 数组、scope 和 `kid` 契约，未记录临时 `kid`、token 或密钥材料。精确最终测试计数以
 本周期 Task 12 验收报告为准。
 
+第二轮独立复审又补齐 Java 公私钥真实 sign/verify 自检、Python 空白 `kid` 拒绝、至少
+2048-bit RSA JWK 门禁，以及 HTTPS/loopback 默认安全的 JWKS URL 策略。
+
 实际部署只使用以下变量名，secret 值由部署环境提供，不写入 README、镜像或 YAML：
 
 ```text
@@ -279,14 +296,15 @@ Python:
   INTERNAL_JWT_REFRESH_COOLDOWN_SECONDS
   INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS
   INTERNAL_JWT_CLOCK_SKEW_SECONDS
+  INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP=false
 ```
 
 `off` 是两端默认配置。“代码与本地自动化完成”不等于“生产 enforce 就绪”。本次没有
 staging/生产访问日志、真实 Sa-Token 或患者流量、部署权限
 及编排环境，因此没有启动任何全局 enforce，也没有完成 staging 30 分钟/生产高峰流量
 gate、真实平台/患者 JSON/SSE 探针、滚动 SSE drain、K1/K2 重叠发布/bake/signer 回滚或
-前滚/回滚演练。部署状态应判定为：平台范围代码与本地自动化验收完成，外部部署 gate 和
-演练待执行。
+前滚/回滚演练，也没有提供生产 HTTPS/mTLS、已认证 mesh、loopback 或等效公钥固定证据。
+部署状态应判定为：平台范围代码与本地自动化验收完成，外部部署 gate 和演练待执行。
 
 在外部 gate 完成前，五类平台独占路由以外的 `POST /api/chat`、
 `POST /api/chat/stream`、`POST /api/upload`、`POST /api/asr/transcribe` 和未知
