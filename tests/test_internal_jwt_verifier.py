@@ -345,12 +345,40 @@ class RS256JWTVerifierTest(unittest.IsolatedAsyncioTestCase):
                     self._token(claims=self._claims(roles=roles))
                 )
 
-    async def test_scope_must_be_a_space_delimited_string(self):
-        for scope in (["ai:chat"], {"ai:chat": True}, 7, None):
+    async def test_scope_requires_ascii_single_space_delimited_tokens(self):
+        invalid_scopes = (
+            ["ai:chat"],
+            {"ai:chat": True},
+            7,
+            None,
+            "",
+            "   ",
+            "\t",
+            "\n",
+            " ai:chat",
+            "ai:chat ",
+            "ai:chat  conversation:read",
+            "ai:chat\tconversation:read",
+            "ai:chat\nconversation:read",
+            "ai:chat,conversation:read",
+            "patient/read",
+            "患者:read",
+        )
+
+        for scope in invalid_scopes:
             with self.subTest(scope=scope):
                 await self._assert_invalid(
                     self._token(claims=self._claims(scope=scope))
                 )
+
+    async def test_scope_accepts_each_allowed_ascii_character_class(self):
+        scope = "alpha AZ09:scope resource:* dotted.scope under_score hyphen-scope"
+
+        principal = await self.verifier.verify(
+            self._token(claims=self._claims(scope=scope))
+        )
+
+        self.assertEqual(principal.scopes, frozenset(scope.split(" ")))
 
     async def test_rejects_token_larger_than_16_kib_before_jwks_lookup(self):
         await self._assert_invalid("a" * (16 * 1024 + 1))

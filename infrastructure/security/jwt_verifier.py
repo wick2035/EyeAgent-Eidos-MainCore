@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import jwt
@@ -31,6 +32,7 @@ REQUIRED_CLAIMS = (
 _ALLOWED_PRINCIPAL_TYPES = frozenset({"user", "doctor", "patient"})
 _MAX_TOKEN_BYTES = 16 * 1024
 _MAX_KID_BYTES = 128
+_SCOPE_PATTERN = re.compile(r"[A-Za-z0-9:*._-]+(?: [A-Za-z0-9:*._-]+)*")
 
 
 class RS256JWTVerifier:
@@ -130,8 +132,9 @@ class RS256JWTVerifier:
             raise TokenValidationError("token roles are invalid")
 
         scope = payload.get("scope")
-        if not isinstance(scope, str):
+        if not isinstance(scope, str) or _SCOPE_PATTERN.fullmatch(scope) is None:
             raise TokenValidationError("token scope is invalid")
+        scopes = frozenset(scope.split(" "))
 
         issued_at = self._integer_date(payload, "iat")
         not_before = self._integer_date(payload, "nbf")
@@ -150,7 +153,7 @@ class RS256JWTVerifier:
             subject=subject,
             principal_type=principal_type,
             roles=frozenset(roles),
-            scopes=frozenset(scope.split()),
+            scopes=scopes,
             institution_id=institution_id,
             tenant_id=tenant_id,
             authorized_party=authorized_party,
