@@ -13,6 +13,7 @@ from infrastructure.security.errors import (
     TokenValidationError,
 )
 from presentation.dependencies.security import get_current_principal
+from presentation.middleware import internal_jwt_auth
 from presentation.middleware.internal_jwt_auth import (
     InternalJWTAuthMiddleware,
     should_authenticate,
@@ -21,6 +22,19 @@ from presentation.middleware.internal_jwt_auth import (
 
 _JWKS_URL = "https://backend.example/internal/auth/jwks"
 _LOGGER_NAME = "presentation.middleware.internal_jwt_auth"
+_ENFORCED_REQUESTS = (
+    ("GET", "/api/conversations/conversation-7"),
+    ("POST", "/api/chat/edit-resend/stream"),
+    ("POST", "/api/chat/regenerate/stream"),
+    ("POST", "/api/research/chat/stream"),
+    ("PUT", "/api/conversations/conversation-7/active-branch"),
+)
+_COMPATIBILITY_REQUESTS = (
+    ("POST", "/api/chat"),
+    ("POST", "/api/chat/stream"),
+    ("POST", "/api/upload"),
+    ("POST", "/api/asr/transcribe"),
+)
 
 
 class RecordingLogHandler(logging.Handler):
@@ -77,7 +91,7 @@ def _scope(
     *,
     scope_type: str = "http",
     method: str = "GET",
-    path: str = "/api/chat",
+    path: str = "/api/conversations/conversation-7",
     headers: Optional[list[tuple[bytes, bytes]]] = None,
     state: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
@@ -101,6 +115,19 @@ def _scope(
 
 def _authorization(value: str) -> list[tuple[bytes, bytes]]:
     return [(b"authorization", value.encode("ascii"))]
+
+
+def _effective_auth_mode(
+    scope: dict[str, Any],
+    configured_mode: InternalAuthMode,
+) -> InternalAuthMode:
+    resolver = getattr(internal_jwt_auth, "effective_auth_mode", None)
+    if not callable(resolver):
+        raise AssertionError(
+            "presentation.middleware.internal_jwt_auth.effective_auth_mode "
+            "must be implemented"
+        )
+    return resolver(scope, configured_mode)
 
 
 class RecordingApp:
@@ -250,6 +277,49 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         for scope, expected in cases:
             with self.subTest(scope=scope):
                 self.assertIs(should_authenticate(scope), expected)
+
+    def test_effective_mode_uses_strict_method_and_full_path_matching(self):
+        for method, path in _ENFORCED_REQUESTS:
+            with self.subTest(kind="enforced", method=method, path=path):
+                self.assertIs(
+                    _effective_auth_mode(
+                        _scope(method=method, path=path),
+                        InternalAuthMode.ENFORCE,
+                    ),
+                    InternalAuthMode.ENFORCE,
+                )
+
+        observe_requests = _COMPATIBILITY_REQUESTS + (
+            ("PATCH", "/api/future/business-route"),
+            ("POST", "/api/conversations/conversation-7"),
+            ("GET", "/api/conversations/conversation-7/extra"),
+            ("GET", "/api/conversations/conversation-7/"),
+            ("PUT", "/api/conversations/conversation-7/active-branch/"),
+        )
+        for method, path in observe_requests:
+            with self.subTest(kind="observed", method=method, path=path):
+                self.assertIs(
+                    _effective_auth_mode(
+                        _scope(method=method, path=path),
+                        InternalAuthMode.ENFORCE,
+                    ),
+                    InternalAuthMode.OBSERVE,
+                )
+
+        self.assertIs(
+            _effective_auth_mode(
+                _scope(method="POST", path="/api/chat"),
+                InternalAuthMode.OFF,
+            ),
+            InternalAuthMode.OFF,
+        )
+        self.assertIs(
+            _effective_auth_mode(
+                _scope(method="PATCH", path="/api/future"),
+                InternalAuthMode.OBSERVE,
+            ),
+            InternalAuthMode.OBSERVE,
+        )
 
     async def test_off_missing_token_passes_without_constructing_verifier(self):
         factory = FailingVerifierFactory()
@@ -439,6 +509,155 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
                     leaks,
                     {surface: False for surface in leaks},
                 )
+
+    async def test_platform_exclusive_routes_enforce_all_jwt_outcomes(self):
+        token = "signed.raw.token"
+        principal = _principal()
+        cases = (
+            ("missing", StubVerifier(principal=principal), [], 401),
+            (
+                "invalid",
+                StubVerifier(error=TokenValidationError("invalid token")),
+                _authorization(f"Bearer {token}"),
+                401,
+            ),
+            (
+                "unavailable",
+                StubVerifier(error=JwksUnavailableError("network down")),
+                _authorization(f"Bearer {token}"),
+                503,
+            ),
+            (
+                "valid",
+                StubVerifier(principal=principal),
+                _authorization(f"Bearer {token}"),
+                200,
+            ),
+        )
+
+        for method, path in _ENFORCED_REQUESTS:
+            for outcome, verifier, headers, expected_status in cases:
+                with self.subTest(
+                    method=method,
+                    path=path,
+                    outcome=outcome,
+                ):
+                    app, middleware, _ = self._middleware(
+                        InternalAuthMode.ENFORCE,
+                        verifier=verifier,
+                    )
+                    scope = _scope(method=method, path=path, headers=headers)
+
+                    messages = await self._call(middleware, scope)
+
+                    self.assertEqual(self._status(messages), expected_status)
+                    self.assertEqual(
+                        len(app.scopes),
+                        1 if outcome == "valid" else 0,
+                    )
+                    self.assertIs(
+                        scope["state"]["internal_principal"],
+                        principal if outcome == "valid" else None,
+                    )
+                    self.assertNotIn(token, repr(messages))
+                    self.assertNotIn(token, repr(scope["state"]))
+
+    async def test_enforce_compatibility_routes_observe_auth_failures(self):
+        token = "signed.raw.token"
+        cases = (
+            ("missing", StubVerifier(principal=_principal()), []),
+            (
+                "invalid_header",
+                StubVerifier(principal=_principal()),
+                _authorization("Basic abc123"),
+            ),
+            (
+                "invalid_token",
+                StubVerifier(error=TokenValidationError("invalid token")),
+                _authorization(f"Bearer {token}"),
+            ),
+            (
+                "unavailable",
+                StubVerifier(error=JwksUnavailableError("network down")),
+                _authorization(f"Bearer {token}"),
+            ),
+            (
+                "unexpected",
+                StubVerifier(error=RuntimeError(f"secret failure: {token}")),
+                _authorization(f"Bearer {token}"),
+            ),
+        )
+
+        for method, path in _COMPATIBILITY_REQUESTS:
+            for outcome, verifier, headers in cases:
+                with self.subTest(
+                    method=method,
+                    path=path,
+                    outcome=outcome,
+                ):
+                    app, middleware, _ = self._middleware(
+                        InternalAuthMode.ENFORCE,
+                        verifier=verifier,
+                    )
+                    scope = _scope(method=method, path=path, headers=headers)
+
+                    with self.assertLogs(_LOGGER_NAME, level=logging.WARNING):
+                        messages = await self._call(middleware, scope)
+
+                    self.assertEqual(self._status(messages), 200)
+                    self.assertEqual(len(app.scopes), 1)
+                    self.assertIsNone(scope["state"]["internal_principal"])
+                    self.assertNotIn(token, repr(messages))
+                    self.assertNotIn(token, repr(scope["state"]))
+
+    async def test_enforce_compatibility_routes_still_bind_valid_principal(self):
+        token = "signed.raw.token"
+        principal = _principal()
+
+        for method, path in _COMPATIBILITY_REQUESTS:
+            with self.subTest(method=method, path=path):
+                verifier = StubVerifier(principal=principal)
+                app, middleware, _ = self._middleware(
+                    InternalAuthMode.ENFORCE,
+                    verifier=verifier,
+                )
+                scope = _scope(
+                    method=method,
+                    path=path,
+                    headers=_authorization(f"Bearer {token}"),
+                )
+
+                messages = await self._call(middleware, scope)
+
+                self.assertEqual(self._status(messages), 200)
+                self.assertEqual(len(app.scopes), 1)
+                self.assertEqual(verifier.tokens, [token])
+                self.assertIs(scope["state"]["internal_principal"], principal)
+                self.assertNotIn(token, repr(messages))
+                self.assertNotIn(token, repr(scope["state"]))
+
+    async def test_enforce_unknown_and_route_mismatches_default_to_observe(self):
+        requests = (
+            ("PATCH", "/api/future/business-route"),
+            ("POST", "/api/conversations/conversation-7"),
+            ("GET", "/api/conversations/conversation-7/extra"),
+            ("GET", "/api/conversations/conversation-7/"),
+            ("PUT", "/api/conversations/conversation-7/active-branch/"),
+        )
+
+        for method, path in requests:
+            with self.subTest(method=method, path=path):
+                app, middleware, _ = self._middleware(
+                    InternalAuthMode.ENFORCE,
+                )
+                scope = _scope(method=method, path=path)
+
+                with self.assertLogs(_LOGGER_NAME, level=logging.WARNING):
+                    messages = await self._call(middleware, scope)
+
+                self.assertEqual(self._status(messages), 200)
+                self.assertEqual(len(app.scopes), 1)
+                self.assertIsNone(scope["state"]["internal_principal"])
 
     async def test_enforce_missing_token_returns_required_401_before_downstream(self):
         verifier = StubVerifier(principal=_principal())

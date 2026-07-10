@@ -189,8 +189,28 @@ MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Jav
 - `off`：默认值。不构造 verifier、不解析 token，保持现有请求行为；
 - `observe`：验证已携带的 token，并记录缺失、无效或 JWKS 不可用等结果，但仍放行
   请求，用于上线前观测；
-- `enforce`：强制认证。缺失或无效 token 返回 `401`，无可用 JWKS 时返回 `503`，
-  认证成功后把可信主体写入 `request.state.internal_principal`。
+- `enforce`：仅对下述平台独占路由启用强制认证。缺失或无效 token 返回 `401`，无可用
+  JWKS 时返回 `503`；其他 `/api/**` 路由仍按 `observe` 兼容放行。认证成功后把可信主体
+  写入 `request.state.internal_principal`。
+
+全局配置 `INTERNAL_AUTH_MODE=enforce` 不等于全部 `/api/**` 都强制认证。当前只有以下
+五类平台独占路由的有效模式为 `enforce`（会话 ID 只匹配一个非空路径段）：
+
+- `GET /api/conversations/{conversation_id}`；
+- `POST /api/chat/edit-resend/stream`；
+- `POST /api/chat/regenerate/stream`；
+- `POST /api/research/chat/stream`；
+- `PUT /api/conversations/{conversation_id}/active-branch`。
+
+以下四类共享或患者兼容路由在全局配置为 `enforce` 时，有效模式仍为 `observe`：
+
+- `POST /api/chat`；
+- `POST /api/chat/stream`；
+- `POST /api/upload`；
+- `POST /api/asr/transcribe`。
+
+其他未盘点 `/api/**`、方法不匹配、额外路径段或尾斜杠变体也默认使用 `observe`，避免
+破坏既有患者调用；已携带合法 JWT 的请求仍会验证并绑定可信主体。
 
 `observe` 和 `enforce` 必须配置 Java 后端的 JWKS URL。例如在容器内网中：
 
@@ -200,8 +220,9 @@ INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-intern
 ```
 
 建议先确认 Java JWKS 仅可被 MainCore 所在内网访问，再按 `off` → `observe` →
-`enforce` 顺序发布；观察期确认合法流量验证成功、没有遗留直连请求且 JWKS 获取稳定后，
-才切换到强制模式。
+路由级 `enforce` 顺序发布。没有访问日志提供“遗留直连请求为零”的流量证据时，不得宣称
+或启用全局 `enforce`；即使配置为 `enforce`，上述共享、患者兼容及未盘点 API 仍保持
+`observe`。
 
 本周期的 surface 边界如下：
 

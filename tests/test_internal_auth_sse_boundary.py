@@ -17,14 +17,17 @@ from presentation.middleware import internal_jwt_auth
 
 _JWKS_URL = "https://backend.example/internal/auth/jwks"
 _RAW_TOKEN = "eyJ.raw-internal-token.signature-secret"
-SSE_PATHS = (
-    "/api/chat/stream",
+ENFORCED_SSE_PATHS = (
     "/api/chat/edit-resend/stream",
     "/api/chat/regenerate/stream",
     "/api/research/chat/stream",
+)
+OBSERVED_SSE_PATHS = (
+    "/api/chat/stream",
     "/api/compliance/chat/stream",
     "/api/recommendation/chat/stream",
 )
+SSE_PATHS = ENFORCED_SSE_PATHS + OBSERVED_SSE_PATHS
 
 
 def _principal() -> CurrentPrincipal:
@@ -170,7 +173,7 @@ async def _post(
 
 class InternalAuthSSEBoundaryTest(unittest.IsolatedAsyncioTestCase):
     async def test_enforce_missing_rejects_before_downstream_and_generator(self):
-        for path in SSE_PATHS:
+        for path in ENFORCED_SSE_PATHS:
             with self.subTest(path=path):
                 verifier = StubVerifier(principal=_principal())
                 app, probe = _streaming_app(
@@ -193,6 +196,30 @@ class InternalAuthSSEBoundaryTest(unittest.IsolatedAsyncioTestCase):
                     response.headers.get("content-type", ""),
                 )
                 self.assertEqual(verifier.tokens, [])
+
+    async def test_enforce_observed_sse_missing_still_starts_generator(self):
+        for path in OBSERVED_SSE_PATHS:
+            with self.subTest(path=path):
+                verifier = StubVerifier(principal=_principal())
+                app, probe = _streaming_app(
+                    mode=InternalAuthMode.ENFORCE,
+                    verifier=verifier,
+                )
+
+                response = await _post(app, path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(
+                    "text/event-stream",
+                    response.headers.get("content-type", ""),
+                )
+                self.assertEqual(probe.downstream_calls, 1)
+                self.assertEqual(probe.handler_calls, 1)
+                self.assertEqual(probe.generator_starts, 1)
+                self.assertEqual(probe.principals, [None])
+                self.assertEqual(verifier.tokens, [])
+                self.assertNotIn(_RAW_TOKEN, response.text)
+                self.assertNotIn(_RAW_TOKEN, repr(dict(response.headers)))
 
     async def test_observe_invalid_still_streams_once_without_token_leak(self):
         for path in SSE_PATHS:

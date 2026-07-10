@@ -26,6 +26,14 @@ class PrincipalVerifier(Protocol):
 
 VerifierFactory = Callable[[InternalAuthSettings], PrincipalVerifier]
 
+_ENFORCED_EXACT_ROUTES = frozenset(
+    {
+        ("POST", "/api/chat/edit-resend/stream"),
+        ("POST", "/api/chat/regenerate/stream"),
+        ("POST", "/api/research/chat/stream"),
+    }
+)
+
 
 def _build_verifier(settings: InternalAuthSettings) -> PrincipalVerifier:
     return RS256JWTVerifier(settings, CachedJwksProvider(settings))
@@ -51,6 +59,36 @@ def should_authenticate(scope: dict) -> bool:
         and scope.get("method") != "OPTIONS"
         and (path == "/api" or path.startswith("/api/"))
     )
+
+
+def effective_auth_mode(
+    scope: dict,
+    configured_mode: InternalAuthMode,
+) -> InternalAuthMode:
+    if configured_mode is not InternalAuthMode.ENFORCE:
+        return configured_mode
+
+    method = scope.get("method")
+    path = scope.get("path", "")
+    if (method, path) in _ENFORCED_EXACT_ROUTES:
+        return InternalAuthMode.ENFORCE
+
+    segments = path.split("/")
+    is_conversation_path = (
+        len(segments) >= 4
+        and segments[:3] == ["", "api", "conversations"]
+        and bool(segments[3])
+    )
+    if method == "GET" and is_conversation_path and len(segments) == 4:
+        return InternalAuthMode.ENFORCE
+    if (
+        method == "PUT"
+        and is_conversation_path
+        and len(segments) == 5
+        and segments[4] == "active-branch"
+    ):
+        return InternalAuthMode.ENFORCE
+    return InternalAuthMode.OBSERVE
 
 
 class InternalJWTAuthMiddleware:
@@ -79,15 +117,16 @@ class InternalJWTAuthMiddleware:
             await self._app(scope, receive, send)
             return
 
+        effective_mode = effective_auth_mode(scope, self._settings.mode)
         scope.setdefault("state", {})["internal_principal"] = None
 
-        if self._settings.mode is InternalAuthMode.OFF:
+        if effective_mode is InternalAuthMode.OFF:
             await self._app(scope, receive, send)
             return
 
         header_state, token = self._read_bearer_token(scope)
         if header_state == "missing":
-            if self._settings.mode is InternalAuthMode.OBSERVE:
+            if effective_mode is InternalAuthMode.OBSERVE:
                 self._log_observation("legacy_missing")
                 await self._app(scope, receive, send)
             else:
@@ -101,7 +140,7 @@ class InternalJWTAuthMiddleware:
             return
 
         if header_state == "invalid" or token is None:
-            if self._settings.mode is InternalAuthMode.OBSERVE:
+            if effective_mode is InternalAuthMode.OBSERVE:
                 self._log_observation("invalid")
                 await self._app(scope, receive, send)
             else:
@@ -119,7 +158,7 @@ class InternalJWTAuthMiddleware:
                 raise RuntimeError("internal authentication verifier is missing")
             principal = await self._verifier.verify(token)
         except TokenValidationError:
-            if self._settings.mode is InternalAuthMode.OBSERVE:
+            if effective_mode is InternalAuthMode.OBSERVE:
                 self._log_observation("invalid")
                 await self._app(scope, receive, send)
             else:
@@ -132,7 +171,7 @@ class InternalJWTAuthMiddleware:
                 )
             return
         except JwksUnavailableError:
-            if self._settings.mode is InternalAuthMode.OBSERVE:
+            if effective_mode is InternalAuthMode.OBSERVE:
                 self._log_observation("unavailable")
                 await self._app(scope, receive, send)
             else:
@@ -146,7 +185,7 @@ class InternalJWTAuthMiddleware:
             return
         except Exception:
             self._log_internal_error()
-            if self._settings.mode is InternalAuthMode.OBSERVE:
+            if effective_mode is InternalAuthMode.OBSERVE:
                 await self._app(scope, receive, send)
             else:
                 await self._send_error(

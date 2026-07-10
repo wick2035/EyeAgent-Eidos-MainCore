@@ -33,6 +33,25 @@ _ROUTE_SOURCES = {
     "presentation/routers/research_router.py": "/api/research",
 }
 
+PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
+    {
+        ("GET", "/api/conversations/{conversation_id}"),
+        ("POST", "/api/chat/edit-resend/stream"),
+        ("POST", "/api/chat/regenerate/stream"),
+        ("POST", "/api/research/chat/stream"),
+        ("PUT", "/api/conversations/{conversation_id}/active-branch"),
+    }
+)
+
+PATIENT_COMPATIBILITY_ROUTES = frozenset(
+    {
+        ("POST", "/api/chat"),
+        ("POST", "/api/chat/stream"),
+        ("POST", "/api/upload"),
+        ("POST", "/api/asr/transcribe"),
+    }
+)
+
 # This table is intentionally explicit. A route change must update the security
 # inventory in the same review instead of relying on imports with DB side effects.
 CURRENT_HTTP_API_ROUTES = frozenset(
@@ -108,6 +127,26 @@ def _scope(method: str, path: str, *, scope_type: str = "http") -> dict:
     return {"type": scope_type, "method": method, "path": path}
 
 
+def _concrete_path(path: str) -> str:
+    return (
+        path.replace("{conversation_id}", "conversation-7")
+        .replace("{session_id}", "session-7")
+    )
+
+
+def _effective_auth_mode(
+    scope: dict,
+    configured_mode: InternalAuthMode,
+) -> InternalAuthMode:
+    resolver = getattr(internal_jwt_auth, "effective_auth_mode", None)
+    if not callable(resolver):
+        raise AssertionError(
+            "presentation.middleware.internal_jwt_auth.effective_auth_mode "
+            "must be implemented"
+        )
+    return resolver(scope, configured_mode)
+
+
 def _settings(mode: InternalAuthMode) -> InternalAuthSettings:
     return InternalAuthSettings(
         mode=mode,
@@ -154,6 +193,70 @@ class InternalAuthRouteInventoryTest(unittest.TestCase):
         for method, path in sorted(CURRENT_HTTP_API_ROUTES):
             with self.subTest(method=method, path=path):
                 self.assertTrue(should_authenticate(_scope(method, path)))
+
+    def test_enforce_mode_only_escalates_platform_exclusive_inventory(self):
+        self.assertTrue(
+            PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES <= CURRENT_HTTP_API_ROUTES
+        )
+        self.assertTrue(PATIENT_COMPATIBILITY_ROUTES <= CURRENT_HTTP_API_ROUTES)
+
+        for method, route_template in sorted(CURRENT_HTTP_API_ROUTES):
+            with self.subTest(method=method, path=route_template):
+                expected_mode = (
+                    InternalAuthMode.ENFORCE
+                    if (method, route_template)
+                    in PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES
+                    else InternalAuthMode.OBSERVE
+                )
+                self.assertIs(
+                    _effective_auth_mode(
+                        _scope(method, _concrete_path(route_template)),
+                        InternalAuthMode.ENFORCE,
+                    ),
+                    expected_mode,
+                )
+
+    def test_platform_route_matching_rejects_method_and_path_variants(self):
+        observe_requests = (
+            ("POST", "/api/conversations/conversation-7"),
+            ("GET", "/api/conversations/conversation-7/extra"),
+            ("GET", "/api/conversations/conversation-7/"),
+            ("PUT", "/api/conversations/conversation-7/active-branch/"),
+            ("PATCH", "/api/future/business-route"),
+        )
+
+        for method, path in observe_requests:
+            with self.subTest(method=method, path=path):
+                self.assertIs(
+                    _effective_auth_mode(
+                        _scope(method, path),
+                        InternalAuthMode.ENFORCE,
+                    ),
+                    InternalAuthMode.OBSERVE,
+                )
+
+    def test_off_and_observe_modes_never_escalate_routes(self):
+        routes = (
+            ("GET", "/api/conversations/conversation-7"),
+            ("PATCH", "/api/future/business-route"),
+        )
+        for configured_mode in (
+            InternalAuthMode.OFF,
+            InternalAuthMode.OBSERVE,
+        ):
+            for method, path in routes:
+                with self.subTest(
+                    configured_mode=configured_mode,
+                    method=method,
+                    path=path,
+                ):
+                    self.assertIs(
+                        _effective_auth_mode(
+                            _scope(method, path),
+                            configured_mode,
+                        ),
+                        configured_mode,
+                    )
 
     def test_future_api_routes_are_covered_without_per_route_dependencies(self):
         self.assertTrue(should_authenticate(_scope("POST", "/api")))
@@ -214,7 +317,7 @@ class InternalAuthApplicationWiringTest(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         handler_calls = {"count": 0}
 
-        @app.get("/api/protected")
+        @app.get("/api/conversations/conversation-7")
         async def protected() -> dict[str, bool]:
             handler_calls["count"] += 1
             return {"ok": True}
@@ -253,7 +356,7 @@ class InternalAuthApplicationWiringTest(unittest.IsolatedAsyncioTestCase):
                     base_url="http://testserver",
                 ) as client:
                     response = await client.get(
-                        "/api/protected",
+                        "/api/conversations/conversation-7",
                         headers={"Origin": _ORIGIN, **auth_headers},
                     )
 
@@ -277,7 +380,7 @@ class InternalAuthApplicationWiringTest(unittest.IsolatedAsyncioTestCase):
             base_url="http://testserver",
         ) as client:
             response = await client.options(
-                "/api/protected",
+                "/api/conversations/conversation-7",
                 headers={
                     "Origin": _ORIGIN,
                     "Access-Control-Request-Method": "GET",
