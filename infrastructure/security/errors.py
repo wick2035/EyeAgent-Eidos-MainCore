@@ -16,3 +16,7 @@ class JwksUnavailableError(JwksError):
 
 class InvalidJwksResponseError(JwksUnavailableError):
     """The JWKS response violates the fixed internal authentication contract."""
+
+
+class TokenValidationError(Exception):
+    """An internal bearer token violates the trusted JWT contract."""
