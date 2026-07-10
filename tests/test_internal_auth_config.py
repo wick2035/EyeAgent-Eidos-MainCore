@@ -84,6 +84,36 @@ class InternalAuthSettingsTest(unittest.TestCase):
         self.assertEqual(settings.max_token_ttl_seconds, 300)
         self.assertEqual(settings.negative_cache_max_entries, 256)
 
+    def test_direct_construction_and_replace_reject_fixed_contract_changes(self):
+        settings = InternalAuthSettings()
+        invalid_overrides = {
+            "issuer": "other-issuer",
+            "audience": "other-audience",
+            "authorized_party": "other-authorized-party",
+            "algorithm": "HS256",
+            "max_token_ttl_seconds": 301,
+        }
+
+        for field_name, invalid_value in invalid_overrides.items():
+            with self.subTest(operation="construct", field_name=field_name):
+                with self.assertRaises(ValueError):
+                    InternalAuthSettings(**{field_name: invalid_value})
+
+            with self.subTest(operation="replace", field_name=field_name):
+                with self.assertRaises(ValueError):
+                    replace(settings, **{field_name: invalid_value})
+
+    def test_from_env_rejects_non_finite_request_timeout(self):
+        for request_timeout in ("nan", "inf", "-inf"):
+            with self.subTest(request_timeout=request_timeout):
+                with patch.dict(
+                    os.environ,
+                    {"INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS": request_timeout},
+                    clear=True,
+                ):
+                    with self.assertRaises(ValueError):
+                        InternalAuthSettings.from_env()
+
     def test_clock_skew_must_be_between_zero_and_thirty_seconds(self):
         for clock_skew_seconds in (0, 30):
             with self.subTest(clock_skew_seconds=clock_skew_seconds):
