@@ -194,6 +194,24 @@ class InternalAuthRouteInventoryTest(unittest.TestCase):
             with self.subTest(method=method, path=path):
                 self.assertTrue(should_authenticate(_scope(method, path)))
 
+    def test_every_current_route_has_stable_telemetry_template(self):
+        normalizer = getattr(
+            internal_jwt_auth, "normalized_route_template", None
+        )
+        self.assertTrue(callable(normalizer))
+
+        for method, route_template in sorted(CURRENT_HTTP_API_ROUTES):
+            with self.subTest(method=method, route=route_template):
+                self.assertEqual(
+                    normalizer(_scope(method, _concrete_path(route_template))),
+                    route_template,
+                )
+
+        self.assertEqual(
+            normalizer(_scope("PATCH", "/api/future/sensitive-value")),
+            "/api/{unknown}",
+        )
+
     def test_enforce_mode_only_escalates_platform_exclusive_inventory(self):
         self.assertTrue(
             PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES <= CURRENT_HTTP_API_ROUTES

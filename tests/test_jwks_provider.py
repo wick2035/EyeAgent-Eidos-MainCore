@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import unittest
 from collections.abc import Mapping
@@ -135,6 +136,47 @@ def auth_settings(**overrides: Any) -> InternalAuthSettings:
 
 
 class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_success_logs_only_count_and_trusted_kid_fingerprints(self):
+        trusted_kid = "trusted-current-kid"
+        provider = CachedJwksProvider(
+            auth_settings(),
+            fetcher=SequenceFetcher(jwks(rsa_jwk(trusted_kid))),
+            clock=FakeClock(),
+        )
+
+        with self.assertLogs(
+            "infrastructure.security.jwks", level="INFO"
+        ) as captured:
+            await provider.get_signing_key(trusted_kid)
+
+        logs = "\n".join(captured.output)
+        expected_fingerprint = hashlib.sha256(
+            trusted_kid.encode("utf-8")
+        ).hexdigest()[:16]
+        self.assertIn("jwks_refresh_success", logs)
+        self.assertIn("key_count=1", logs)
+        self.assertIn(f"kid_fps={expected_fingerprint}", logs)
+        self.assertNotIn(trusted_kid, logs)
+
+    async def test_refresh_failure_logs_safe_error_type_without_fetch_details(self):
+        provider = CachedJwksProvider(
+            auth_settings(),
+            fetcher=SequenceFetcher(OSError("sensitive upstream response")),
+            clock=FakeClock(),
+        )
+
+        with self.assertLogs(
+            "infrastructure.security.jwks", level="WARNING"
+        ) as captured:
+            with self.assertRaises(JwksUnavailableError):
+                await provider.get_signing_key("attacker-requested-kid")
+
+        logs = "\n".join(captured.output)
+        self.assertIn("jwks_refresh_failed", logs)
+        self.assertIn("error_type=unavailable", logs)
+        self.assertNotIn("sensitive upstream response", logs)
+        self.assertNotIn("attacker-requested-kid", logs)
+
     async def test_first_lookup_fetches_once_and_returns_pyjwk(self):
         fetcher = SequenceFetcher(jwks(rsa_jwk("current")))
         provider = CachedJwksProvider(

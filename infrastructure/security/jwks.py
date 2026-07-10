@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import logging
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -25,6 +27,8 @@ MonotonicClock = Callable[[], float]
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_KID_BYTES = 128
 _RSA_PRIVATE_PARAMETERS = frozenset({"d", "p", "q", "dp", "dq", "qi", "oth"})
+
+logger = logging.getLogger(__name__)
 
 
 class CachedJwksProvider:
@@ -152,10 +156,29 @@ class CachedJwksProvider:
         self._last_refresh_error = None
         for kid in keys:
             self._negative_cache.pop(kid, None)
+        logger.info(
+            "jwks_refresh_success key_count=%d kid_fps=%s",
+            len(keys),
+            ",".join(sorted(self._kid_fingerprint(kid) for kid in keys)),
+        )
 
     def _record_refresh_failure(self, error: JwksUnavailableError) -> None:
         self._last_refresh_at = self._clock()
         self._last_refresh_error = error
+        error_type = (
+            "invalid_response"
+            if isinstance(error, InvalidJwksResponseError)
+            else "unavailable"
+        )
+        logger.warning(
+            "jwks_refresh_failed error_type=%s",
+            error_type,
+            exc_info=None,
+        )
+
+    @staticmethod
+    def _kid_fingerprint(kid: str) -> str:
+        return hashlib.sha256(kid.encode("utf-8")).hexdigest()[:16]
 
     @classmethod
     def _parse_jwks(

@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import logging
 import unittest
@@ -115,6 +117,19 @@ def _scope(
 
 def _authorization(value: str) -> list[tuple[bytes, bytes]]:
     return [(b"authorization", value.encode("ascii"))]
+
+
+def _synthetic_token(kid: str) -> str:
+    header = json.dumps(
+        {"alg": "RS256", "typ": "JWT", "kid": kid},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded_header = base64.urlsafe_b64encode(header).rstrip(b"=").decode("ascii")
+    return f"{encoded_header}.cGF5bG9hZA.c2lnbmF0dXJl"
+
+
+def _kid_fingerprint(kid: str) -> str:
+    return hashlib.sha256(kid.encode("utf-8")).hexdigest()[:16]
 
 
 def _effective_auth_mode(
@@ -320,6 +335,116 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
             ),
             InternalAuthMode.OBSERVE,
         )
+
+    async def test_missing_events_use_method_and_normalized_route_without_raw_path(self):
+        raw_conversation_id = "sensitive-conversation-instance-42"
+        cases = (
+            (
+                f"/api/conversations/{raw_conversation_id}",
+                "/api/conversations/{conversation_id}",
+            ),
+            (
+                "/api/future/sensitive-dynamic-value",
+                "/api/{unknown}",
+            ),
+        )
+
+        for path, expected_route in cases:
+            with self.subTest(path=path):
+                app, middleware, _ = self._middleware(InternalAuthMode.OBSERVE)
+                scope = _scope(method="GET", path=path)
+
+                with self.assertLogs(_LOGGER_NAME, level=logging.WARNING) as captured:
+                    messages = await self._call(middleware, scope)
+
+                logs = "\n".join(captured.output)
+                self.assertEqual(self._status(messages), 200)
+                self.assertEqual(len(app.scopes), 1)
+                self.assertIn("internal_auth_missing", logs)
+                self.assertIn("mode=observe", logs)
+                self.assertIn("method=GET", logs)
+                self.assertIn(f"route={expected_route}", logs)
+                self.assertNotIn(raw_conversation_id, logs)
+                self.assertNotIn("sensitive-dynamic-value", logs)
+
+    async def test_valid_event_has_principal_type_and_trusted_kid_fingerprint(self):
+        trusted_kid = "trusted-rotation-key"
+        token = _synthetic_token(trusted_kid)
+        principal = _principal()
+        verifier = StubVerifier(principal=principal)
+        app, middleware, _ = self._middleware(
+            InternalAuthMode.OBSERVE,
+            verifier=verifier,
+        )
+        scope = _scope(
+            method="POST",
+            path="/api/chat/stream",
+            headers=_authorization(f"Bearer {token}"),
+        )
+
+        with self.assertLogs(_LOGGER_NAME, level=logging.INFO) as captured:
+            messages = await self._call(middleware, scope)
+
+        logs = "\n".join(captured.output)
+        self.assertEqual(self._status(messages), 200)
+        self.assertEqual(len(app.scopes), 1)
+        self.assertIn("internal_auth_valid", logs)
+        self.assertIn("mode=observe", logs)
+        self.assertIn("method=POST", logs)
+        self.assertIn("route=/api/chat/stream", logs)
+        self.assertIn("principal_type=doctor", logs)
+        self.assertIn(f"kid_fp={_kid_fingerprint(trusted_kid)}", logs)
+        self.assertNotIn(trusted_kid, logs)
+        self.assertNotIn(principal.subject, logs)
+        self.assertNotIn(token, logs)
+
+    async def test_failure_events_have_safe_complete_dimensions(self):
+        attacker_kid = "attacker-controlled-raw-kid"
+        token = _synthetic_token(attacker_kid)
+        cases = (
+            (
+                "internal_auth_invalid",
+                StubVerifier(error=TokenValidationError("invalid credential")),
+                logging.WARNING,
+            ),
+            (
+                "internal_auth_unavailable",
+                StubVerifier(error=JwksUnavailableError("upstream body secret")),
+                logging.WARNING,
+            ),
+            (
+                "internal_auth_internal_error",
+                StubVerifier(error=RuntimeError("internal secret")),
+                logging.ERROR,
+            ),
+        )
+
+        for marker, verifier, level in cases:
+            with self.subTest(marker=marker):
+                app, middleware, _ = self._middleware(
+                    InternalAuthMode.OBSERVE,
+                    verifier=verifier,
+                )
+                scope = _scope(
+                    method="POST",
+                    path="/api/chat/edit-resend/stream",
+                    headers=_authorization(f"Bearer {token}"),
+                )
+
+                with self.assertLogs(_LOGGER_NAME, level=level) as captured:
+                    messages = await self._call(middleware, scope)
+
+                logs = "\n".join(captured.output)
+                self.assertEqual(self._status(messages), 200)
+                self.assertEqual(len(app.scopes), 1)
+                self.assertIn(marker, logs)
+                self.assertIn("mode=observe", logs)
+                self.assertIn("method=POST", logs)
+                self.assertIn("route=/api/chat/edit-resend/stream", logs)
+                self.assertNotIn(attacker_kid, logs)
+                self.assertNotIn(token, logs)
+                self.assertNotIn("upstream body secret", logs)
+                self.assertNotIn("internal secret", logs)
 
     async def test_off_missing_token_passes_without_constructing_verifier(self):
         factory = FailingVerifierFactory()
