@@ -219,6 +219,24 @@ INTERNAL_AUTH_MODE=observe
 INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-internal-jwks.json
 ```
 
+认证中间件输出可按 method+规范化 route 聚合的安全事件：
+
+```text
+internal_auth_valid
+internal_auth_missing
+internal_auth_invalid
+internal_auth_unavailable
+internal_auth_internal_error
+jwks_refresh_success
+jwks_refresh_failed
+```
+
+认证事件至少包含 effective `mode`、安全 HTTP `method` 和固定 route template；动态
+`conversation_id/session_id` 不写入日志，未知 API 固定分类为 `/api/{unknown}`。valid 事件
+额外包含白名单 `principal_type` 与已验签 token `kid` 的 16 位 SHA-256 指纹；JWKS success
+只记录 key count 与可信 `kid` 指纹。失败事件不记录 token、subject、攻击者原始 `kid`、
+动态路径参数、异常消息/堆栈或上游响应正文。
+
 建议先确认 Java JWKS 仅可被 MainCore 所在内网访问，再按 `off` → `observe` →
 路由级 `enforce` 顺序发布。没有访问日志提供“遗留直连请求为零”的流量证据时，不得宣称
 或启用全局 `enforce`；即使配置为 `enforce`，上述共享、患者兼容及未盘点 API 仍保持
@@ -235,11 +253,12 @@ INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-intern
 
 ### 2026-07-10 自动化验收与部署边界
 
-当前周期已完成平台 7 条 Java 调用与 MainCore 身份桥的代码、自动化验收。Python 全量
-116 项测试通过，Java 指定身份/JWT/provider/平台代理 53 项及排除已知坏夹具后的 67 项
-扩展回归通过，Java 七模块 package 成功。仓库外 2048-bit 临时 RSA 密钥签出的 compact
-JWT 和公开 JWKS 已通过生产 `CachedJwksProvider`、`RS256JWTVerifier` 的离线跨语言验签；
-探针断言主体类型、`aud` 数组、scope 和 `kid` 契约，未记录临时 `kid`、token 或密钥材料。
+当前周期已完成平台 7 条 Java 调用与 MainCore 身份桥的代码、本地自动化验收；最终审查
+又补入 `kid` 的 `1..128` UTF-8 字节契约、USER/DOCTOR 登录绑定失败补偿、完整安全遥测和
+Token-Session 单次持久化。仓库外 2048-bit 临时 RSA 密钥签出的 compact JWT 和公开 JWKS
+已通过生产 `CachedJwksProvider`、`RS256JWTVerifier` 的离线跨语言验签；探针断言主体类型、
+`aud` 数组、scope 和 `kid` 契约，未记录临时 `kid`、token 或密钥材料。精确最终测试计数以
+本周期 Task 12 验收报告为准。
 
 实际部署只使用以下变量名，secret 值由部署环境提供，不写入 README、镜像或 YAML：
 
@@ -262,10 +281,12 @@ Python:
   INTERNAL_JWT_CLOCK_SKEW_SECONDS
 ```
 
-`off` 是两端默认配置。本次没有 staging/生产访问日志、真实 Sa-Token 或患者流量、部署权限
+`off` 是两端默认配置。“代码与本地自动化完成”不等于“生产 enforce 就绪”。本次没有
+staging/生产访问日志、真实 Sa-Token 或患者流量、部署权限
 及编排环境，因此没有启动任何全局 enforce，也没有完成 staging 30 分钟/生产高峰流量
-gate、真实 SSE 探针、滚动 SSE drain 或前滚/回滚演练。部署状态应判定为：平台范围代码与
-自动化验收完成，外部部署 gate 和演练待执行。
+gate、真实平台/患者 JSON/SSE 探针、滚动 SSE drain、K1/K2 重叠发布/bake/signer 回滚或
+前滚/回滚演练。部署状态应判定为：平台范围代码与本地自动化验收完成，外部部署 gate 和
+演练待执行。
 
 在外部 gate 完成前，五类平台独占路由以外的 `POST /api/chat`、
 `POST /api/chat/stream`、`POST /api/upload`、`POST /api/asr/transcribe` 和未知
