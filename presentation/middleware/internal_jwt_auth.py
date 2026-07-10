@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
+from fastapi import FastAPI
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -28,6 +29,19 @@ VerifierFactory = Callable[[InternalAuthSettings], PrincipalVerifier]
 
 def _build_verifier(settings: InternalAuthSettings) -> PrincipalVerifier:
     return RS256JWTVerifier(settings, CachedJwksProvider(settings))
+
+
+def install_internal_auth(
+    app: FastAPI,
+    *,
+    settings: InternalAuthSettings | None = None,
+    verifier_factory: VerifierFactory = _build_verifier,
+) -> None:
+    app.add_middleware(
+        InternalJWTAuthMiddleware,
+        settings=settings,
+        verifier_factory=verifier_factory,
+    )
 
 
 def should_authenticate(scope: dict) -> bool:

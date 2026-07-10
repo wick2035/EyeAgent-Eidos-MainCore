@@ -180,6 +180,38 @@
 | GET | `/api/info` | API 信息 |
 | GET | `/health` | 系统健康检查 |
 
+## 内部调用认证边界
+
+MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Java 网关签发的
+短期 RS256 JWT，无需在每个路由重复声明依赖。认证模式由服务端环境变量
+`INTERNAL_AUTH_MODE` 控制：
+
+- `off`：默认值。不构造 verifier、不解析 token，保持现有请求行为；
+- `observe`：验证已携带的 token，并记录缺失、无效或 JWKS 不可用等结果，但仍放行
+  请求，用于上线前观测；
+- `enforce`：强制认证。缺失或无效 token 返回 `401`，无可用 JWKS 时返回 `503`，
+  认证成功后把可信主体写入 `request.state.internal_principal`。
+
+`observe` 和 `enforce` 必须配置 Java 后端的 JWKS URL。例如在容器内网中：
+
+```env
+INTERNAL_AUTH_MODE=observe
+INTERNAL_JWT_JWKS_URL=http://eye-agent-backend:8081/.well-known/eye-agent-internal-jwks.json
+```
+
+建议先确认 Java JWKS 仅可被 MainCore 所在内网访问，再按 `off` → `observe` →
+`enforce` 顺序发布；观察期确认合法流量验证成功、没有遗留直连请求且 JWKS 获取稳定后，
+才切换到强制模式。
+
+本周期的 surface 边界如下：
+
+- `/health` 是明确公开的业务健康接口，不进入内部 JWT 验证；
+- `/`、测试页面、`/static/**`、`/docs`、`/redoc`、`/openapi.json` 等非
+  `/api/**` surface 保持现状，不属于本周期的安全承诺；
+- `/ws/asr` 是 WebSocket 接口，不进入当前 HTTP JWT 中间件，当前边界保持不变，
+  必须依赖网关与内网访问控制；
+- 生产环境不得把 MainCore 作为公网入口暴露，外部业务请求必须先经过 Java 网关。
+
 ## 快速开始
 
 ### 1. 安装依赖
