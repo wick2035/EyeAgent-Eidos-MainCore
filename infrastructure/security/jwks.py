@@ -68,13 +68,7 @@ class CachedJwksProvider:
             if self._cache_is_fresh(now) and self._is_negatively_cached(kid, now):
                 raise SigningKeyNotFoundError(f"no signing key for kid {kid!r}")
 
-            expired_known_key = (
-                kid in self._keys and self._last_refresh_error is None
-            )
-            if (
-                self._refresh_is_cooling_down(now)
-                and not expired_known_key
-            ):
+            if self._refresh_is_cooling_down(now):
                 if self._cache_is_fresh(now):
                     self._remember_missing(kid, now)
                     raise SigningKeyNotFoundError(
@@ -257,7 +251,22 @@ class CachedJwksProvider:
                         raise JwksUnavailableError(
                             f"JWKS endpoint returned HTTP {response.status}"
                         )
-                    body = await response.content.read(_MAX_RESPONSE_BYTES + 1)
+                    if (
+                        response.content_length is not None
+                        and response.content_length > _MAX_RESPONSE_BYTES
+                    ):
+                        raise InvalidJwksResponseError(
+                            "JWKS response exceeds 64 KiB"
+                        )
+
+                    body = bytearray()
+                    while len(body) <= _MAX_RESPONSE_BYTES:
+                        chunk = await response.content.read(
+                            _MAX_RESPONSE_BYTES + 1 - len(body)
+                        )
+                        if not chunk:
+                            break
+                        body.extend(chunk)
         except JwksUnavailableError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -268,7 +277,7 @@ class CachedJwksProvider:
                 "JWKS response exceeds 64 KiB"
             )
         try:
-            payload = json.loads(body.decode("utf-8"))
+            payload = json.loads(bytes(body).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidJwksResponseError(
                 "JWKS response is not valid UTF-8 JSON"

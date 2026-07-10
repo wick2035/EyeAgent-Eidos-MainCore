@@ -1,9 +1,11 @@
 import asyncio
+import json
 import unittest
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any
+from unittest.mock import patch
 
 import jwt
 
@@ -43,6 +45,82 @@ class SequenceFetcher:
             raise response
         assert isinstance(response, Mapping)
         return deepcopy(response)
+
+
+class BlockingFetcher:
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        self.response = response
+        self.call_count = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self) -> Mapping[str, Any]:
+        self.call_count += 1
+        self.started.set()
+        await self.release.wait()
+        return deepcopy(self.response)
+
+
+class ChunkedContent:
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = list(chunks)
+        self.read_sizes: list[int] = []
+        self.bytes_returned = 0
+
+    async def read(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        if not self.chunks:
+            return b""
+        chunk = self.chunks.pop(0)
+        result = chunk[:size]
+        if len(chunk) > size:
+            self.chunks.insert(0, chunk[size:])
+        self.bytes_returned += len(result)
+        return result
+
+
+class NoReadContent:
+    def __init__(self) -> None:
+        self.read_calls = 0
+
+    async def read(self, size: int) -> bytes:
+        self.read_calls += 1
+        raise AssertionError(f"body must not be read with size={size}")
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        content: object,
+        *,
+        status: int = 200,
+        content_length: int | None = None,
+    ) -> None:
+        self.status = status
+        self.content_length = content_length
+        self.content = content
+
+    async def __aenter__(self) -> "FakeResponse":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+class RecordingClientSession:
+    def __init__(self, response: FakeResponse) -> None:
+        self.response = response
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def __aenter__(self) -> "RecordingClientSession":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.requests.append((url, kwargs))
+        return self.response
 
 
 def auth_settings(**overrides: Any) -> InternalAuthSettings:
@@ -100,24 +178,52 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key.key_id, "rotated")
         self.assertEqual(fetcher.call_count, 2)
 
-    async def test_concurrent_unknown_kid_uses_single_flight_refresh(self):
-        clock = FakeClock()
-        fetcher = SequenceFetcher(
-            jwks(rsa_jwk("current")),
-            jwks(rsa_jwk("current"), rsa_jwk("rotated")),
-        )
+    async def test_concurrent_same_kid_uses_one_overlapping_fetch(self):
+        fetcher = BlockingFetcher(jwks(rsa_jwk("rotated")))
         provider = CachedJwksProvider(
-            auth_settings(), fetcher=fetcher, clock=clock
+            auth_settings(), fetcher=fetcher, clock=FakeClock()
         )
-        await provider.get_signing_key("current")
-        clock.advance(6)
 
-        keys = await asyncio.gather(
-            *(provider.get_signing_key("rotated") for _ in range(20))
-        )
+        first = asyncio.create_task(provider.get_signing_key("rotated"))
+        await asyncio.wait_for(fetcher.started.wait(), timeout=1)
+        followers = [
+            asyncio.create_task(provider.get_signing_key("rotated"))
+            for _ in range(19)
+        ]
+        await asyncio.sleep(0)
+
+        self.assertEqual(fetcher.call_count, 1)
+        self.assertTrue(all(not task.done() for task in followers))
+        fetcher.release.set()
+        keys = await asyncio.gather(first, *followers)
 
         self.assertTrue(all(key.key_id == "rotated" for key in keys))
-        self.assertEqual(fetcher.call_count, 2)
+        self.assertEqual(fetcher.call_count, 1)
+
+    async def test_concurrent_different_unknown_kids_share_one_fetch(self):
+        fetcher = BlockingFetcher(jwks(rsa_jwk("current")))
+        provider = CachedJwksProvider(
+            auth_settings(), fetcher=fetcher, clock=FakeClock()
+        )
+
+        first = asyncio.create_task(provider.get_signing_key("missing-a"))
+        await asyncio.wait_for(fetcher.started.wait(), timeout=1)
+        second = asyncio.create_task(provider.get_signing_key("missing-b"))
+        await asyncio.sleep(0)
+
+        self.assertEqual(fetcher.call_count, 1)
+        self.assertFalse(second.done())
+        fetcher.release.set()
+        results = await asyncio.gather(
+            first,
+            second,
+            return_exceptions=True,
+        )
+
+        self.assertTrue(
+            all(isinstance(result, SigningKeyNotFoundError) for result in results)
+        )
+        self.assertEqual(fetcher.call_count, 1)
 
     async def test_unknown_kid_is_negatively_cached_for_fifteen_seconds(self):
         clock = FakeClock()
@@ -246,7 +352,30 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(InvalidJwksResponseError):
                     await provider.get_signing_key("private")
 
-    async def test_expired_cache_fails_closed_when_refresh_fails(self):
+    async def test_expired_cache_does_not_bypass_refresh_cooldown(self):
+        clock = FakeClock()
+        fetcher = SequenceFetcher(
+            jwks(rsa_jwk("current")), OSError("unexpected refresh")
+        )
+        provider = CachedJwksProvider(
+            auth_settings(
+                cache_ttl_seconds=1,
+                refresh_cooldown_seconds=5,
+            ),
+            fetcher=fetcher,
+            clock=clock,
+        )
+        await provider.get_signing_key("current")
+        clock.advance(1.1)
+
+        with self.assertRaises(JwksUnavailableError):
+            await provider.get_signing_key("current")
+        with self.assertRaises(JwksUnavailableError):
+            await provider.get_signing_key("current")
+
+        self.assertEqual(fetcher.call_count, 1)
+
+    async def test_failed_expired_cache_refresh_is_not_repeated_in_cooldown(self):
         clock = FakeClock()
         fetcher = SequenceFetcher(
             jwks(rsa_jwk("current")), OSError("backend unavailable")
@@ -260,8 +389,11 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
             clock=clock,
         )
         await provider.get_signing_key("current")
-        clock.advance(1.1)
+        clock.advance(5.1)
 
+        with self.assertRaises(JwksUnavailableError):
+            await provider.get_signing_key("current")
+        clock.advance(1)
         with self.assertRaises(JwksUnavailableError):
             await provider.get_signing_key("current")
 
@@ -283,6 +415,81 @@ class CachedJwksProviderTest(unittest.IsolatedAsyncioTestCase):
                 auth_settings(jwks_url="file:///tmp/jwks.json"),
                 clock=FakeClock(),
             )
+
+    async def test_default_fetcher_accumulates_chunked_body_to_eof(self):
+        body = json.dumps(jwks(rsa_jwk("current"))).encode("utf-8")
+        content = ChunkedContent(body[:7], body[7:31], body[31:])
+        session = RecordingClientSession(FakeResponse(content))
+
+        with patch(
+            "infrastructure.security.jwks.aiohttp.ClientSession",
+            return_value=session,
+        ):
+            provider = CachedJwksProvider(auth_settings(), clock=FakeClock())
+            key = await provider.get_signing_key("current")
+
+        self.assertEqual(key.key_id, "current")
+        self.assertGreaterEqual(len(content.read_sizes), 4)
+        self.assertEqual(content.bytes_returned, len(body))
+
+    async def test_default_fetcher_rejects_chunked_body_at_65537_bytes(self):
+        content = ChunkedContent(b"x" * 32_768, b"y" * 32_769)
+        session = RecordingClientSession(FakeResponse(content))
+
+        with patch(
+            "infrastructure.security.jwks.aiohttp.ClientSession",
+            return_value=session,
+        ):
+            provider = CachedJwksProvider(auth_settings(), clock=FakeClock())
+            with self.assertRaises(InvalidJwksResponseError):
+                await provider.get_signing_key("current")
+
+        self.assertEqual(content.bytes_returned, 65_537)
+        self.assertGreaterEqual(len(content.read_sizes), 2)
+
+    async def test_default_fetcher_rejects_oversized_content_length_without_read(self):
+        content = NoReadContent()
+        session = RecordingClientSession(
+            FakeResponse(content, content_length=65_537)
+        )
+
+        with patch(
+            "infrastructure.security.jwks.aiohttp.ClientSession",
+            return_value=session,
+        ):
+            provider = CachedJwksProvider(auth_settings(), clock=FakeClock())
+            with self.assertRaises(InvalidJwksResponseError):
+                await provider.get_signing_key("current")
+
+        self.assertEqual(content.read_calls, 0)
+
+    async def test_default_fetcher_uses_two_second_timeout_without_redirects(self):
+        body = json.dumps(jwks(rsa_jwk("current"))).encode("utf-8")
+        session = RecordingClientSession(
+            FakeResponse(ChunkedContent(body), content_length=len(body))
+        )
+
+        with patch(
+            "infrastructure.security.jwks.aiohttp.ClientSession",
+            return_value=session,
+        ) as session_factory:
+            provider = CachedJwksProvider(
+                auth_settings(request_timeout_seconds=10),
+                clock=FakeClock(),
+            )
+            await provider.get_signing_key("current")
+
+        timeout = session_factory.call_args.kwargs["timeout"]
+        self.assertEqual(timeout.total, 2.0)
+        self.assertEqual(
+            session.requests,
+            [
+                (
+                    "https://backend.example/internal/auth/jwks",
+                    {"allow_redirects": False},
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":
