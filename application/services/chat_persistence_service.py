@@ -7,6 +7,7 @@ import json
 import logging
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime
+from contextlib import nullcontext
 
 from domain.models.chat_entity import (
     ChatConversationEntity,
@@ -36,7 +37,9 @@ class ChatPersistenceService:
     def __init__(
         self,
         conversation_repo: Optional[ChatConversationRepositoryImpl] = None,
-        message_repo: Optional[ChatMessageRepositoryImpl] = None
+        message_repo: Optional[ChatMessageRepositoryImpl] = None,
+        db=None,
+        activity_guard=None,
     ):
         """
         初始化服务
@@ -47,6 +50,24 @@ class ChatPersistenceService:
         """
         self.conversation_repo = conversation_repo or get_conversation_repository()
         self.message_repo = message_repo or get_message_repository()
+        self.db = (
+            db
+            or getattr(self.conversation_repo, "db", None)
+            or getattr(self.message_repo, "db", None)
+        )
+        if activity_guard is None and self.db is not None:
+            from application.services.conversation_activity_guard import (
+                ConversationActivityGuard,
+            )
+            from infrastructure.repositories.chat_turn_request_repository_impl import (
+                ChatTurnRequestRepositoryImpl,
+            )
+
+            activity_guard = ConversationActivityGuard(
+                ChatTurnRequestRepositoryImpl(self.db),
+                self.message_repo,
+            )
+        self.activity_guard = activity_guard
         logger.info("[ChatPersistenceService] 初始化完成")
 
     def create_conversation(
@@ -107,7 +128,7 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(root)
-        self.conversation_repo.update_active_node(conversation_id, root_id)
+        self._require_active_node_update(conversation_id, root_id)
         logger.info(f"[ChatPersistenceService] 创建会话: {conversation_id}")
         return conversation_id
 
@@ -136,6 +157,23 @@ class ChatPersistenceService:
         if not message:
             raise ValueError(f"消息不存在: {message_id}")
         return message
+
+    def _transaction_context(self):
+        if self.db is None:
+            return nullcontext()
+        return self.db.transaction()
+
+    def _lock_conversation_and_assert_idle(self, chat_id: str):
+        lock_by_id = getattr(self.conversation_repo, "lock_by_id", None)
+        if lock_by_id is not None:
+            conversation = lock_by_id(chat_id)
+            if conversation is None:
+                raise ValueError(f"会话不存在: {chat_id}")
+        else:
+            conversation = self._must_get_conversation(chat_id)
+        if self.activity_guard is not None:
+            self.activity_guard.assert_idle_locked(chat_id)
+        return conversation
 
     def _ensure_active_root(
         self,
@@ -177,7 +215,7 @@ class ChatPersistenceService:
             )
             self.message_repo.create(root)
 
-        self.conversation_repo.update_active_node(conversation.id, root_id)
+        self._require_active_node_update(conversation.id, root_id)
         conversation.active_node_id = root_id
         return root_id
 
@@ -190,7 +228,29 @@ class ChatPersistenceService:
         source_message_id: Optional[str] = None,
         mode: str = "normal",
     ) -> Tuple[ChatMessageEntity, ChatMessageEntity]:
-        conversation = self._must_get_conversation(chat_id)
+        with self._transaction_context():
+            conversation = self._lock_conversation_and_assert_idle(chat_id)
+            return self._create_turn_locked(
+                chat_id,
+                content,
+                sender_id,
+                context=context,
+                source_message_id=source_message_id,
+                mode=mode,
+                conversation=conversation,
+            )
+
+    def _create_turn_locked(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: Optional[str],
+        context: Optional[MessageContext] = None,
+        source_message_id: Optional[str] = None,
+        mode: str = "normal",
+        conversation: Optional[ChatConversationEntity] = None,
+    ) -> Tuple[ChatMessageEntity, ChatMessageEntity]:
+        conversation = conversation or self._must_get_conversation(chat_id)
         now = datetime.now()
 
         if mode not in ("normal", "edit"):
@@ -251,10 +311,24 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(assistant)
-        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        self._require_active_node_update(chat_id, assistant.id)
         return user, assistant
 
     def create_assistant_regeneration(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[MessageContext] = None,
+    ) -> ChatMessageEntity:
+        with self._transaction_context():
+            self._lock_conversation_and_assert_idle(chat_id)
+            return self._create_assistant_regeneration_locked(
+                chat_id,
+                source_assistant_id,
+                context=context,
+            )
+
+    def _create_assistant_regeneration_locked(
         self,
         chat_id: str,
         source_assistant_id: str,
@@ -287,8 +361,21 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(assistant)
-        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        self._require_active_node_update(chat_id, assistant.id)
         return assistant
+
+    def _require_active_node_update(
+        self,
+        conversation_id: str,
+        active_node_id: str,
+    ) -> None:
+        if not self.conversation_repo.update_active_node(
+            conversation_id,
+            active_node_id,
+        ):
+            raise RuntimeError(
+                f"更新会话 active_node_id 失败: {conversation_id}"
+            )
 
     def _path_to_root(self, chat_id: str, leaf_id: str) -> List[ChatMessageEntity]:
         path = []
@@ -629,6 +716,44 @@ class ChatPersistenceService:
         except Exception as e:
             logger.error(f"[ChatPersistenceService] 更新消息失败: {e}", exc_info=True)
             return False
+
+    def finalize_platform_assistant(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        content: Optional[str] = None,
+        token_used: Optional[int] = None,
+        context: Optional[MessageContext] = None,
+        error_message: Optional[str] = None,
+    ) -> bool:
+        """在调用方事务内严格收敛 prepared assistant；失败不得静默。"""
+        updates: Dict[str, Any] = {"status": status}
+        if content is not None:
+            updates["message_content"] = content
+        if token_used is not None:
+            updates["token_used"] = token_used
+        if context is not None:
+            updates["context"] = context.to_json()
+        if error_message is not None:
+            updates["error_message"] = error_message
+
+        if not self.message_repo.update(message_id, updates):
+            return False
+        if status != "success":
+            return True
+
+        message = self.message_repo.get_by_id(message_id)
+        if message is None:
+            return False
+        total_messages = self._count_visible_messages(message.chat_id)
+        return bool(
+            self.conversation_repo.update_summary_and_count(
+                message.chat_id,
+                None,
+                total_messages,
+            )
+        )
 
     def is_first_message(self, chat_id: str) -> bool:
         """

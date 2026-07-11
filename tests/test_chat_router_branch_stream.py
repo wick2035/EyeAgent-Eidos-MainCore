@@ -4,7 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agents.graph_manager import GraphManager
+from agents.graph_manager import GraphManager, PreparedGraphTerminal
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
 from presentation.routers.conversation_router import get_conversation_detail, switch_active_branch
 from presentation.schemas.conversation_schemas import ActiveBranchRequest
@@ -53,6 +53,15 @@ class FakeStreamingGraph:
             "event": "on_chat_model_stream",
             "data": {"chunk": FakeChunk("detached answer")},
         }
+
+    def get_state(self, config):
+        return SimpleNamespace(values={})
+
+
+class SensitiveFailingStreamingGraph:
+    async def astream_events(self, input_state, config, version):
+        raise RuntimeError("UNTRUSTED_SENTINEL_FROM_ATTACHMENT")
+        yield
 
     def get_state(self, config):
         return SimpleNamespace(values={})
@@ -285,6 +294,92 @@ class BranchStreamSchemaTest(unittest.TestCase):
 
 
 class BranchStreamGraphManagerTest(unittest.TestCase):
+    def test_prepared_graph_exception_log_does_not_include_sensitive_detail(self):
+        manager = make_graph_manager(PreparedPersistence())
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=SensitiveFailingStreamingGraph(),
+        ), self.assertLogs("agents.graph_manager", level="ERROR") as captured:
+            with self.assertRaises(RuntimeError):
+                collect_async(manager.chat_stream_prepared_async(
+                    patient_id="550e8400-e29b-41d4-a716-446655440000",
+                    doctor_id="660e8400-e29b-41d4-a716-446655440001",
+                    session_id="s1",
+                    conversation_id="c1",
+                    message="附件问题",
+                    user_message_id="u1",
+                    assistant_message_id="a1",
+                    safe_attachment_refs=[{
+                        "attachment_id": "attachment-1",
+                        "document_version": 1,
+                        "content_sha256": "a" * 64,
+                        "page_count": None,
+                    }],
+                    transient_attachment_handle="opaque-handle",
+                ))
+
+        self.assertNotIn(
+            "UNTRUSTED_SENTINEL_FROM_ATTACHMENT",
+            "\n".join(captured.output),
+        )
+
+    def test_prepared_stream_reuses_ids_without_public_or_persistence_terminals(self):
+        class PreparedOnlyPersistence(BranchScopedPersistence):
+            def prepare_normal_turn(self, **kwargs):
+                raise AssertionError("prepared path must not create nodes")
+
+            def update_assistant_success(self, **kwargs):
+                raise AssertionError("prepared path must not finalize messages")
+
+        persistence = PreparedOnlyPersistence()
+        manager = object.__new__(GraphManager)
+        manager.persistence = persistence
+        manager.checkpointer = FakeCheckpointer()
+        manager._get_state_message_count = lambda graph, config: 0
+        manager._extract_token_used_from_result = lambda result, previous_message_count: None
+        manager._prepare_input_state = lambda **kwargs: {
+            **kwargs,
+            "messages": [
+                *kwargs.get("history_messages", []),
+                SimpleNamespace(content=kwargs["message"]),
+            ],
+        }
+        graph = FakeStreamingGraph()
+        safe_refs = [{
+            "attachment_id": "attachment-1",
+            "document_version": 1,
+            "content_sha256": "a" * 64,
+            "page_count": None,
+        }]
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=graph,
+        ):
+            chunks = collect_async(manager.chat_stream_prepared_async(
+                patient_id="550e8400-e29b-41d4-a716-446655440000",
+                doctor_id="660e8400-e29b-41d4-a716-446655440001",
+                session_id="s1",
+                conversation_id="c1",
+                message="附件问题",
+                user_message_id="u2",
+                assistant_message_id="a2",
+                safe_attachment_refs=safe_refs,
+                transient_attachment_handle="opaque-handle",
+            ))
+
+        self.assertEqual(chunks[0]["type"], "token")
+        self.assertIsInstance(chunks[-1], PreparedGraphTerminal)
+        self.assertFalse(any(
+            isinstance(chunk, dict) and chunk.get("type") in {"start", "done", "error"}
+            for chunk in chunks
+        ))
+        input_state = graph.seen[0]["input_state"]
+        self.assertTrue(input_state["platform_prepared"])
+        self.assertEqual(input_state["attachments"], safe_refs)
+        self.assertIsNone(input_state["attachment_analysis"])
+
     def test_prepare_failure_emits_error_without_streaming_detached_answer(self):
         manager = make_graph_manager(FailingPreparePersistence())
 

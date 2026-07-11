@@ -1,0 +1,110 @@
+{
+  "prepare_request": {
+    "version": 1,
+    "request_id": "turn-request-1",
+    "request_fingerprint": "aafcb764226af516af7c018a246c59340d0275d1232ca46f59d65bc55c1666ed",
+    "operation": "normal",
+    "conversation_id": "conversation-1",
+    "session_id": "session-1",
+    "patient_id": "patient-1",
+    "doctor_id": "doctor:42",
+    "message": "é\n检查",
+    "source_message_id": null,
+    "implicit_prompt_id": null,
+    "attachment_ids": [
+      "att-2",
+      "att-1"
+    ]
+  },
+  "prepare_response": {
+    "request_id": "turn-request-1",
+    "request_fingerprint": "aafcb764226af516af7c018a246c59340d0275d1232ca46f59d65bc55c1666ed",
+    "status": "prepared",
+    "attachment_only": false,
+    "implicit_prompt_id": null
+  },
+  "execute_request": {
+    "request_id": "turn-request-1",
+    "request_fingerprint": "aafcb764226af516af7c018a246c59340d0275d1232ca46f59d65bc55c1666ed",
+    "conversation_id": "conversation-1",
+    "session_id": "session-1",
+    "patient_id": "patient-1",
+    "doctor_id": "doctor:42",
+    "user_message_id": "message-user-1",
+    "assistant_message_id": "message-assistant-1",
+    "attachments": [
+      {
+        "attachment_id": "att-2",
+        "file_type": "image",
+        "filename": "fundus.png",
+        "mime_type": "image/png",
+        "size_bytes": 2097152,
+        "page_count": null,
+        "content_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "document_version": 1,
+        "analysis_attempt_id": "attempt-image-1",
+        "download_url": "https://storage.example/short-lived/image-token"
+      },
+      {
+        "attachment_id": "att-1",
+        "file_type": "pdf",
+        "filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "size_bytes": 3145728,
+        "page_count": 3,
+        "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "document_version": 2,
+        "analysis_attempt_id": "attempt-pdf-1",
+        "download_url": "https://storage.example/short-lived/pdf-token"
+      }
+    ]
+  },
+  "status_response": {
+    "request_id": "turn-request-1",
+    "status": "prepared",
+    "session_id": "session-1",
+    "user_message_id": null,
+    "assistant_message_id": null,
+    "error_code": null,
+    "updated_at": "2026-07-10T14:30:00Z"
+  },
+  "abort_request": {
+    "conversation_id": "conversation-1",
+    "doctor_id": "doctor:42"
+  },
+  "abort_response": {
+    "request_id": "turn-request-1",
+    "conversation_id": "conversation-1",
+    "status": "cancelled"
+  },
+  "execution_started": {
+    "event": "execution_started",
+    "request_id": "turn-request-1",
+    "user_message_id": "message-user-1",
+    "assistant_message_id": "message-assistant-1"
+  },
+  "attachment_status": {
+    "event": "attachment_status",
+    "request_id": "turn-request-1",
+    "user_message_id": "message-user-1",
+    "assistant_message_id": "message-assistant-1",
+    "attachment_id": "att-2",
+    "analysis_attempt_id": "attempt-image-1",
+    "sequence": 1,
+    "status": "ready",
+    "error_code": null
+  },
+  "done": {
+    "event": "done",
+    "request_id": "turn-request-1",
+    "user_message_id": "message-user-1",
+    "assistant_message_id": "message-assistant-1"
+  },
+  "error": {
+    "event": "error",
+    "request_id": "turn-request-1",
+    "user_message_id": "message-user-1",
+    "assistant_message_id": "message-assistant-1",
+    "error_code": "ATTACHMENT_ANALYSIS_FAILED"
+  }
+}

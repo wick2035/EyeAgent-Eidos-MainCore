@@ -31,6 +31,7 @@ _ROUTE_SOURCES = {
     "presentation/routers/file_router.py": "/api",
     "presentation/routers/recommendation_router.py": "/api/recommendation",
     "presentation/routers/research_router.py": "/api/research",
+    "presentation/routers/platform_chat_turn_router.py": "/api/platform/chat/turns",
 }
 
 PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
@@ -40,6 +41,10 @@ PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
         ("POST", "/api/chat/regenerate/stream"),
         ("POST", "/api/research/chat/stream"),
         ("PUT", "/api/conversations/{conversation_id}/active-branch"),
+        ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("GET", "/api/platform/chat/turns/{request_id}"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
     }
 )
 
@@ -86,6 +91,10 @@ CURRENT_HTTP_API_ROUTES = frozenset(
         ("POST", "/api/research/chat/stream"),
         ("POST", "/api/upload"),
         ("PUT", "/api/conversations/{conversation_id}/active-branch"),
+        ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("GET", "/api/platform/chat/turns/{request_id}"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
     }
 )
 
@@ -188,6 +197,26 @@ class StubVerifier:
 class InternalAuthRouteInventoryTest(unittest.TestCase):
     def test_explicit_inventory_matches_current_source_routes(self):
         self.assertEqual(_discovered_api_routes(), CURRENT_HTTP_API_ROUTES)
+
+    def test_turn_watchdog_is_lifespan_internal_not_an_http_route(self):
+        tree = ast.parse(_MAIN_PATH.read_text(encoding="utf-8"))
+        lifespan = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "lifespan"
+        )
+        calls = {
+            node.func.id
+            for node in ast.walk(lifespan)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        }
+
+        self.assertIn("get_chat_turn_watchdog", calls)
+        self.assertFalse(
+            any("watchdog" in path for _method, path in _discovered_api_routes())
+        )
 
     def test_every_current_http_api_route_requires_authentication(self):
         for method, path in sorted(CURRENT_HTTP_API_ROUTES):

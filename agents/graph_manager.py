@@ -4,7 +4,8 @@ GraphManager - LangGraph 图管理器
 替代原有的 AgentManager，提供基于 LangGraph 的对话管理。
 """
 import logging
-from typing import Dict, Any, Optional, Generator, AsyncGenerator, List
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, Generator, AsyncGenerator, List, TypeAlias
 import asyncio
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -33,6 +34,24 @@ from agents.graph.citation_extractor import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+PublicGraphChunk: TypeAlias = Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PreparedGraphTerminal:
+    """Prepared path 的内部终态；不得直接透传到平台 SSE。"""
+
+    content: str
+    token_used: Optional[int]
+    tool_results: List[Dict[str, Any]]
+    citations: List[Dict[str, Any]]
+    agent_type: str
+    stage: str
+
+
+PreparedGraphEvent: TypeAlias = PublicGraphChunk | PreparedGraphTerminal
 
 
 class GraphManager:
@@ -540,6 +559,61 @@ class GraphManager:
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
 
+    async def chat_stream_prepared_async(
+        self,
+        *,
+        patient_id: str,
+        doctor_id: str,
+        session_id: str,
+        conversation_id: str,
+        message: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        safe_attachment_refs: List[Dict[str, Any]],
+        transient_attachment_handle: str,
+        runnable_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[PreparedGraphEvent, None]:
+        """复用模型流，但只消费 prepare 已创建的节点并返回内部终态。"""
+        if not transient_attachment_handle:
+            raise ValueError("ATTACHMENT_CONTEXT_UNAVAILABLE")
+        allowed_ref_fields = {
+            "attachment_id",
+            "document_version",
+            "content_sha256",
+            "page_count",
+        }
+        if (
+            not safe_attachment_refs
+            or any(
+                not isinstance(ref, dict)
+                or set(ref) != allowed_ref_fields
+                or not isinstance(ref.get("attachment_id"), str)
+                or not ref["attachment_id"]
+                for ref in safe_attachment_refs
+            )
+        ):
+            raise ValueError("ATTACHMENT_SAFE_REF_INVALID")
+        config = runnable_config or {}
+        configurable = config.setdefault("configurable", {})
+        configurable["attachment_analysis_handle"] = transient_attachment_handle
+        prepared_context = {
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "safe_attachment_refs": list(safe_attachment_refs),
+            "transient_attachment_handle": transient_attachment_handle,
+        }
+        async for event in self.chat_stream_async(
+            patient_id=patient_id,
+            session_id=session_id,
+            message=message,
+            role="doctor",
+            doctor_id=doctor_id,
+            conversation_id=conversation_id,
+            agent_type="health",
+            _prepared_context=prepared_context,
+        ):
+            yield event
+
     async def chat_stream_async(
         self,
         patient_id: str,
@@ -552,7 +626,7 @@ class GraphManager:
         source_message_id: Optional[str] = None,
         branch_mode: str = "normal",
         **kwargs,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[PreparedGraphEvent, None]:
         """
         异步流式对话接口 - Token 级别流式输出
 
@@ -570,6 +644,9 @@ class GraphManager:
             }
         """
         from agents.graph.graph_builder import get_streaming_medical_graph
+
+        prepared_context = kwargs.pop("_prepared_context", None)
+        prepared_mode = isinstance(prepared_context, dict)
 
         # 获取线程配置
         thread_config = get_thread_config(session_id, conversation_id)
@@ -651,8 +728,28 @@ class GraphManager:
         current_agent = agent_type
         current_stage = "greeting"
 
-        # === 消息树写入 - 先准备用户/助手节点，流结束后更新助手终态 ===
-        if conversation_id:
+        # Prepared path 只绑定已存在的节点；legacy path 仍由这里创建节点。
+        if prepared_mode:
+            prepared_message_ids = {
+                "user_message_id": prepared_context["user_message_id"],
+                "assistant_message_id": prepared_context["assistant_message_id"],
+            }
+            assistant_message_id = prepared_message_ids["assistant_message_id"]
+            thread_config = get_branch_thread_config(
+                session_id,
+                conversation_id,
+                assistant_message_id,
+            )
+            thread_config["configurable"]["attachment_analysis_handle"] = (
+                prepared_context["transient_attachment_handle"]
+            )
+            thread_id = thread_config["configurable"]["thread_id"]
+            branch_history_messages = self._build_branch_history_messages(
+                conversation_id=conversation_id,
+                current_user_message_id=prepared_message_ids["user_message_id"],
+                current_assistant_message_id=assistant_message_id,
+            )
+        elif conversation_id:
             try:
                 is_first = self.persistence.is_first_message(conversation_id)
                 sender_id = doctor_id if role == "doctor" else patient_id
@@ -707,17 +804,18 @@ class GraphManager:
                 }
                 return
 
-        yield {
-            "type": "start",
-            "content": "",
-            "metadata": {
-                "conversation_id": conversation_id,
-                "thread_id": thread_id,
-                "user_message_id": prepared_message_ids.get("user_message_id"),
-                "assistant_message_id": prepared_message_ids.get("assistant_message_id"),
-                "active_node_id": prepared_message_ids.get("assistant_message_id"),
-            },
-        }
+        if not prepared_mode:
+            yield {
+                "type": "start",
+                "content": "",
+                "metadata": {
+                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
+                    "user_message_id": prepared_message_ids.get("user_message_id"),
+                    "assistant_message_id": prepared_message_ids.get("assistant_message_id"),
+                    "active_node_id": prepared_message_ids.get("assistant_message_id"),
+                },
+            }
 
         guard_result = check_input_safety(message, context={
             "role": role, "agent_type": agent_type, "patient_id": patient_id,
@@ -728,7 +826,7 @@ class GraphManager:
                 f"category={guard_result.category.value if guard_result.category else 'N/A'}"
             )
             blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
-            if assistant_message_id and conversation_id:
+            if assistant_message_id and conversation_id and not prepared_mode:
                 try:
                     self.persistence.update_assistant_success(
                         message_id=assistant_message_id,
@@ -745,21 +843,39 @@ class GraphManager:
                 "content": blocked_response,
                 "metadata": {"security_blocked": True, "risk": guard_result.risk_level.value},
             }
-            yield {
-                "type": "done",
-                "content": blocked_response,
-                "metadata": {
-                    "security_blocked": True,
-                    "agent_type": agent_type,
-                    "stage": "security_blocked",
-                },
-            }
+            if prepared_mode:
+                yield PreparedGraphTerminal(
+                    content=blocked_response,
+                    token_used=None,
+                    tool_results=[],
+                    citations=[],
+                    agent_type=agent_type,
+                    stage="security_blocked",
+                )
+            else:
+                yield {
+                    "type": "done",
+                    "content": blocked_response,
+                    "metadata": {
+                        "security_blocked": True,
+                        "agent_type": agent_type,
+                        "stage": "security_blocked",
+                    },
+                }
             return
 
         # 准备输入状态（标记流式模式）
         input_kwargs = dict(kwargs)
         if branch_history_messages is not None:
             input_kwargs["history_messages"] = branch_history_messages
+        if prepared_mode:
+            input_kwargs.update(
+                {
+                    "platform_prepared": True,
+                    "attachments": prepared_context["safe_attachment_refs"],
+                    "attachment_analysis": None,
+                }
+            )
         input_state = self._prepare_input_state(
             patient_id=patient_id,
             session_id=session_id,
@@ -910,6 +1026,12 @@ class GraphManager:
 
         except Exception as e:
             last_error = e
+            if prepared_mode:
+                logger.error(
+                    "[GraphManager] prepared graph 失败, error_type=%s",
+                    type(e).__name__,
+                )
+                raise
             logger.error(f"[GraphManager] chat_stream_async 失败: {e}", exc_info=True)
             yield {
                 "type": "error",
@@ -919,7 +1041,12 @@ class GraphManager:
 
         finally:
             # best-effort：取消或异常时，尽量把 running 占位推进到最终状态。
-            if assistant_message_id and conversation_id and (cancelled or last_error):
+            if (
+                not prepared_mode
+                and assistant_message_id
+                and conversation_id
+                and (cancelled or last_error)
+            ):
                 try:
                     final_status = "cancelled" if cancelled else "failed"
                     error_message = "client disconnected" if cancelled else str(last_error)
@@ -977,7 +1104,13 @@ class GraphManager:
                         "metadata": {"node": current_agent},
                     }
             except Exception as e:
-                logger.warning(f"[GraphManager] 流式回退 last_response 失败: {e}")
+                if prepared_mode:
+                    logger.warning(
+                        "[GraphManager] prepared fallback 失败, error_type=%s",
+                        type(e).__name__,
+                    )
+                else:
+                    logger.warning(f"[GraphManager] 流式回退 last_response 失败: {e}")
 
         if token_used is None and not last_error and streaming_graph is not None:
             try:
@@ -988,12 +1121,23 @@ class GraphManager:
                         previous_message_count,
                     )
             except Exception as e:
-                logger.debug(f"[GraphManager] 流式回退提取 token_used 失败: {e}")
+                if prepared_mode:
+                    logger.debug(
+                        "[GraphManager] prepared token usage 回退失败, error_type=%s",
+                        type(e).__name__,
+                    )
+                else:
+                    logger.debug(f"[GraphManager] 流式回退提取 token_used 失败: {e}")
 
         stream_completed = not last_error and not cancelled
 
         # === 两阶段写入 - 第二阶段：流结束后保存完整回复 ===
-        if assistant_message_id and conversation_id and stream_completed:
+        if (
+            not prepared_mode
+            and assistant_message_id
+            and conversation_id
+            and stream_completed
+        ):
             try:
                 self.persistence.update_assistant_success(
                     message_id=assistant_message_id,
@@ -1017,8 +1161,22 @@ class GraphManager:
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
 
-        # 发送完成事件
         final_citations = deduplicate_citations(collected_citations) if collected_citations else []
+        if prepared_mode:
+            yield PreparedGraphTerminal(
+                content=full_response,
+                token_used=token_used,
+                tool_results=(
+                    normalize_from_stream_events(collected_tool_calls)
+                    if collected_tool_calls else []
+                ),
+                citations=final_citations,
+                agent_type=current_agent,
+                stage=current_stage,
+            )
+            return
+
+        # legacy path 的 public done 保持原行为。
         yield {
             "type": "done",
             "content": full_response,

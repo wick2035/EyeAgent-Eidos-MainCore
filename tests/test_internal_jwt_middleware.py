@@ -3,8 +3,10 @@ import hashlib
 import json
 import logging
 import unittest
+from dataclasses import replace
 from typing import Any, Optional
 
+from fastapi import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
@@ -14,7 +16,10 @@ from infrastructure.security.errors import (
     JwksUnavailableError,
     TokenValidationError,
 )
-from presentation.dependencies.security import get_current_principal
+from presentation.dependencies.security import (
+    get_current_principal,
+    require_platform_doctor,
+)
 from presentation.middleware import internal_jwt_auth
 from presentation.middleware.internal_jwt_auth import (
     InternalJWTAuthMiddleware,
@@ -26,8 +31,12 @@ _JWKS_URL = "https://backend.example/internal/auth/jwks"
 _LOGGER_NAME = "presentation.middleware.internal_jwt_auth"
 _ENFORCED_REQUESTS = (
     ("GET", "/api/conversations/conversation-7"),
+    ("GET", "/api/platform/chat/turns/turn-request-7"),
     ("POST", "/api/chat/edit-resend/stream"),
     ("POST", "/api/chat/regenerate/stream"),
+    ("POST", "/api/platform/chat/turns/execute"),
+    ("POST", "/api/platform/chat/turns/prepare"),
+    ("POST", "/api/platform/chat/turns/turn-request-7/abort"),
     ("POST", "/api/research/chat/stream"),
     ("PUT", "/api/conversations/conversation-7/active-branch"),
 )
@@ -767,6 +776,12 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
             ("POST", "/api/conversations/conversation-7"),
             ("GET", "/api/conversations/conversation-7/extra"),
             ("GET", "/api/conversations/conversation-7/"),
+            ("GET", "/api/platform/chat/turns/turn-request-7/"),
+            ("GET", "/api/platform/chat/turns/turn-request-7/abort"),
+            ("POST", "/api/platform/chat/turns/turn-request-7"),
+            ("POST", "/api/platform/chat/turns/turn-request-7/abort/"),
+            ("POST", "/api/platform/chat/turns/turn-request-7/abort/extra"),
+            ("POST", "/api/platform/other"),
             ("PUT", "/api/conversations/conversation-7/active-branch/"),
         )
 
@@ -783,6 +798,29 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self._status(messages), 200)
                 self.assertEqual(len(app.scopes), 1)
                 self.assertIsNone(scope["state"]["internal_principal"])
+
+    def test_platform_dynamic_routes_have_stable_telemetry_templates(self):
+        cases = (
+            (
+                "GET",
+                "/api/platform/chat/turns/turn-request-7",
+                "/api/platform/chat/turns/{request_id}",
+            ),
+            (
+                "POST",
+                "/api/platform/chat/turns/turn-request-7/abort",
+                "/api/platform/chat/turns/{request_id}/abort",
+            ),
+        )
+
+        for method, path, expected in cases:
+            with self.subTest(method=method, path=path):
+                self.assertEqual(
+                    internal_jwt_auth.normalized_route_template(
+                        _scope(method=method, path=path)
+                    ),
+                    expected,
+                )
 
     async def test_enforce_missing_token_returns_required_401_before_downstream(self):
         verifier = StubVerifier(principal=_principal())
@@ -957,3 +995,61 @@ class CurrentPrincipalDependencyTest(unittest.TestCase):
         request = Request(_scope(state={}))
 
         self.assertIsNone(get_current_principal(request))
+
+    def test_require_platform_doctor_returns_matching_doctor_principal(self):
+        principal = _principal()
+        request = Request(_scope(state={"internal_principal": principal}))
+
+        self.assertIs(
+            require_platform_doctor(request, principal.subject),
+            principal,
+        )
+
+    def test_require_platform_doctor_rejects_missing_principal(self):
+        request = Request(_scope(state={}))
+
+        with self.assertRaises(HTTPException) as raised:
+            require_platform_doctor(request, "body-doctor-secret")
+
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(
+            raised.exception.detail,
+            {"error_code": "PLATFORM_AUTH_REQUIRED"},
+        )
+        self.assertNotIn("body-doctor-secret", repr(raised.exception))
+
+    def test_require_platform_doctor_rejects_untrusted_principal_contracts(self):
+        principal = _principal()
+        cases = (
+            (
+                "missing_scope",
+                replace(principal, scopes=frozenset({"conversation:read"})),
+                principal.subject,
+            ),
+            (
+                "wrong_type",
+                replace(principal, principal_type="patient"),
+                principal.subject,
+            ),
+            (
+                "subject_mismatch",
+                principal,
+                "doctor:another-secret",
+            ),
+        )
+
+        for name, candidate, doctor_id in cases:
+            with self.subTest(name=name):
+                request = Request(
+                    _scope(state={"internal_principal": candidate})
+                )
+
+                with self.assertRaises(HTTPException) as raised:
+                    require_platform_doctor(request, doctor_id)
+
+                self.assertEqual(raised.exception.status_code, 403)
+                self.assertEqual(
+                    raised.exception.detail,
+                    {"error_code": "PLATFORM_DOCTOR_FORBIDDEN"},
+                )
+                self.assertNotIn(doctor_id, repr(raised.exception))
