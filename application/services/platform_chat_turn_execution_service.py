@@ -340,10 +340,13 @@ class PlatformChatTurnExecutionService:
             raise
         except _ExecutionStopped:
             if not finalized:
-                await self.finalize_platform_turn_cancelled(
+                result = await self.finalize_platform_turn_cancelled(
                     request.request_id,
                     request.assistant_message_id,
                 )
+                finalized = True
+                if result.status in {"failed", "completed"}:
+                    yield self.build_public_terminal_event(result)
         except (asyncio.TimeoutError, TimeoutError):
             result = await self.finalize_platform_turn_failure(
                 request.request_id,

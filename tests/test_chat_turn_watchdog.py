@@ -289,6 +289,46 @@ class ChatTurnWatchdogTest(unittest.TestCase):
             turn.assistant_message_id,
         )
 
+    def test_poisoned_candidate_does_not_block_later_expired_turn(self):
+        poison = _turn(
+            request_id="sensitive-poison-record",
+            status="streaming",
+            create_time=_NOW - timedelta(minutes=20),
+            deadline_at=_NOW - timedelta(minutes=5),
+        )
+        healthy = _turn(
+            request_id="healthy-streaming",
+            status="streaming",
+            create_time=_NOW - timedelta(minutes=20),
+            deadline_at=_NOW,
+        )
+        watchdog, _, conversations, messages, db = _watchdog(poison, healthy)
+        del conversations.items[poison.conversation_id]
+
+        with self.assertLogs(
+            "application.services.chat_turn_watchdog",
+            level="ERROR",
+        ) as captured:
+            try:
+                result = watchdog.reconcile_once(_NOW)
+            except Exception as error:
+                self.fail(f"poisoned candidate escaped reconciliation: {error!r}")
+
+        self.assertEqual(result.scanned, 2)
+        self.assertEqual(result.streaming_failed, 1)
+        self.assertEqual(poison.status, "streaming")
+        self.assertEqual(healthy.status, "failed")
+        self.assertEqual(
+            messages.items[healthy.assistant_message_id].error_message,
+            "ATTACHMENT_ANALYSIS_TIMEOUT",
+        )
+        self.assertEqual(db.transactions, 2)
+        self.assertEqual(db.depth, 0)
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("RuntimeError", captured.output[0])
+        self.assertNotIn(poison.request_id, captured.output[0])
+        self.assertNotIn(poison.conversation_id, captured.output[0])
+
     def test_prepared_turn_younger_than_ten_minutes_is_unchanged(self):
         turn = _turn(
             request_id="fresh",

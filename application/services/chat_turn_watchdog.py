@@ -60,53 +60,17 @@ class ChatTurnWatchdog:
         streaming_failed = 0
 
         for candidate in candidates:
-            with self.db.transaction():
-                self._lock_conversation(candidate.conversation_id)
-                entity = self.turn_repo.get_for_update(
-                    candidate.doctor_id,
-                    candidate.request_id,
+            try:
+                outcome = self._reconcile_candidate(candidate, now)
+            except Exception as error:
+                logger.error(
+                    "[ChatTurnWatchdog] 候选对账失败: %s",
+                    type(error).__name__,
                 )
-                if entity is None or entity.status in _TERMINAL_STATUSES:
-                    continue
-
-                if entity.status == "prepared":
-                    if entity.create_time > now - _PREPARED_MAX_AGE:
-                        continue
-                    changed = self.turn_repo.compare_and_set_status(
-                        entity.doctor_id,
-                        entity.request_id,
-                        "prepared",
-                        "cancelled",
-                        error_code=_PREPARED_TIMEOUT_CODE,
-                    )
-                    if not changed:
-                        continue
-                    self._hide_prepared_nodes(entity)
-                    prepared_cancelled += 1
-                    continue
-
-                if (
-                    entity.status != "streaming"
-                    or entity.deadline_at is None
-                    or entity.deadline_at > now
-                ):
-                    continue
-                changed = self.turn_repo.compare_and_set_status(
-                    entity.doctor_id,
-                    entity.request_id,
-                    "streaming",
-                    "failed",
-                    error_code=_STREAMING_TIMEOUT_CODE,
-                )
-                if not changed:
-                    continue
-                self._require_message_update(
-                    entity.assistant_message_id,
-                    {
-                        "status": "failed",
-                        "error_message": _STREAMING_TIMEOUT_CODE,
-                    },
-                )
+                continue
+            if outcome == "prepared_cancelled":
+                prepared_cancelled += 1
+            elif outcome == "streaming_failed":
                 streaming_failed += 1
 
         return WatchdogResult(
@@ -114,6 +78,55 @@ class ChatTurnWatchdog:
             prepared_cancelled=prepared_cancelled,
             streaming_failed=streaming_failed,
         )
+
+    def _reconcile_candidate(self, candidate, now: datetime) -> str | None:
+        with self.db.transaction():
+            self._lock_conversation(candidate.conversation_id)
+            entity = self.turn_repo.get_for_update(
+                candidate.doctor_id,
+                candidate.request_id,
+            )
+            if entity is None or entity.status in _TERMINAL_STATUSES:
+                return None
+
+            if entity.status == "prepared":
+                if entity.create_time > now - _PREPARED_MAX_AGE:
+                    return None
+                changed = self.turn_repo.compare_and_set_status(
+                    entity.doctor_id,
+                    entity.request_id,
+                    "prepared",
+                    "cancelled",
+                    error_code=_PREPARED_TIMEOUT_CODE,
+                )
+                if not changed:
+                    return None
+                self._hide_prepared_nodes(entity)
+                return "prepared_cancelled"
+
+            if (
+                entity.status != "streaming"
+                or entity.deadline_at is None
+                or entity.deadline_at > now
+            ):
+                return None
+            changed = self.turn_repo.compare_and_set_status(
+                entity.doctor_id,
+                entity.request_id,
+                "streaming",
+                "failed",
+                error_code=_STREAMING_TIMEOUT_CODE,
+            )
+            if not changed:
+                return None
+            self._require_message_update(
+                entity.assistant_message_id,
+                {
+                    "status": "failed",
+                    "error_message": _STREAMING_TIMEOUT_CODE,
+                },
+            )
+            return "streaming_failed"
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

@@ -3,13 +3,14 @@ import json
 import threading
 import unittest
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from agents.graph_manager import PreparedGraphTerminal
 from application.services.chat_turn_execution_registry import (
     ChatTurnExecutionRegistry,
 )
+from application.services.chat_turn_watchdog import ChatTurnWatchdog
 from application.services.platform_attachment_analyzer import (
     AttachmentStatusUpdate,
 )
@@ -58,6 +59,22 @@ class FakeTurnRepository:
 
     def get_for_update(self, doctor_id, request_id):
         return self.get(doctor_id, request_id)
+
+    def list_stale(self, now):
+        prepared_before = now - timedelta(minutes=10)
+        return [
+            turn
+            for turn in self.items.values()
+            if (
+                turn.status == "prepared"
+                and turn.create_time <= prepared_before
+            )
+            or (
+                turn.status == "streaming"
+                and turn.deadline_at is not None
+                and turn.deadline_at <= now
+            )
+        ]
 
     def compare_and_set_status(
         self,
@@ -525,6 +542,61 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(turns.get("doctor-1", request.request_id).status, "failed")
         self.assertEqual(messages.get_by_id(request.assistant_message_id).status, "failed")
+
+    async def test_watchdog_failure_after_stream_start_emits_safe_terminal_error(self):
+        sentinel = "SIGNED_URL_SENTINEL_must_not_leak"
+        base = execute_request()
+        descriptor = base.attachments[0].model_copy(
+            update={
+                "filename": f"{sentinel}.png",
+                "download_url": (
+                    "https://storage.example/file?token=" + sentinel
+                ),
+            }
+        )
+        request = base.model_copy(update={"attachments": [descriptor]})
+        service, turns, messages, _, db = make_service(
+            [request],
+            analyzer=BlockingAnalyzer(),
+            heartbeat_interval=0.001,
+        )
+        stream = service.stream(request, principal())
+
+        self.assertEqual((await stream.__anext__())["event"], "execution_started")
+        self.assertEqual((await stream.__anext__())["event"], "attachment_status")
+        turn = turns.get("doctor-1", request.request_id)
+        turn.deadline_at = datetime.now() - timedelta(seconds=1)
+        watchdog = ChatTurnWatchdog(
+            db=db,
+            turn_repo=turns,
+            conversation_repo=service.conversation_repo,
+            message_repo=messages,
+        )
+
+        result = watchdog.reconcile_once(datetime.now())
+        terminal = await asyncio.wait_for(stream.__anext__(), timeout=1)
+
+        self.assertEqual(result.streaming_failed, 1)
+        self.assertEqual(
+            terminal,
+            {
+                "event": "error",
+                "request_id": request.request_id,
+                "user_message_id": request.user_message_id,
+                "assistant_message_id": request.assistant_message_id,
+                "error_code": "ATTACHMENT_ANALYSIS_TIMEOUT",
+            },
+        )
+        self.assertNotIn(sentinel, json.dumps(terminal))
+        self.assertEqual(turn.status, "failed")
+        assistant = messages.get_by_id(request.assistant_message_id)
+        self.assertEqual(assistant.status, "failed")
+        self.assertEqual(
+            assistant.error_message,
+            "ATTACHMENT_ANALYSIS_TIMEOUT",
+        )
+        with self.assertRaises(StopAsyncIteration):
+            await stream.__anext__()
 
     async def test_turn_deadline_is_fifteen_minutes(self):
         request = execute_request()
