@@ -16,6 +16,11 @@ from infrastructure.security.errors import (
 )
 from infrastructure.security.jwks import CachedJwksProvider
 from infrastructure.security.jwt_verifier import RS256JWTVerifier
+from presentation.dependencies.security import (
+    INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY,
+    LegacyRouteError,
+    legacy_route_error_handler,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +108,10 @@ def install_internal_auth(
     settings: InternalAuthSettings | None = None,
     verifier_factory: VerifierFactory = _build_verifier,
 ) -> None:
+    app.add_exception_handler(
+        LegacyRouteError,
+        legacy_route_error_handler,
+    )
     app.add_middleware(
         InternalJWTAuthMiddleware,
         settings=settings,
@@ -254,6 +263,7 @@ class InternalJWTAuthMiddleware:
             return
 
         effective_mode = effective_auth_mode(scope, self._settings.mode)
+        scope[INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY] = effective_mode.value
         scope.setdefault("state", {})["internal_principal"] = None
 
         if effective_mode is InternalAuthMode.OFF:

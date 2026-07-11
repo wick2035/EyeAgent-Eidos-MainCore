@@ -78,7 +78,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return ids["user_message_id"]
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 保存用户消息失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=save_user_message "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             raise
 
     def create_assistant_placeholder(
@@ -113,7 +118,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return message.id
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 创建 AI 占位失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=create_assistant_placeholder "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             raise
 
     def prepare_normal_turn(
@@ -206,7 +216,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return success
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 成功失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_success "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def update_assistant_failed(
@@ -229,7 +244,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return success
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 失败状态失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_failed "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def update_assistant_final_status(
@@ -276,7 +296,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return success
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 最终状态失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_final_status "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def finalize_platform_assistant(
@@ -310,7 +335,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             logger.debug(f"[MySQLPersistenceAdapter] 更新标题: chat_id={chat_id}")
             return success
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新标题失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_conversation_title "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def is_first_message(self, chat_id: str) -> bool:
@@ -318,7 +348,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         try:
             return self.service.is_first_message(chat_id)
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 判断首条消息失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=is_first_message "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def _build_user_context(
@@ -347,6 +382,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             citations=None,  # 用户消息无 citations
             metadata={
                 "agent_type": context.get("agent_type"),
+                "patient_id": context.get("patient_id"),
             } if context.get("agent_type") else None,
         )
 

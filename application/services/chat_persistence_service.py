@@ -24,6 +24,14 @@ from infrastructure.repositories.chat_repository_impl import (
 logger = logging.getLogger(__name__)
 
 
+class LegacyBranchSourceInvalidError(Exception):
+    """旧分支源消息缺少可信 canonical 配置。"""
+
+
+class LegacyBranchForbiddenError(Exception):
+    """旧分支会话不属于请求中的医生。"""
+
+
 class ChatPersistenceService:
     """
     对话持久化服务
@@ -542,6 +550,130 @@ class ChatPersistenceService:
         """
         return self.conversation_repo.get_by_id(chat_id)
 
+    def assert_legacy_branch_authority(
+        self,
+        *,
+        chat_id: str,
+        source_message_id: str,
+        branch_mode: str,
+        doctor_id: str,
+        agent_type: str,
+        patient_id: Optional[str],
+    ) -> None:
+        """在旧 edit/regenerate 创建任何节点前验证 owner 与源回合配置。"""
+
+        try:
+            with self._transaction_context():
+                lock_by_id = getattr(self.conversation_repo, "lock_by_id", None)
+                conversation = (
+                    lock_by_id(chat_id)
+                    if lock_by_id is not None
+                    else self.conversation_repo.get_by_id(chat_id)
+                )
+                if conversation is None:
+                    raise LegacyBranchSourceInvalidError()
+                if (
+                    conversation.user_type != "doctor"
+                    or conversation.host_id != doctor_id
+                ):
+                    raise LegacyBranchForbiddenError()
+
+                source = self.message_repo.get_by_id(source_message_id)
+                if (
+                    source is None
+                    or source.chat_id != chat_id
+                    or source.deleted
+                    or source.status != "success"
+                ):
+                    raise LegacyBranchSourceInvalidError()
+
+                if branch_mode == "edit":
+                    if source.message_type != "user":
+                        raise LegacyBranchSourceInvalidError()
+                    source_user = source
+                elif branch_mode == "regenerate":
+                    if source.message_type != "assistant" or not source.parent_id:
+                        raise LegacyBranchSourceInvalidError()
+                    source_user = self.message_repo.get_by_id(source.parent_id)
+                    if (
+                        source_user is None
+                        or source_user.chat_id != chat_id
+                        or source_user.message_type != "user"
+                        or source_user.deleted
+                        or source_user.status != "success"
+                    ):
+                        raise LegacyBranchSourceInvalidError()
+                else:
+                    raise LegacyBranchSourceInvalidError()
+
+                if source_user.sender_id != doctor_id:
+                    raise LegacyBranchForbiddenError()
+                canonical_agent, canonical_patient = (
+                    self._legacy_source_configuration(source_user.context)
+                )
+                if (
+                    canonical_agent != agent_type
+                    or canonical_patient != patient_id
+                ):
+                    raise LegacyBranchSourceInvalidError()
+        except (LegacyBranchSourceInvalidError, LegacyBranchForbiddenError):
+            raise
+        except Exception:
+            raise LegacyBranchSourceInvalidError() from None
+
+    @staticmethod
+    def _legacy_source_configuration(
+        raw_context: Optional[str],
+    ) -> tuple[str, Optional[str]]:
+        if not isinstance(raw_context, str) or not raw_context:
+            raise LegacyBranchSourceInvalidError()
+        try:
+            context_list = json.loads(raw_context)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise LegacyBranchSourceInvalidError() from None
+        allowed_context_keys = {
+            "patient_info",
+            "conversation_stage",
+            "tool_results",
+            "citations",
+            "metadata",
+        }
+        if (
+            not isinstance(context_list, list)
+            or not context_list
+            or not all(
+                isinstance(item, dict)
+                and len(item) == 1
+                and next(iter(item)) in allowed_context_keys
+                for item in context_list
+            )
+        ):
+            raise LegacyBranchSourceInvalidError()
+        metadata_entries = [
+            item["metadata"]
+            for item in context_list
+            if isinstance(item, dict) and "metadata" in item
+        ]
+        if len(metadata_entries) != 1 or not isinstance(
+            metadata_entries[0],
+            dict,
+        ):
+            raise LegacyBranchSourceInvalidError()
+        metadata = metadata_entries[0]
+        if set(metadata) != {"agent_type", "patient_id"}:
+            raise LegacyBranchSourceInvalidError()
+        canonical_agent = metadata["agent_type"]
+        canonical_patient = metadata["patient_id"]
+        if canonical_agent == "research":
+            if canonical_patient is not None:
+                raise LegacyBranchSourceInvalidError()
+        elif canonical_agent == "health":
+            if not isinstance(canonical_patient, str) or not canonical_patient:
+                raise LegacyBranchSourceInvalidError()
+        else:
+            raise LegacyBranchSourceInvalidError()
+        return canonical_agent, canonical_patient
+
     def list_conversations(
         self,
         host_id: str,
@@ -714,7 +846,12 @@ class ChatPersistenceService:
             return success
 
         except Exception as e:
-            logger.error(f"[ChatPersistenceService] 更新消息失败: {e}", exc_info=True)
+            logger.error(
+                "chat_persistence_failed operation=update_message "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def finalize_platform_assistant(

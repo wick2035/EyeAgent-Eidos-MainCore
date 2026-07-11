@@ -191,14 +191,26 @@ MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Jav
   请求，用于上线前观测；
 - `enforce`：仅对下述平台独占路由启用强制认证。缺失或无效 token 返回 `401`，无可用
   JWKS 时返回 `503`；其他 `/api/**` 路由仍按 `observe` 兼容放行。认证成功后把可信主体
-  写入 `request.state.internal_principal`。
+  写入 `request.state.internal_principal`。中间件同时把 effective mode 写入服务端专用
+  ASGI scope 键 `_internal_auth_effective_mode`；该值不来自客户端，也不包含 token 或主体。
+
+旧版科研 normal/edit/regenerate 路由只在 effective mode 为 `enforce` 时执行
+subject/scope 强校验；`off` 与 `observe` 即使 token 缺失、无效或 scope 不匹配也继续
+按既有行为放行。旧分支仍会独立校验会话 owner 与源用户消息的 canonical agent/patient
+配置，缺失、损坏或冲突时 fail closed，且不创建任何消息节点。
 
 全局配置 `INTERNAL_AUTH_MODE=enforce` 不等于全部 `/api/**` 都强制认证。当前只有以下
-五类平台独占路由的有效模式为 `enforce`（会话 ID 只匹配一个非空路径段）：
+11 条平台独占路由的有效模式为 `enforce`（动态 ID 只匹配一个非空路径段）：
 
 - `GET /api/conversations/{conversation_id}`；
 - `POST /api/chat/edit-resend/stream`；
 - `POST /api/chat/regenerate/stream`；
+- `POST /api/platform/chat/turns/prepare`；
+- `POST /api/platform/chat/turns/execute`；
+- `GET /api/platform/chat/turns/{request_id}`；
+- `POST /api/platform/chat/turns/{request_id}/abort`；
+- `DELETE /api/platform/research-documents/{attachment_id}`；
+- `POST /api/research/chat`；
 - `POST /api/research/chat/stream`；
 - `PUT /api/conversations/{conversation_id}/active-branch`。
 
@@ -306,7 +318,7 @@ gate、真实平台/患者 JSON/SSE 探针、滚动 SSE drain、K1/K2 重叠发�
 前滚/回滚演练，也没有提供生产 HTTPS/mTLS、已认证 mesh、loopback 或等效公钥固定证据。
 部署状态应判定为：平台范围代码与本地自动化验收完成，外部部署 gate 和演练待执行。
 
-在外部 gate 完成前，五类平台独占路由以外的 `POST /api/chat`、
+在外部 gate 完成前，上述 11 条平台独占路由以外的 `POST /api/chat`、
 `POST /api/chat/stream`、`POST /api/upload`、`POST /api/asr/transcribe` 和未知
 `/api/**` 均继续按 observe 兼容；没有患者端零流量或明确下线证据，全局 enforce gate
 明确未满足。回滚顺序仍为 Python enforce → observe，完成实例 unready、在途 SSE drain

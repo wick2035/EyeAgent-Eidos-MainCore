@@ -27,7 +27,10 @@ class ResearchChatRequest(BaseModel):
 
     message: str = Field(..., description="用户消息")
     doctor_id: str = Field(..., description="医生UUID（必需）")
-    patient_id: Optional[str] = Field(None, description="患者UUID（查看特定患者数据时需要）")
+    patient_id: Optional[str] = Field(
+        None,
+        description="科研模式必须为空；字段仅为 wire compatibility 保留",
+    )
     session_id: Optional[str] = Field(None, description="会话ID")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID")
     enable_institution_data: bool = Field(False, description="机构数据库访问开关")

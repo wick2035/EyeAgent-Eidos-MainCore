@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from domain.security.principal import CurrentPrincipal
+from presentation.dependencies.security import LegacyRouteError
 from presentation.routers import chat_router, research_router
 from presentation.schemas.chat_schemas import (
     ChatRequest,
@@ -172,14 +173,14 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
         )
         for route, body in cases:
             with self.subTest(route=route.__name__):
-                with self.assertRaises(HTTPException) as missing_scope:
+                with self.assertRaises(LegacyRouteError) as missing_scope:
                     await route(
                         body,
                         starlette_request(principal(scopes={"ai:chat"})),
                     )
                 self.assertEqual(missing_scope.exception.status_code, 403)
 
-                with self.assertRaises(HTTPException) as wrong_subject:
+                with self.assertRaises(LegacyRouteError) as wrong_subject:
                     await route(
                         body,
                         starlette_request(principal(subject=PATIENT_ID)),
@@ -196,7 +197,11 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             chat_router,
             "_streaming_response_for_request",
             return_value=sentinel,
-        ) as streaming:
+        ) as streaming, patch.object(
+            chat_router,
+            "_assert_legacy_branch_authority",
+            return_value=None,
+        ):
             for route, body in cases:
                 with self.subTest(route=route.__name__):
                     result = await route(
@@ -221,6 +226,10 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             chat_router,
             "_streaming_response_for_request",
             return_value=sentinel,
+        ), patch.object(
+            chat_router,
+            "_assert_legacy_branch_authority",
+            return_value=None,
         ):
             result = await chat_router.chat_edit_resend_stream(
                 body,
@@ -237,7 +246,7 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             doctor_id=DOCTOR_ID,
             conversation_id="conversation-1",
         )
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(LegacyRouteError) as raised:
             await research_router.research_chat_stream(
                 body,
                 starlette_request(principal(scopes={"ai:chat"})),
@@ -273,7 +282,7 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             session_id="session-1",
             conversation_id="conversation-1",
         )
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(LegacyRouteError) as raised:
             await research_router.research_chat(
                 body,
                 starlette_request(principal(scopes={"ai:chat"})),
@@ -297,6 +306,11 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
                 research_router,
                 "graph_manager",
                 SimpleNamespace(chat=chat),
+            ),
+            patch.object(
+                research_router,
+                "_assert_research_conversation_owner",
+                return_value=None,
             ),
             patch.object(research_router, "verify_doctor_role", return_value=True),
             patch.object(
@@ -338,6 +352,11 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
         graph = CapturingGraph()
         with (
             patch.object(research_router, "graph_manager", graph),
+            patch.object(
+                research_router,
+                "_assert_research_conversation_owner",
+                return_value=None,
+            ),
             patch.object(research_router, "verify_doctor_role", return_value=True),
             patch.object(
                 research_router,

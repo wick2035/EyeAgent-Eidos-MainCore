@@ -17,10 +17,17 @@ from presentation.schemas.chat_schemas import (
     RegenerateRequest,
 )
 from agents.graph_manager import get_graph_manager
-from application.services.chat_persistence_service import get_chat_persistence_service
+from application.services.chat_persistence_service import (
+    LegacyBranchForbiddenError,
+    LegacyBranchSourceInvalidError,
+    get_chat_persistence_service,
+)
 from utils.ui_element_parser import parse_options_only
 from utils.attachment_analyzer import analyze_attachments
-from presentation.dependencies.security import require_platform_doctor
+from presentation.dependencies.security import (
+    LegacyRouteError,
+    require_legacy_platform_doctor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,7 @@ graph_manager = get_graph_manager()
 
 # 患者模式下支持OPTIONS选择框的Agent类型
 _AGENTS_WITH_OPTIONS = {"health", "reminder", "report"}
+_CHAT_ERROR_MESSAGE = "对话暂时不可用，请稍后再试。"
 
 
 def _reject_research_on_generic_route(request) -> None:
@@ -473,7 +481,14 @@ def _streaming_response_for_request(
                     citations = chunk.get("citations") or metadata.get("citations") or []
 
                 elif event_type == "error":
-                    yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+                    error_code = metadata.get("error_code")
+                    if error_code not in {
+                        "CHAT_EXECUTION_FAILED",
+                        "CHAT_PERSISTENCE_FAILED",
+                        "CHAT_SOURCE_INVALID",
+                    }:
+                        error_code = "CHAT_STREAM_FAILED"
+                    yield f"data: {json.dumps({'event': 'error', 'code': error_code, 'message': _CHAT_ERROR_MESSAGE})}\n\n"
                     return
 
             # 解析UI元素（仅患者模式的特定Agent）
@@ -510,9 +525,13 @@ def _streaming_response_for_request(
             logger.info("[ChatRouter] SSE 客户端断开，取消流式对话")
             raise
 
-        except Exception as e:
-            logger.error(f"[ChatRouter] 流式对话失败: {e}", exc_info=True)
-            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+        except Exception as error:
+            logger.error(
+                "chat_stream_failed operation=generate exception_class=%s",
+                type(error).__name__,
+                exc_info=None,
+            )
+            yield f"data: {json.dumps({'event': 'error', 'code': 'CHAT_STREAM_FAILED', 'message': _CHAT_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         generate_sse(),
@@ -550,11 +569,12 @@ async def chat_edit_resend_stream(
     request: EditResendRequest,
     http_request: Request,
 ):
-    require_platform_doctor(
+    require_legacy_platform_doctor(
         http_request,
         request.doctor_id or "",
         request.agent_type,
     )
+    _assert_legacy_branch_authority(request, "edit")
     return _streaming_response_for_request(
         request,
         branch_mode="edit",
@@ -567,13 +587,30 @@ async def chat_regenerate_stream(
     request: RegenerateRequest,
     http_request: Request,
 ):
-    require_platform_doctor(
+    require_legacy_platform_doctor(
         http_request,
         request.doctor_id or "",
         request.agent_type,
     )
+    _assert_legacy_branch_authority(request, "regenerate")
     return _streaming_response_for_request(
         request,
         branch_mode="regenerate",
         source_message_id=request.source_message_id,
     )
+
+
+def _assert_legacy_branch_authority(request, branch_mode: str) -> None:
+    try:
+        get_chat_persistence_service().assert_legacy_branch_authority(
+            chat_id=request.conversation_id,
+            source_message_id=request.source_message_id,
+            branch_mode=branch_mode,
+            doctor_id=request.doctor_id or "",
+            agent_type=request.agent_type or "health",
+            patient_id=request.patient_id,
+        )
+    except LegacyBranchForbiddenError:
+        raise LegacyRouteError(403, "PLATFORM_DOCTOR_FORBIDDEN") from None
+    except LegacyBranchSourceInvalidError:
+        raise LegacyRouteError(409, "LEGACY_BRANCH_SOURCE_INVALID") from None

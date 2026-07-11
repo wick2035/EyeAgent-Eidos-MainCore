@@ -349,6 +349,49 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
             "\n".join(captured.output),
         )
 
+    def test_legacy_graph_exception_has_stable_public_error_and_safe_log(self):
+        persistence = PreparedPersistence()
+        persistence.finalized = None
+
+        def finalize(**kwargs):
+            persistence.finalized = kwargs
+            return True
+
+        persistence.update_assistant_final_status = finalize
+        manager = make_graph_manager(persistence)
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=SensitiveFailingStreamingGraph(),
+        ), self.assertLogs("agents.graph_manager", level="ERROR") as captured:
+            chunks = collect_async(manager.chat_stream_async(
+                patient_id=None,
+                doctor_id="660e8400-e29b-41d4-a716-446655440001",
+                session_id="s1",
+                message="科研问题",
+                role="doctor",
+                conversation_id="c1",
+                agent_type="research",
+            ))
+
+        self.assertEqual(
+            chunks[-1],
+            {
+                "type": "error",
+                "content": "对话暂时不可用，请稍后再试。",
+                "metadata": {"error_code": "CHAT_EXECUTION_FAILED"},
+            },
+        )
+        self.assertNotIn("UNTRUSTED_SENTINEL_FROM_ATTACHMENT", repr(chunks))
+        self.assertNotIn(
+            "UNTRUSTED_SENTINEL_FROM_ATTACHMENT",
+            "\n".join(captured.output),
+        )
+        self.assertEqual(
+            persistence.finalized["error_message"],
+            "CHAT_EXECUTION_FAILED",
+        )
+
     def test_prepared_stream_reuses_ids_without_public_or_persistence_terminals(self):
         class PreparedOnlyPersistence(BranchScopedPersistence):
             def prepare_normal_turn(self, **kwargs):
@@ -430,6 +473,15 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
             ))
 
         self.assertEqual(chunks[0]["type"], "error")
+        self.assertEqual(
+            chunks[0],
+            {
+                "type": "error",
+                "content": "对话暂时不可用，请稍后再试。",
+                "metadata": {"error_code": "CHAT_PERSISTENCE_FAILED"},
+            },
+        )
+        self.assertNotIn("prepare failed", repr(chunks))
         self.assertNotIn("detached answer", [chunk.get("content") for chunk in chunks])
 
     def test_unsafe_input_still_emits_start_with_prepared_message_ids(self):

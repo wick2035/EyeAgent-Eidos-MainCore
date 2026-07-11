@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Optional
 
@@ -17,6 +18,7 @@ from infrastructure.security.errors import (
     TokenValidationError,
 )
 from presentation.dependencies.security import (
+    INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY,
     get_current_principal,
     require_platform_doctor,
 )
@@ -222,6 +224,35 @@ class FailingVerifierFactory:
 
 
 class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
+    async def test_effective_mode_uses_server_only_scope_without_changing_state_contract(self):
+        cases = (
+            (InternalAuthMode.OFF, "/api/research/chat", "off"),
+            (InternalAuthMode.OBSERVE, "/api/research/chat", "observe"),
+            (InternalAuthMode.ENFORCE, "/api/chat", "observe"),
+        )
+
+        for configured_mode, path, expected_mode in cases:
+            with self.subTest(configured_mode=configured_mode, path=path):
+                app, middleware, _ = self._middleware(configured_mode)
+                scope = _scope(method="POST", path=path)
+
+                log_context = (
+                    self.assertLogs(_LOGGER_NAME, level=logging.WARNING)
+                    if configured_mode is not InternalAuthMode.OFF
+                    else nullcontext()
+                )
+                with log_context:
+                    await self._call(middleware, scope)
+
+                self.assertEqual(
+                    scope[INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY],
+                    expected_mode,
+                )
+                self.assertEqual(
+                    scope["state"],
+                    {"internal_principal": None},
+                )
+
     def _middleware(
         self,
         mode: InternalAuthMode,

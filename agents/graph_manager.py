@@ -44,6 +44,11 @@ from utils.transient_attachment_context import (
 
 logger = logging.getLogger(__name__)
 
+_PUBLIC_CHAT_ERROR_MESSAGE = "对话暂时不可用，请稍后再试。"
+_CHAT_EXECUTION_FAILED = "CHAT_EXECUTION_FAILED"
+_CHAT_PERSISTENCE_FAILED = "CHAT_PERSISTENCE_FAILED"
+_CHAT_SOURCE_INVALID = "CHAT_SOURCE_INVALID"
+
 
 PublicGraphChunk: TypeAlias = Dict[str, Any]
 
@@ -261,6 +266,7 @@ class GraphManager:
                 user_context = {
                     "stage": "greeting" if is_first else None,
                     "agent_type": agent_type,
+                    "patient_id": patient_id,
                 }
 
                 # 保存用户消息
@@ -390,7 +396,7 @@ class GraphManager:
                 try:
                     self.persistence.update_assistant_failed(
                         message_id=assistant_msg_id,
-                        error_message=str(e),
+                        error_message=_CHAT_EXECUTION_FAILED,
                     )
                     logger.debug("[GraphManager] 两阶段写入 - AI 回复标记失败")
                 except Exception as pe:
@@ -409,7 +415,7 @@ class GraphManager:
                 "stage": "error",
                 "is_completed": False,
                 "thread_id": thread_id,
-                "error": str(e),
+                "error_code": _CHAT_EXECUTION_FAILED,
             }
 
     def chat_stream(
@@ -494,6 +500,7 @@ class GraphManager:
                 user_context = {
                     "stage": "greeting" if is_first else None,
                     "agent_type": agent_type,
+                    "patient_id": patient_id,
                 }
 
                 self.persistence.save_user_message(
@@ -601,8 +608,8 @@ class GraphManager:
             )
             yield {
                 "type": "error",
-                "content": "抱歉，我遇到了一些技术问题，请稍后再试。",
-                "metadata": {"error": str(e)},
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_EXECUTION_FAILED},
             }
 
         # === 两阶段写入 - 第二阶段：流结束后保存完整回复 ===
@@ -611,7 +618,7 @@ class GraphManager:
                 if stream_error:
                     self.persistence.update_assistant_failed(
                         message_id=assistant_msg_id,
-                        error_message=str(stream_error),
+                        error_message=_CHAT_EXECUTION_FAILED,
                     )
                 else:
                     self.persistence.update_assistant_success(
@@ -782,8 +789,8 @@ class GraphManager:
         if branch_mode not in allowed_branch_modes:
             yield {
                 "type": "error",
-                "content": f"不支持的分支模式: {branch_mode}",
-                "metadata": {"error": "unsupported_branch_mode"},
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_SOURCE_INVALID},
             }
             return
 
@@ -792,8 +799,8 @@ class GraphManager:
             if not conversation_id or not source_message_id:
                 yield {
                     "type": "error",
-                    "content": "重新生成必须提供 conversation_id 和 source_message_id",
-                    "metadata": {"error": "missing_regenerate_source"},
+                    "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                    "metadata": {"error_code": _CHAT_SOURCE_INVALID},
                 }
                 return
             try:
@@ -811,15 +818,15 @@ class GraphManager:
                 )
                 yield {
                     "type": "error",
-                    "content": str(e),
-                    "metadata": {"error": str(e)},
+                    "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                    "metadata": {"error_code": _CHAT_SOURCE_INVALID},
                 }
                 return
         elif branch_mode == "edit" and not source_message_id:
             yield {
                 "type": "error",
-                "content": "编辑重发必须提供 source_message_id",
-                "metadata": {"error": "missing_edit_source"},
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_SOURCE_INVALID},
             }
             return
 
@@ -892,13 +899,21 @@ class GraphManager:
                         source_message_id=source_message_id,
                         content=message,
                         sender_id=sender_id,
-                        context={"stage": None, "agent_type": agent_type},
+                        context={
+                            "stage": None,
+                            "agent_type": agent_type,
+                            "patient_id": patient_id,
+                        },
                     )
                 elif branch_mode == "regenerate":
                     prepared_message_ids = self.persistence.prepare_regenerate_turn(
                         chat_id=conversation_id,
                         source_assistant_id=source_message_id,
-                        context={"stage": None, "agent_type": agent_type},
+                        context={
+                            "stage": None,
+                            "agent_type": agent_type,
+                            "patient_id": patient_id,
+                        },
                     )
                     prepared_message_ids.setdefault("user_message_id", regenerate_user_message_id)
                 else:
@@ -906,7 +921,11 @@ class GraphManager:
                         chat_id=conversation_id,
                         content=message,
                         sender_id=sender_id,
-                        context={"stage": "greeting" if is_first else None, "agent_type": agent_type},
+                        context={
+                            "stage": "greeting" if is_first else None,
+                            "agent_type": agent_type,
+                            "patient_id": patient_id,
+                        },
                         is_first_message=is_first,
                     )
                 assistant_message_id = prepared_message_ids.get("assistant_message_id")
@@ -934,8 +953,8 @@ class GraphManager:
                 )
                 yield {
                     "type": "error",
-                    "content": f"准备消息树节点失败: {str(e)}",
-                    "metadata": {"error": str(e)},
+                    "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                    "metadata": {"error_code": _CHAT_PERSISTENCE_FAILED},
                 }
                 return
 
@@ -1200,9 +1219,10 @@ class GraphManager:
             )
             yield {
                 "type": "error",
-                "content": "抱歉，我遇到了一些技术问题，请稍后再试。",
-                "metadata": {"error": str(e)},
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_EXECUTION_FAILED},
             }
+            return
 
         finally:
             # best-effort：取消或异常时，尽量把 running 占位推进到最终状态。
@@ -1214,7 +1234,11 @@ class GraphManager:
             ):
                 try:
                     final_status = "cancelled" if cancelled else "failed"
-                    error_message = "client disconnected" if cancelled else str(last_error)
+                    error_message = (
+                        "client disconnected"
+                        if cancelled
+                        else _CHAT_EXECUTION_FAILED
+                    )
                     self.persistence.update_assistant_final_status(
                         message_id=assistant_message_id,
                         status=final_status,

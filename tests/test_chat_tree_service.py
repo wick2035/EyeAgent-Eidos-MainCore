@@ -263,6 +263,28 @@ class FakeTreeService:
 
 
 class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
+    def test_user_context_persists_canonical_agent_and_patient_binding(self):
+        service = FakeTreeService()
+        adapter = MySQLPersistenceAdapter(service)
+
+        adapter.prepare_normal_turn(
+            "chat-1",
+            "科研问题",
+            "doctor-1",
+            {
+                "stage": "research",
+                "agent_type": "research",
+                "patient_id": None,
+            },
+        )
+
+        context = service.turns[0][2]
+        self.assertIsInstance(context, MessageContext)
+        self.assertEqual(
+            context.metadata,
+            {"agent_type": "research", "patient_id": None},
+        )
+
     def test_empty_first_message_does_not_update_conversation_title(self):
         service = FakeTreeService()
         adapter = MySQLPersistenceAdapter(service)
