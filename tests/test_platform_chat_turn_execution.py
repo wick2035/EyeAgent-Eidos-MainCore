@@ -17,6 +17,7 @@ from application.services.platform_attachment_analyzer import (
 from application.services.platform_chat_turn_execution_service import (
     ATTACHMENT_EXECUTE_MISMATCH,
     PlatformChatTurnExecutionService,
+    PlatformPrincipalError,
 )
 from domain.models.chat_turn_request import ChatTurnRequestEntity
 from domain.security.principal import CurrentPrincipal
@@ -227,13 +228,13 @@ class FakeGraphManager:
             self.closed += 1
 
 
-def principal(doctor_id="doctor-1"):
+def principal(doctor_id="doctor-1", scopes=None):
     return CurrentPrincipal(
         issuer="java",
         subject=doctor_id,
         principal_type="doctor",
         roles=frozenset({"doctor"}),
-        scopes=frozenset({"ai:chat"}),
+        scopes=frozenset(scopes or {"ai:chat"}),
         institution_id="inst-1",
         tenant_id="tenant-1",
         authorized_party="eye-agent-platform",
@@ -279,6 +280,17 @@ def turn_for(request):
         doctor_id=request.doctor_id,
         request_id=request.request_id,
         request_fingerprint=request.request_fingerprint,
+        protocol_version=request.version,
+        agent_type=request.agent_type or "health",
+        attachment_scope=request.attachment_scope or "patient",
+        research_options_json=(
+            json.dumps(
+                request.research_options.model_dump(mode="json"),
+                separators=(",", ":"),
+            )
+            if request.research_options is not None
+            else None
+        ),
         operation="normal",
         conversation_id=request.conversation_id,
         session_id=request.session_id,
@@ -366,6 +378,36 @@ async def collect(generator):
 
 
 class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_research_execute_requires_ai_research_scope(self):
+        request = execute_request(
+            "research-auth",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_web_search": False,
+                "types": [],
+            },
+        )
+        denied_service, _, _, _, _ = make_service([request])
+        with self.assertRaises(PlatformPrincipalError):
+            await collect(
+                denied_service.stream(
+                    request,
+                    principal(scopes={"ai:chat"}),
+                )
+            )
+
+        allowed_service, _, _, _, _ = make_service([request])
+        events = await collect(
+            allowed_service.stream(
+                request,
+                principal(scopes={"ai:research"}),
+            )
+        )
+        self.assertEqual(events[-1]["event"], "done")
+
     async def test_execute_mismatch_keeps_turn_prepared(self):
         prepared = execute_request()
         service, turns, _, graph, _ = make_service([prepared])
@@ -376,6 +418,53 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["error_code"], ATTACHMENT_EXECUTE_MISMATCH)
         self.assertEqual(turns.get("doctor-1", "request-1").status, "prepared")
         self.assertEqual(graph.calls, [])
+
+    async def test_execute_rejects_each_authoritative_v2_snapshot_mismatch(self):
+        request = execute_request(
+            "research",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_web_search": True,
+                "types": ["general", "pubmed"],
+            },
+        )
+        mismatches = {
+            "protocol_version": 1,
+            "agent_type": "health",
+            "attachment_scope": "patient",
+            "research_options_json": (
+                '{"enable_web_search":true,"types":["scholar"]}'
+            ),
+        }
+
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                service, turns, _, graph, _ = make_service([request])
+                setattr(
+                    turns.get("doctor-1", request.request_id),
+                    field,
+                    value,
+                )
+
+                events = await collect(
+                    service.stream(
+                        request,
+                        principal(scopes={"ai:chat", "ai:research"}),
+                    )
+                )
+
+                self.assertEqual(
+                    events[-1]["error_code"],
+                    ATTACHMENT_EXECUTE_MISMATCH,
+                )
+                self.assertEqual(
+                    turns.get("doctor-1", request.request_id).status,
+                    "prepared",
+                )
+                self.assertEqual(graph.calls, [])
 
     async def test_only_one_concurrent_execute_wins_prepared_to_streaming_cas(self):
         request = execute_request()

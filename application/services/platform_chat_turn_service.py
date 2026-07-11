@@ -120,6 +120,18 @@ class PlatformChatTurnService:
                     doctor_id=request.doctor_id,
                     request_id=request.request_id,
                     request_fingerprint=request.request_fingerprint,
+                    protocol_version=request.version,
+                    agent_type=request.agent_type or "health",
+                    attachment_scope=request.attachment_scope or "patient",
+                    research_options_json=(
+                        json.dumps(
+                            request.research_options.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if request.research_options is not None
+                        else None
+                    ),
                     operation=request.operation,
                     conversation_id=request.conversation_id,
                     session_id=request.session_id,

@@ -11,10 +11,14 @@ class ChatTurnRequestEntity(BaseModel):
     doctor_id: str
     request_id: str
     request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    protocol_version: int = Field(default=1, ge=1, le=2)
+    agent_type: str = "health"
+    attachment_scope: str = "patient"
+    research_options_json: Optional[str] = None
     operation: str
     conversation_id: str
     session_id: str
-    patient_id: str
+    patient_id: Optional[str]
     source_message_id: Optional[str] = None
     implicit_prompt_id: Optional[str] = None
     attachment_ids_json: str
@@ -37,4 +41,16 @@ class ChatTurnRequestEntity(BaseModel):
 
     @property
     def attachment_only(self) -> bool:
-        return self.implicit_prompt_id == "attachment-analysis-v1"
+        return self.implicit_prompt_id in {
+            "attachment-analysis-v1",
+            "research-document-analysis-v1",
+        }
+
+    @property
+    def research_options(self) -> Optional[dict]:
+        if self.research_options_json is None:
+            return None
+        value = json.loads(self.research_options_json)
+        if not isinstance(value, dict):
+            raise ValueError("research_options_json 必须是对象")
+        return value

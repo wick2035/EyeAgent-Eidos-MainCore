@@ -21,6 +21,7 @@ class DuplicateChatTurnRequestError(RuntimeError):
 class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
     _SELECT_COLUMNS = """
         doctor_id, request_id, request_fingerprint, operation,
+        protocol_version, agent_type, attachment_scope, research_options_json,
         conversation_id, session_id, patient_id, source_message_id,
         implicit_prompt_id, attachment_ids_json, user_message_id,
         assistant_message_id, previous_active_node_id, status, error_code,
@@ -65,13 +66,16 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
         sql = """
             INSERT INTO chat_turn_request (
                 doctor_id, request_id, request_fingerprint, operation,
+                protocol_version, agent_type, attachment_scope,
+                research_options_json,
                 conversation_id, session_id, patient_id, source_message_id,
                 implicit_prompt_id, attachment_ids_json, user_message_id,
                 assistant_message_id, previous_active_node_id, status, error_code,
                 execute_started_at, deadline_at, create_time, update_time
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             )
         """
         params = (
@@ -79,6 +83,10 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             entity.request_id,
             entity.request_fingerprint,
             entity.operation,
+            entity.protocol_version,
+            entity.agent_type,
+            entity.attachment_scope,
+            entity.research_options_json,
             entity.conversation_id,
             entity.session_id,
             entity.patient_id,
@@ -226,6 +234,10 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             doctor_id=row["doctor_id"],
             request_id=row["request_id"],
             request_fingerprint=row["request_fingerprint"],
+            protocol_version=row.get("protocol_version", 1),
+            agent_type=row.get("agent_type", "health"),
+            attachment_scope=row.get("attachment_scope", "patient"),
+            research_options_json=row.get("research_options_json"),
             operation=row["operation"],
             conversation_id=row["conversation_id"],
             session_id=row["session_id"],

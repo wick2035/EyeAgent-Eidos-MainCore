@@ -31,6 +31,7 @@ from infrastructure.repositories.chat_repository_impl import (
 from infrastructure.repositories.chat_turn_request_repository_impl import (
     get_chat_turn_request_repository,
 )
+from presentation.dependencies.security import scope_for_platform_agent
 from presentation.schemas.platform_chat_turn_schemas import (
     ExecutePlatformChatTurnRequest,
 )
@@ -135,7 +136,11 @@ class PlatformChatTurnExecutionService:
         request: ExecutePlatformChatTurnRequest,
         principal: CurrentPrincipal,
     ) -> AsyncGenerator[dict, None]:
-        self._require_principal(principal, request.doctor_id)
+        self._require_principal(
+            principal,
+            request.doctor_id,
+            request.agent_type or "health",
+        )
         try:
             self._validate_urls(request)
             turn, user_message = self._claim_prepared_turn(request, principal.subject)
@@ -533,10 +538,21 @@ class PlatformChatTurnExecutionService:
     def _assert_request_matches(entity, request) -> None:
         try:
             stored_attachment_ids = entity.attachment_ids
+            stored_research_options = entity.research_options
         except (TypeError, ValueError):
             raise _ExecuteRejected(ATTACHMENT_EXECUTE_MISMATCH)
+        request_research_options = (
+            request.research_options.model_dump(mode="json")
+            if request.research_options is not None
+            else None
+        )
         exact = (
             entity.request_fingerprint == request.request_fingerprint
+            and entity.protocol_version == request.version
+            and entity.agent_type == (request.agent_type or "health")
+            and entity.attachment_scope
+            == (request.attachment_scope or "patient")
+            and stored_research_options == request_research_options
             and entity.conversation_id == request.conversation_id
             and entity.session_id == request.session_id
             and entity.patient_id == request.patient_id
@@ -667,11 +683,15 @@ class PlatformChatTurnExecutionService:
         return conversation
 
     @staticmethod
-    def _require_principal(principal, doctor_id):
+    def _require_principal(principal, doctor_id, agent_type):
+        try:
+            required_scope = scope_for_platform_agent(agent_type)
+        except ValueError as exc:
+            raise PlatformPrincipalError("PLATFORM_DOCTOR_FORBIDDEN") from exc
         if (
             not isinstance(principal, CurrentPrincipal)
             or principal.principal_type != "doctor"
-            or "ai:chat" not in principal.scopes
+            or required_scope not in principal.scopes
             or principal.subject != doctor_id
         ):
             raise PlatformPrincipalError("PLATFORM_DOCTOR_FORBIDDEN")

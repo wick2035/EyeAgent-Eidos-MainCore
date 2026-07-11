@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 from application.services.chat_persistence_service import ChatPersistenceService
 from application.services.chat_turn_fingerprint import fingerprint_turn
@@ -20,12 +21,14 @@ from application.services.platform_chat_turn_service import (
     TurnAlreadyCompletedError,
 )
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
+from domain.models.chat_turn_request import ChatTurnRequestEntity
 from infrastructure.repositories.chat_turn_request_repository_impl import (
     ChatTurnRequestRepositoryImpl,
     DuplicateChatTurnRequestError,
 )
 from presentation.schemas.platform_chat_turn_schemas import (
     PreparePlatformChatTurnRequest,
+    ResearchOptionsV2,
 )
 
 
@@ -376,6 +379,43 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             attachment_ids=attachment_ids,
         )
 
+    def _research_request(self):
+        research_options = ResearchOptionsV2(
+            enable_web_search=True,
+            types=["scholar", "general", "general"],
+        )
+        payload = {
+            "version": 2,
+            "request_id": "request-research",
+            "operation": "normal",
+            "conversation_id": "conversation-1",
+            "session_id": "session-conversation-1",
+            "patient_id": None,
+            "doctor_id": "doctor-1",
+            "agent_type": "research",
+            "attachment_scope": "research",
+            "research_options": research_options,
+            "message": "",
+            "source_message_id": None,
+            "implicit_prompt_id": "research-document-analysis-v1",
+            "attachment_ids": ["attachment-1"],
+        }
+        payload["request_fingerprint"] = fingerprint_turn(
+            version=payload["version"],
+            operation=payload["operation"],
+            conversation_id=payload["conversation_id"],
+            session_id=payload["session_id"],
+            patient_id=payload["patient_id"],
+            message=payload["message"],
+            source_message_id=payload["source_message_id"],
+            implicit_prompt_id=payload["implicit_prompt_id"],
+            attachment_ids=payload["attachment_ids"],
+            agent_type=payload["agent_type"],
+            attachment_scope=payload["attachment_scope"],
+            research_options=research_options,
+        )
+        return PreparePlatformChatTurnRequest(**payload)
+
     def _seed_completed_legacy_turn(self):
         user, assistant = self.chat_service.create_turn(
             "conversation-1",
@@ -400,6 +440,31 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(len([item for item in visible if item.message_type == "user"]), 1)
         self.assertEqual(len([item for item in visible if item.message_type == "assistant"]), 1)
         self.assertEqual(len(self.turn_repo.items), 1)
+
+    def test_prepare_persists_authoritative_v2_research_snapshot(self):
+        self.service.prepare(self._research_request())
+
+        turn = self._stored_turn("request-research")
+        self.assertEqual(turn.protocol_version, 2)
+        self.assertEqual(turn.agent_type, "research")
+        self.assertEqual(turn.attachment_scope, "research")
+        self.assertIsNone(turn.patient_id)
+        self.assertEqual(
+            turn.research_options,
+            {
+                "enable_web_search": True,
+                "types": ["general", "scholar"],
+            },
+        )
+
+    def test_prepare_maps_v1_to_health_patient_snapshot(self):
+        self.service.prepare(self._request())
+
+        turn = self._stored_turn()
+        self.assertEqual(turn.protocol_version, 1)
+        self.assertEqual(turn.agent_type, "health")
+        self.assertEqual(turn.attachment_scope, "patient")
+        self.assertIsNone(turn.research_options)
 
     def test_prepare_rejects_same_request_with_different_fingerprint(self):
         self.service.prepare(self._request(message="第一次"))
@@ -777,6 +842,66 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
 
 
 class ChatTurnRequestRepositoryTest(unittest.TestCase):
+    def test_table_scripts_define_v2_snapshot_columns_and_nullable_patient(self):
+        project_root = Path(__file__).resolve().parents[1]
+        create_sql = (
+            project_root / "scripts/create_chat_turn_request_table.sql"
+        ).read_text(encoding="utf-8")
+        upgrade_path = (
+            project_root / "scripts/upgrade_chat_turn_request_v2_research.sql"
+        )
+        self.assertTrue(upgrade_path.exists())
+        upgrade_sql = upgrade_path.read_text(encoding="utf-8")
+
+        for column in (
+            "protocol_version",
+            "agent_type",
+            "attachment_scope",
+            "research_options_json",
+        ):
+            with self.subTest(column=column):
+                self.assertIn(column, create_sql)
+                self.assertIn(column, upgrade_sql)
+        self.assertIn("patient_id VARCHAR(36) NULL", create_sql)
+        self.assertIn("MODIFY COLUMN patient_id VARCHAR(36) NULL", upgrade_sql)
+
+    def test_insert_persists_v2_snapshot_columns(self):
+        db = RecordingDB()
+        repository = ChatTurnRequestRepositoryImpl(db)
+        entity = ChatTurnRequestEntity(
+            doctor_id="doctor-1",
+            request_id="request-1",
+            request_fingerprint="a" * 64,
+            protocol_version=2,
+            agent_type="research",
+            attachment_scope="research",
+            research_options_json=(
+                '{"enable_web_search":true,"types":["general"]}'
+            ),
+            operation="normal",
+            conversation_id="conversation-1",
+            session_id="session-1",
+            patient_id=None,
+            attachment_ids_json='["attachment-1"]',
+            user_message_id="user-1",
+            assistant_message_id="assistant-1",
+        )
+
+        repository.insert(entity)
+
+        normalized_sql = " ".join(db.sql.split())
+        self.assertIn(
+            "protocol_version, agent_type, attachment_scope, research_options_json",
+            normalized_sql,
+        )
+        self.assertIn(
+            (2, "research", "research", entity.research_options_json),
+            tuple(
+                db.params[index:index + 4]
+                for index in range(len(db.params) - 3)
+            ),
+        )
+
     def test_compare_and_set_status_puts_expected_statuses_in_where(self):
         db = RecordingDB()
         repository = ChatTurnRequestRepositoryImpl(db)

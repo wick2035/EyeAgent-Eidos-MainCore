@@ -23,6 +23,7 @@ from domain.security.principal import CurrentPrincipal
 from presentation.dependencies.security import (
     get_current_principal,
     require_platform_doctor,
+    require_platform_doctor_subject,
 )
 from presentation.schemas.platform_chat_turn_schemas import (
     AbortPlatformChatTurnRequest,
@@ -41,12 +42,31 @@ def get_platform_chat_turn_service() -> PlatformChatTurnService:
     return PlatformChatTurnService()
 
 
-def _require_principal(request: Request, doctor_id: str | None = None) -> CurrentPrincipal:
+def _require_subject(
+    request: Request,
+    doctor_id: str | None = None,
+) -> CurrentPrincipal:
     principal = get_current_principal(request)
     if principal is None:
         # 复用统一的 401 错误结构。
-        return require_platform_doctor(request, doctor_id or "")
-    return require_platform_doctor(request, doctor_id or principal.subject)
+        return require_platform_doctor_subject(request, doctor_id or "")
+    return require_platform_doctor_subject(
+        request,
+        doctor_id or principal.subject,
+    )
+
+
+def _require_principal(
+    request: Request,
+    doctor_id: str | None = None,
+    agent_type: str | None = "health",
+) -> CurrentPrincipal:
+    principal = _require_subject(request, doctor_id)
+    return require_platform_doctor(
+        request,
+        doctor_id or principal.subject,
+        agent_type,
+    )
 
 
 @router.post("/prepare", response_model=PreparePlatformChatTurnResponse)
@@ -55,7 +75,11 @@ async def prepare_platform_chat_turn(
     request: Request,
     service: PlatformChatTurnService = Depends(get_platform_chat_turn_service),
 ) -> PreparePlatformChatTurnResponse:
-    _require_principal(request, payload.doctor_id)
+    _require_principal(
+        request,
+        payload.doctor_id,
+        payload.agent_type or "health",
+    )
     try:
         return service.prepare(payload)
     except ChatTurnNotFoundError as exc:
@@ -74,7 +98,11 @@ async def execute_platform_chat_turn(
         get_platform_chat_turn_execution_service
     ),
 ) -> StreamingResponse:
-    principal = _require_principal(request, payload.doctor_id)
+    principal = _require_principal(
+        request,
+        payload.doctor_id,
+        payload.agent_type or "health",
+    )
 
     async def stream_sse() -> AsyncGenerator[str, None]:
         execution = service.stream(payload, principal)
@@ -104,8 +132,14 @@ async def get_platform_chat_turn_status(
     request: Request,
     service: PlatformChatTurnService = Depends(get_platform_chat_turn_service),
 ) -> PlatformChatTurnStatusResponse:
-    principal = _require_principal(request)
+    principal = _require_subject(request)
     try:
+        entity = service.assert_turn_conversation(
+            principal.subject,
+            request_id,
+            None,
+        )
+        _require_principal(request, principal.subject, entity.agent_type)
         return service.status(principal.subject, request_id)
     except ChatTurnNotFoundError as exc:
         raise _http_error(404, exc.code) from exc
@@ -119,14 +153,15 @@ async def abort_platform_chat_turn(
     service: PlatformChatTurnService = Depends(get_platform_chat_turn_service),
     registry: ChatTurnExecutionRegistry = Depends(get_chat_turn_execution_registry),
 ) -> AbortPlatformChatTurnResponse:
-    principal = _require_principal(request, payload.doctor_id)
+    principal = _require_subject(request, payload.doctor_id)
     try:
         # 先用 principal subject + conversation 做完整归属校验，成功后才发进程内信号。
-        service.assert_turn_conversation(
+        entity = service.assert_turn_conversation(
             principal.subject,
             request_id,
             payload.conversation_id,
         )
+        _require_principal(request, principal.subject, entity.agent_type)
         registry.signal(principal.subject, request_id)
         result = service.abort(
             principal.subject,

@@ -12,11 +12,14 @@ class TurnFingerprintSource(Protocol):
     operation: str
     conversation_id: str
     session_id: str
-    patient_id: str
+    patient_id: str | None
     message: str
     source_message_id: str | None
     implicit_prompt_id: str | None
     attachment_ids: list[str]
+    agent_type: str | None
+    attachment_scope: str | None
+    research_options: Any
 
 
 def normalize_message(message: str) -> str:
@@ -30,13 +33,16 @@ def canonical_turn_payload(
     operation: str,
     conversation_id: str,
     session_id: str,
-    patient_id: str,
+    patient_id: str | None,
     message: str,
     source_message_id: str | None,
     implicit_prompt_id: str | None,
     attachment_ids: list[str],
+    agent_type: str | None = None,
+    attachment_scope: str | None = None,
+    research_options: Any = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "version": version,
         "operation": operation,
         "conversation_id": conversation_id,
@@ -47,6 +53,15 @@ def canonical_turn_payload(
         "implicit_prompt_id": implicit_prompt_id,
         "attachment_ids": list(attachment_ids),
     }
+    if version == 2:
+        if hasattr(research_options, "model_dump"):
+            research_options = research_options.model_dump(mode="json")
+        payload.update(
+            agent_type=agent_type,
+            attachment_scope=attachment_scope,
+            research_options=research_options,
+        )
+    return payload
 
 
 def canonical_turn_json(
@@ -54,11 +69,14 @@ def canonical_turn_json(
     operation: str,
     conversation_id: str,
     session_id: str,
-    patient_id: str,
+    patient_id: str | None,
     message: str,
     source_message_id: str | None,
     implicit_prompt_id: str | None,
     attachment_ids: list[str],
+    agent_type: str | None = None,
+    attachment_scope: str | None = None,
+    research_options: Any = None,
 ) -> str:
     payload = canonical_turn_payload(
         version=version,
@@ -70,6 +88,9 @@ def canonical_turn_json(
         source_message_id=source_message_id,
         implicit_prompt_id=implicit_prompt_id,
         attachment_ids=attachment_ids,
+        agent_type=agent_type,
+        attachment_scope=attachment_scope,
+        research_options=research_options,
     )
     return json.dumps(
         payload,
@@ -84,11 +105,14 @@ def fingerprint_turn(
     operation: str,
     conversation_id: str,
     session_id: str,
-    patient_id: str,
+    patient_id: str | None,
     message: str,
     source_message_id: str | None,
     implicit_prompt_id: str | None,
     attachment_ids: list[str],
+    agent_type: str | None = None,
+    attachment_scope: str | None = None,
+    research_options: Any = None,
 ) -> str:
     canonical = canonical_turn_json(
         version=version,
@@ -100,6 +124,9 @@ def fingerprint_turn(
         source_message_id=source_message_id,
         implicit_prompt_id=implicit_prompt_id,
         attachment_ids=attachment_ids,
+        agent_type=agent_type,
+        attachment_scope=attachment_scope,
+        research_options=research_options,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -115,4 +142,7 @@ def fingerprint_turn_from_request(request: TurnFingerprintSource) -> str:
         source_message_id=request.source_message_id,
         implicit_prompt_id=request.implicit_prompt_id,
         attachment_ids=request.attachment_ids,
+        agent_type=getattr(request, "agent_type", None),
+        attachment_scope=getattr(request, "attachment_scope", None),
+        research_options=getattr(request, "research_options", None),
     )

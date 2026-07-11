@@ -7,26 +7,32 @@ from starlette.requests import Request
 from application.services.chat_turn_execution_registry import (
     ChatTurnExecutionRegistry,
 )
+from application.services.chat_turn_fingerprint import fingerprint_turn
 from domain.security.principal import CurrentPrincipal
 from presentation.routers.platform_chat_turn_router import (
     abort_platform_chat_turn,
+    execute_platform_chat_turn,
     get_platform_chat_turn_status,
+    prepare_platform_chat_turn,
     router,
 )
 from presentation.schemas.platform_chat_turn_schemas import (
     AbortPlatformChatTurnRequest,
     AbortPlatformChatTurnResponse,
+    ExecutePlatformChatTurnRequest,
     PlatformChatTurnStatusResponse,
+    PreparePlatformChatTurnRequest,
+    PreparePlatformChatTurnResponse,
 )
 
 
-def principal(doctor_id="doctor-1"):
+def principal(doctor_id="doctor-1", scopes=None):
     return CurrentPrincipal(
         issuer="java",
         subject=doctor_id,
         principal_type="doctor",
         roles=frozenset({"doctor"}),
-        scopes=frozenset({"ai:chat"}),
+        scopes=frozenset(scopes or {"ai:chat"}),
         institution_id="inst-1",
         tenant_id="tenant-1",
         authorized_party="eye-agent-platform",
@@ -60,11 +66,24 @@ def starlette_request(identity=None):
 class FakeTurnService:
     def __init__(self):
         self.status_calls = []
+        self.access_calls = []
         self.abort_calls = []
+        self.prepare_calls = []
         self.entity = SimpleNamespace(
             doctor_id="doctor-1",
             request_id="request-1",
             conversation_id="conversation-1",
+            agent_type="health",
+        )
+
+    def prepare(self, payload):
+        self.prepare_calls.append(payload)
+        return PreparePlatformChatTurnResponse(
+            request_id=payload.request_id,
+            request_fingerprint=payload.request_fingerprint,
+            status="prepared",
+            attachment_only=payload.attachment_only,
+            implicit_prompt_id=payload.implicit_prompt_id,
         )
 
     def status(self, doctor_id, request_id):
@@ -89,9 +108,12 @@ class FakeTurnService:
         return None
 
     def assert_turn_conversation(self, doctor_id, request_id, conversation_id):
-        self.status(doctor_id, request_id)
+        self.access_calls.append((doctor_id, request_id, conversation_id))
         entity = self._get_turn(doctor_id, request_id)
-        if entity is None or entity.conversation_id != conversation_id:
+        if entity is None or (
+            conversation_id is not None
+            and entity.conversation_id != conversation_id
+        ):
             from application.services.platform_chat_turn_service import ChatTurnNotFoundError
 
             raise ChatTurnNotFoundError()
@@ -106,7 +128,150 @@ class FakeTurnService:
         )
 
 
+def research_prepare_request():
+    payload = {
+        "version": 2,
+        "request_id": "request-research",
+        "operation": "normal",
+        "conversation_id": "conversation-1",
+        "session_id": "session-1",
+        "patient_id": None,
+        "doctor_id": "doctor-1",
+        "agent_type": "research",
+        "attachment_scope": "research",
+        "research_options": {
+            "enable_web_search": False,
+            "types": [],
+        },
+        "message": "研究附件",
+        "source_message_id": None,
+        "implicit_prompt_id": None,
+        "attachment_ids": ["attachment-1"],
+    }
+    payload["request_fingerprint"] = fingerprint_turn(
+        version=payload["version"],
+        operation=payload["operation"],
+        conversation_id=payload["conversation_id"],
+        session_id=payload["session_id"],
+        patient_id=payload["patient_id"],
+        message=payload["message"],
+        source_message_id=payload["source_message_id"],
+        implicit_prompt_id=payload["implicit_prompt_id"],
+        attachment_ids=payload["attachment_ids"],
+        agent_type=payload["agent_type"],
+        attachment_scope=payload["attachment_scope"],
+        research_options=payload["research_options"],
+    )
+    return PreparePlatformChatTurnRequest(**payload)
+
+
+def research_execute_request():
+    return ExecutePlatformChatTurnRequest(
+        version=2,
+        request_id="request-research",
+        request_fingerprint="a" * 64,
+        conversation_id="conversation-1",
+        session_id="session-1",
+        patient_id=None,
+        doctor_id="doctor-1",
+        agent_type="research",
+        attachment_scope="research",
+        research_options={
+            "enable_web_search": False,
+            "types": [],
+        },
+        user_message_id="user-1",
+        assistant_message_id="assistant-1",
+        attachments=[
+            {
+                "attachment_id": "attachment-1",
+                "file_type": "image",
+                "filename": "research.png",
+                "mime_type": "image/png",
+                "size_bytes": 1024,
+                "page_count": None,
+                "content_sha256": "b" * 64,
+                "document_version": 1,
+                "analysis_attempt_id": "attempt-1",
+                "download_url": "https://storage.example/file",
+            }
+        ],
+    )
+
+
 class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_and_execute_research_require_ai_research_scope(self):
+        service = FakeTurnService()
+        with self.assertRaises(HTTPException) as prepare_error:
+            await prepare_platform_chat_turn(
+                research_prepare_request(),
+                starlette_request(principal(scopes={"ai:chat"})),
+                service,
+            )
+        self.assertEqual(prepare_error.exception.status_code, 403)
+        self.assertEqual(service.prepare_calls, [])
+
+        with self.assertRaises(HTTPException) as execute_error:
+            await execute_platform_chat_turn(
+                research_execute_request(),
+                starlette_request(principal(scopes={"ai:chat"})),
+                SimpleNamespace(),
+            )
+        self.assertEqual(execute_error.exception.status_code, 403)
+
+        response = await prepare_platform_chat_turn(
+            research_prepare_request(),
+            starlette_request(principal(scopes={"ai:research"})),
+            service,
+        )
+        self.assertEqual(response.status, "prepared")
+
+    async def test_status_research_scope_comes_from_persisted_turn(self):
+        service = FakeTurnService()
+        service.entity.agent_type = "research"
+
+        with self.assertRaises(HTTPException) as caught:
+            await get_platform_chat_turn_status(
+                "request-1",
+                starlette_request(principal(scopes={"ai:chat"})),
+                service,
+            )
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(
+            service.access_calls,
+            [("doctor-1", "request-1", None)],
+        )
+        self.assertEqual(service.status_calls, [])
+
+        response = await get_platform_chat_turn_status(
+            "request-1",
+            starlette_request(principal(scopes={"ai:research"})),
+            service,
+        )
+        self.assertEqual(response.status, "streaming")
+
+    async def test_abort_research_scope_is_checked_before_signal(self):
+        service = FakeTurnService()
+        service.entity.agent_type = "research"
+        registry = ChatTurnExecutionRegistry()
+        registered = registry.register("doctor-1", "request-1")
+
+        with self.assertRaises(HTTPException) as caught:
+            await abort_platform_chat_turn(
+                "request-1",
+                AbortPlatformChatTurnRequest(
+                    conversation_id="conversation-1",
+                    doctor_id="doctor-1",
+                ),
+                starlette_request(principal(scopes={"ai:chat"})),
+                service,
+                registry,
+            )
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertFalse(registered.is_set())
+        self.assertEqual(service.abort_calls, [])
+
     def test_router_exposes_only_the_four_approved_platform_routes(self):
         routes = {
             (route.path, tuple(sorted(route.methods or ())))
@@ -151,6 +316,10 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
             service,
         )
 
+        self.assertEqual(
+            service.access_calls,
+            [("doctor-1", "request-1", None)],
+        )
         self.assertEqual(service.status_calls, [("doctor-1", "request-1")])
 
     async def test_abort_rejects_conversation_mismatch(self):
@@ -213,7 +382,11 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(caught.exception.status_code, 404)
-        self.assertEqual(service.status_calls, [("doctor-1", "request-1")])
+        self.assertEqual(
+            service.access_calls,
+            [("doctor-1", "request-1", "conversation-1")],
+        )
+        self.assertEqual(service.status_calls, [])
         self.assertEqual(service.abort_calls, [])
 
 

@@ -1,4 +1,5 @@
 import json
+import inspect
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from application.services.chat_turn_fingerprint import (
     canonical_turn_json,
     fingerprint_turn,
 )
+import presentation.schemas.platform_chat_turn_schemas as turn_schemas
 from presentation.schemas.platform_chat_turn_schemas import (
     AbortPlatformChatTurnRequest,
     AbortPlatformChatTurnResponse,
@@ -74,11 +76,129 @@ def valid_prepare(**overrides):
         source_message_id=payload["source_message_id"],
         implicit_prompt_id=payload["implicit_prompt_id"],
         attachment_ids=payload["attachment_ids"],
+        agent_type=payload.get("agent_type"),
+        attachment_scope=payload.get("attachment_scope"),
+        research_options=payload.get("research_options"),
     )
     return payload
 
 
+def valid_execute(**overrides):
+    payload = {
+        "request_id": "turn-request-1",
+        "request_fingerprint": "1" * 64,
+        "conversation_id": "conversation-1",
+        "session_id": "session-1",
+        "patient_id": "patient-1",
+        "doctor_id": "doctor:42",
+        "user_message_id": "message-user-1",
+        "assistant_message_id": "message-assistant-1",
+        "attachments": [valid_descriptor()],
+    }
+    payload.update(overrides)
+    return payload
+
+
 class PlatformChatTurnSchemaTest(unittest.TestCase):
+    def test_fingerprint_matches_v2_health_and_research_fixtures(self):
+        self.assertIn(
+            "agent_type",
+            inspect.signature(canonical_turn_json).parameters,
+        )
+        fixture = load_fixture("attachment_turn_fingerprint_v2.json")
+
+        for name, vector in fixture.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    canonical_turn_json(**vector["input"]),
+                    vector["canonical_json"],
+                )
+                self.assertEqual(
+                    fingerprint_turn(**vector["input"]),
+                    vector["sha256"],
+                )
+
+    def test_research_options_normalize_types_and_disable_clears_them(self):
+        options_type = getattr(turn_schemas, "ResearchOptionsV2", None)
+        self.assertIsNotNone(options_type)
+        enabled = options_type(
+            enable_web_search=True,
+            types=["scholar", "general", "pubmed", "general"],
+        )
+        disabled = options_type(
+            enable_web_search=False,
+            types=["pubmed"],
+        )
+
+        self.assertEqual(enabled.types, ["general", "pubmed", "scholar"])
+        self.assertEqual(disabled.types, [])
+
+    def test_v2_prepare_requires_and_validates_agent_contract(self):
+        self.assertIn(
+            "agent_type",
+            inspect.signature(fingerprint_turn).parameters,
+        )
+        base = valid_prepare(
+            version=2,
+            patient_id="patient-1",
+            message="",
+            implicit_prompt_id="attachment-analysis-v1",
+            agent_type="health",
+            attachment_scope="patient",
+            research_options=None,
+        )
+
+        health = PreparePlatformChatTurnRequest(**base)
+        self.assertEqual(health.agent_type, "health")
+        for field in (
+            "patient_id",
+            "doctor_id",
+            "agent_type",
+            "attachment_scope",
+            "research_options",
+        ):
+            with self.subTest(missing=field):
+                payload = dict(base)
+                payload.pop(field)
+                with self.assertRaises(ValidationError):
+                    PreparePlatformChatTurnRequest(**payload)
+
+        invalid = dict(base)
+        invalid["agent_type"] = "research"
+        with self.assertRaises(ValidationError):
+            PreparePlatformChatTurnRequest(**invalid)
+
+    def test_v2_execute_requires_and_validates_agent_contract(self):
+        base = valid_execute(
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_web_search": True,
+                "types": ["scholar", "general", "general"],
+            },
+        )
+
+        research = ExecutePlatformChatTurnRequest(**base)
+        self.assertEqual(research.research_options.types, ["general", "scholar"])
+        for field in (
+            "patient_id",
+            "doctor_id",
+            "agent_type",
+            "attachment_scope",
+            "research_options",
+        ):
+            with self.subTest(missing=field):
+                payload = dict(base)
+                payload.pop(field)
+                with self.assertRaises(ValidationError):
+                    ExecutePlatformChatTurnRequest(**payload)
+
+        invalid = dict(base)
+        invalid["attachment_scope"] = "patient"
+        with self.assertRaises(ValidationError):
+            ExecutePlatformChatTurnRequest(**invalid)
     def test_fingerprint_matches_v1_fixture(self):
         fixture = load_fixture("attachment_turn_fingerprint_v1.json")
         self.assertEqual(
@@ -197,6 +317,73 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValidationError):
                     InternalAttachmentDescriptor(**payload)
+
+    def test_pdf_descriptor_schema_allows_up_to_one_hundred_pages(self):
+        descriptor = InternalAttachmentDescriptor(
+            **valid_descriptor(
+                file_type="pdf",
+                mime_type="application/pdf",
+                page_count=100,
+            )
+        )
+
+        self.assertEqual(descriptor.page_count, 100)
+
+    def test_execute_applies_scope_specific_pdf_page_limits(self):
+        patient_pdf = valid_descriptor(
+            file_type="pdf",
+            mime_type="application/pdf",
+            page_count=9,
+        )
+        with self.assertRaises(ValidationError):
+            ExecutePlatformChatTurnRequest(
+                **valid_execute(attachments=[patient_pdf])
+            )
+
+        research_base = {
+            "version": 2,
+            "patient_id": None,
+            "agent_type": "research",
+            "attachment_scope": "research",
+            "research_options": {
+                "enable_web_search": False,
+                "types": [],
+            },
+        }
+        accepted = ExecutePlatformChatTurnRequest(
+            **valid_execute(
+                **research_base,
+                attachments=[
+                    valid_descriptor(
+                        file_type="pdf",
+                        mime_type="application/pdf",
+                        page_count=100,
+                    )
+                ],
+            )
+        )
+        self.assertEqual(accepted.attachments[0].page_count, 100)
+
+        with self.assertRaises(ValidationError):
+            ExecutePlatformChatTurnRequest(
+                **valid_execute(
+                    **research_base,
+                    attachments=[
+                        valid_descriptor(
+                            attachment_id="att-1",
+                            file_type="pdf",
+                            mime_type="application/pdf",
+                            page_count=61,
+                        ),
+                        valid_descriptor(
+                            attachment_id="att-2",
+                            file_type="pdf",
+                            mime_type="application/pdf",
+                            page_count=60,
+                        ),
+                    ],
+                )
+            )
 
     def test_execute_rejects_attachment_total_over_forty_mib(self):
         attachments = [
