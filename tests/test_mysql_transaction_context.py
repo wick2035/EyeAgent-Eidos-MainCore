@@ -1,5 +1,7 @@
 import unittest
 
+import pymysql
+
 from infrastructure.database.mysql_connection import MySQLConnectionPool
 
 
@@ -12,6 +14,8 @@ class FakeCursor:
         self.connection.statements.append((sql, params))
         if sql == "FAIL":
             raise RuntimeError("second write failed")
+        if sql == "DEADLOCK":
+            raise pymysql.err.OperationalError(1213, "deadlock found")
         return 1
 
     def close(self):
@@ -113,6 +117,23 @@ class MySQLTransactionContextTest(unittest.TestCase):
 
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
+
+    def test_deadlock_inside_transaction_is_not_retried_per_statement(self):
+        connection = FakeConnection()
+        db = FakeMySQLConnectionPool(connection)
+
+        with self.assertRaises(pymysql.err.OperationalError) as raised:
+            with db.transaction():
+                db.execute("INSERT", ("first",))
+                db.execute("DEADLOCK", ("second",))
+
+        self.assertEqual(raised.exception.args[0], 1213)
+        self.assertEqual(connection.statements, [
+            ("INSERT", ("first",)),
+            ("DEADLOCK", ("second",)),
+        ])
+        self.assertEqual(connection.commit_calls, 0)
+        self.assertEqual(connection.rollback_calls, 1)
 
 
 if __name__ == "__main__":

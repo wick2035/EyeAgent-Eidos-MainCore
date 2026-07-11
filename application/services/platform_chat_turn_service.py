@@ -257,6 +257,57 @@ class PlatformChatTurnService:
             error_code=None,
         )
 
+    def expire_stale_turns(self, now: Optional[datetime] = None) -> int:
+        """在会话行锁下修复过期回合及其消息树。"""
+        now = now or datetime.now()
+        expired_count = 0
+        for candidate in self.turn_repo.list_stale(now):
+            with self.db.transaction():
+                self._lock_conversation(candidate.conversation_id)
+                entity = self.turn_repo.get_for_update(
+                    candidate.doctor_id,
+                    candidate.request_id,
+                )
+                if (
+                    entity is None
+                    or entity.status not in ("prepared", "streaming")
+                    or entity.deadline_at is None
+                    or entity.deadline_at > now
+                ):
+                    continue
+                current_status = entity.status
+                changed = self.turn_repo.compare_and_set_status(
+                    entity.doctor_id,
+                    entity.request_id,
+                    current_status,
+                    "cancelled",
+                    error_code="TURN_EXPIRED",
+                )
+                if not changed:
+                    continue
+
+                if current_status == "prepared":
+                    if entity.operation != "regenerate":
+                        self._require_message_update(
+                            entity.user_message_id,
+                            {"status": "cancelled", "deleted": True},
+                        )
+                    self._require_message_update(
+                        entity.assistant_message_id,
+                        {"status": "cancelled", "deleted": True},
+                    )
+                    self._restore_active_node_with_cas(entity)
+                else:
+                    self._require_message_update(
+                        entity.assistant_message_id,
+                        {
+                            "status": "cancelled",
+                            "error_message": "TURN_EXPIRED",
+                        },
+                    )
+                expired_count += 1
+        return expired_count
+
     def _mark_terminal(
         self,
         doctor_id: str,

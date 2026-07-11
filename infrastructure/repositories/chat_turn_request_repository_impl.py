@@ -174,19 +174,23 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
         )
         return self._row_to_entity(row) if row else None
 
-    def expire_stale_turns(self, now: Optional[datetime] = None) -> int:
+    def list_stale(
+        self,
+        now: Optional[datetime] = None,
+    ) -> list[ChatTurnRequestEntity]:
         now = now or datetime.now()
-        return self.db.execute(
-            """
-                UPDATE chat_turn_request
-                SET status = 'cancelled', error_code = 'TURN_EXPIRED',
-                    update_time = %s
+        rows = self.db.fetch_all(
+            f"""
+                SELECT {self._SELECT_COLUMNS}
+                FROM chat_turn_request
                 WHERE status IN ('prepared', 'streaming')
                   AND deadline_at IS NOT NULL
                   AND deadline_at <= %s
+                ORDER BY deadline_at ASC
             """,
-            (now, now),
+            (now,),
         )
+        return [self._row_to_entity(row) for row in rows]
 
     @staticmethod
     def _is_duplicate_error(error: Exception) -> bool:

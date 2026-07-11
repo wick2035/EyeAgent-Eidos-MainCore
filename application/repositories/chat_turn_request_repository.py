@@ -50,5 +50,8 @@ class ChatTurnRequestRepository(ABC):
         pass
 
     @abstractmethod
-    def expire_stale_turns(self, now: Optional[datetime] = None) -> int:
+    def list_stale(
+        self,
+        now: Optional[datetime] = None,
+    ) -> list[ChatTurnRequestEntity]:
         pass

@@ -1,4 +1,5 @@
 import json
+import copy
 import threading
 import unittest
 import uuid
@@ -33,6 +34,38 @@ class FakeDB:
         yield
 
 
+class SnapshotFakeDB:
+    def __init__(self):
+        self.repositories = ()
+        self.depth = 0
+        self.rollback_calls = 0
+
+    def bind(self, *repositories):
+        self.repositories = repositories
+
+    @contextmanager
+    def transaction(self):
+        if self.depth:
+            self.depth += 1
+            try:
+                yield
+            finally:
+                self.depth -= 1
+            return
+
+        snapshots = [copy.deepcopy(repo.items) for repo in self.repositories]
+        self.depth = 1
+        try:
+            yield
+        except Exception:
+            for repository, snapshot in zip(self.repositories, snapshots):
+                repository.items = snapshot
+            self.rollback_calls += 1
+            raise
+        finally:
+            self.depth = 0
+
+
 class RecordingDB:
     def __init__(self):
         self.sql = None
@@ -49,6 +82,8 @@ class FakeConversationRepository:
         self.items = {}
         self.title_updates = []
         self._lock = threading.Lock()
+        self.fail_active_node_update = False
+        self.lock_calls = []
 
     def create(self, conversation):
         self.items[conversation.id] = conversation
@@ -58,9 +93,12 @@ class FakeConversationRepository:
         return self.items.get(conversation_id)
 
     def lock_by_id(self, conversation_id):
+        self.lock_calls.append(conversation_id)
         return self.get_by_id(conversation_id)
 
     def update_active_node(self, conversation_id, active_node_id):
+        if self.fail_active_node_update:
+            return False
         with self._lock:
             self.items[conversation_id].active_node_id = active_node_id
         return True
@@ -226,21 +264,18 @@ class FakeChatTurnRequestRepository:
             ]
             return max(active, key=lambda entity: entity.create_time, default=None)
 
-    def expire_stale_turns(self, now=None):
+    def list_stale(self, now=None):
         now = now or datetime.now()
-        count = 0
         with self._lock:
-            for entity in self.items.values():
+            return [
+                entity
+                for entity in self.items.values()
                 if (
                     entity.status in ("prepared", "streaming")
                     and entity.deadline_at is not None
                     and entity.deadline_at <= now
-                ):
-                    entity.status = "cancelled"
-                    entity.error_code = "TURN_EXPIRED"
-                    entity.update_time = now
-                    count += 1
-        return count
+                )
+            ]
 
 
 class PlatformChatTurnServiceTest(unittest.TestCase):
@@ -602,6 +637,134 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         second = self.service.abort("doctor-1", "request-1")
 
         self.assertEqual(first, second)
+
+    def test_prepare_active_node_failure_rolls_back_messages_and_turn(self):
+        db = SnapshotFakeDB()
+        conversation_repo = FakeConversationRepository()
+        message_repo = FakeMessageRepository()
+        turn_repo = FakeChatTurnRequestRepository()
+        db.bind(conversation_repo, message_repo, turn_repo)
+        guard = ConversationActivityGuard(turn_repo, message_repo)
+        chat_service = ChatPersistenceService(
+            conversation_repo,
+            message_repo,
+            db=db,
+            activity_guard=guard,
+        )
+        service = PlatformChatTurnService(
+            db=db,
+            turn_repo=turn_repo,
+            conversation_repo=conversation_repo,
+            message_repo=message_repo,
+            chat_persistence_service=chat_service,
+            activity_guard=guard,
+        )
+        now = datetime.now()
+        conversation_repo.create(ChatConversationEntity(
+            id="conversation-1",
+            user_type="doctor",
+            host_id="doctor-1",
+            title="新对话",
+            active_node_id="root-1",
+            create_time=now,
+            update_time=now,
+        ))
+        message_repo.create(ChatMessageEntity(
+            id="root-1",
+            chat_id="conversation-1",
+            parent_id=None,
+            siblings_group_id=None,
+            message_order=1,
+            message_content="",
+            message_type="root",
+            status="success",
+            create_time=now,
+            update_time=now,
+        ))
+        conversation_repo.fail_active_node_update = True
+
+        with self.assertRaisesRegex(RuntimeError, "active_node_id"):
+            service.prepare(self._request())
+
+        self.assertEqual(
+            [item.message_type for item in message_repo.items.values()],
+            ["root"],
+        )
+        self.assertEqual(turn_repo.items, {})
+        self.assertEqual(conversation_repo.items["conversation-1"].active_node_id, "root-1")
+        self.assertEqual(db.rollback_calls, 1)
+
+    def test_expired_prepared_turn_repairs_tree_and_allows_next_prepare(self):
+        self.service.prepare(self._request())
+        expired = self._stored_turn()
+        now = datetime.now()
+        expired.deadline_at = now
+
+        self.assertEqual(self.service.expire_stale_turns(now), 1)
+
+        self.assertEqual(expired.status, "cancelled")
+        self.assertEqual(expired.error_code, "TURN_EXPIRED")
+        self.assertTrue(self.message_repo.items[expired.user_message_id].deleted)
+        self.assertTrue(self.message_repo.items[expired.assistant_message_id].deleted)
+        self.assertEqual(
+            self.conversation_repo.get_by_id("conversation-1").active_node_id,
+            self.root_ids["conversation-1"],
+        )
+        prepared = self.service.prepare(self._request(request_id="request-2"))
+        self.assertEqual(prepared.status, "prepared")
+        self.assertGreaterEqual(
+            self.conversation_repo.lock_calls.count("conversation-1"),
+            2,
+        )
+
+    def test_expired_streaming_turn_cancels_assistant_and_unblocks_conversation(self):
+        self.service.prepare(self._request())
+        expired = self._stored_turn()
+        self.turn_repo.compare_and_set_status(
+            "doctor-1", "request-1", "prepared", "streaming"
+        )
+        now = datetime.now()
+        expired.deadline_at = now
+
+        self.assertEqual(self.service.expire_stale_turns(now), 1)
+
+        user = self.message_repo.items[expired.user_message_id]
+        assistant = self.message_repo.items[expired.assistant_message_id]
+        self.assertEqual(expired.status, "cancelled")
+        self.assertEqual(expired.error_code, "TURN_EXPIRED")
+        self.assertFalse(user.deleted)
+        self.assertEqual(assistant.status, "cancelled")
+        self.assertEqual(assistant.error_message, "TURN_EXPIRED")
+        self.assertEqual(
+            self.service.prepare(self._request(request_id="request-2")).status,
+            "prepared",
+        )
+
+    def test_expired_old_prepared_turn_does_not_replace_newer_active_node(self):
+        self.service.prepare(self._request())
+        expired = self._stored_turn()
+        now = datetime.now()
+        expired.deadline_at = now
+        newer_node_id = str(uuid.uuid4())
+        self.message_repo.create(ChatMessageEntity(
+            id=newer_node_id,
+            chat_id="conversation-1",
+            parent_id=expired.assistant_message_id,
+            siblings_group_id=None,
+            message_order=99,
+            message_content="newer",
+            message_type="assistant",
+            status="success",
+        ))
+        self.conversation_repo.update_active_node("conversation-1", newer_node_id)
+
+        self.service.expire_stale_turns(now)
+        self.service.abort("doctor-1", "request-1")
+
+        self.assertEqual(
+            self.conversation_repo.get_by_id("conversation-1").active_node_id,
+            newer_node_id,
+        )
 
 
 class ChatTurnRequestRepositoryTest(unittest.TestCase):

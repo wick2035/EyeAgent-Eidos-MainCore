@@ -161,17 +161,13 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
 
     def update_active_node(self, conversation_id: str, active_node_id: str) -> bool:
         """更新会话当前活跃叶子节点"""
-        try:
-            sql = """
-                UPDATE chat_conversation
-                SET active_node_id = %s, update_time = %s, version = version + 1
-                WHERE id = %s AND deleted = 0
-            """
-            affected = self.db.execute(sql, (active_node_id, datetime.now(), conversation_id))
-            return affected > 0
-        except DatabaseError as e:
-            logger.error(f"[ChatConversationRepository] 更新 active_node_id 失败: {e}")
-            return False
+        sql = """
+            UPDATE chat_conversation
+            SET active_node_id = %s, update_time = %s, version = version + 1
+            WHERE id = %s AND deleted = 0
+        """
+        affected = self.db.execute(sql, (active_node_id, datetime.now(), conversation_id))
+        return affected > 0
 
     def compare_and_set_active_node(
         self,

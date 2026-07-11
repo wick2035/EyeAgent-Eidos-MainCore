@@ -128,7 +128,7 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(root)
-        self.conversation_repo.update_active_node(conversation_id, root_id)
+        self._require_active_node_update(conversation_id, root_id)
         logger.info(f"[ChatPersistenceService] 创建会话: {conversation_id}")
         return conversation_id
 
@@ -215,7 +215,7 @@ class ChatPersistenceService:
             )
             self.message_repo.create(root)
 
-        self.conversation_repo.update_active_node(conversation.id, root_id)
+        self._require_active_node_update(conversation.id, root_id)
         conversation.active_node_id = root_id
         return root_id
 
@@ -311,7 +311,7 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(assistant)
-        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        self._require_active_node_update(chat_id, assistant.id)
         return user, assistant
 
     def create_assistant_regeneration(
@@ -361,8 +361,21 @@ class ChatPersistenceService:
             version=1,
         )
         self.message_repo.create(assistant)
-        self.conversation_repo.update_active_node(chat_id, assistant.id)
+        self._require_active_node_update(chat_id, assistant.id)
         return assistant
+
+    def _require_active_node_update(
+        self,
+        conversation_id: str,
+        active_node_id: str,
+    ) -> None:
+        if not self.conversation_repo.update_active_node(
+            conversation_id,
+            active_node_id,
+        ):
+            raise RuntimeError(
+                f"更新会话 active_node_id 失败: {conversation_id}"
+            )
 
     def _path_to_root(self, chat_id: str, leaf_id: str) -> List[ChatMessageEntity]:
         path = []
