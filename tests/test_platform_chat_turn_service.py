@@ -14,6 +14,7 @@ from application.services.conversation_activity_guard import (
     ConversationBusyError,
 )
 from application.services.platform_chat_turn_service import (
+    ChatTurnNotFoundError,
     PlatformChatTurnService,
     RequestIdempotencyConflictError,
     TurnAlreadyCompletedError,
@@ -279,6 +280,14 @@ class FakeChatTurnRequestRepository:
 
 
 class PlatformChatTurnServiceTest(unittest.TestCase):
+    def test_prepare_rejects_conversation_owned_by_other_doctor(self):
+        self.conversation_repo.get_by_id("conversation-1").host_id = "doctor-2"
+
+        with self.assertRaises(ChatTurnNotFoundError):
+            self.service.prepare(self._request())
+
+        self.assertIsNone(self._stored_turn())
+
     def setUp(self):
         self.db = FakeDB()
         self.conversation_repo = FakeConversationRepository()

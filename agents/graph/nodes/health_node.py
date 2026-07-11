@@ -25,12 +25,16 @@ from agents.prompts.health_prompts import (
 )
 from agents.tools.agent_tools import AGENT_1_TOOLS
 from utils.llm_config import get_llm, get_streaming_llm
-from utils.attachment_analyzer import inject_attachment_analysis
+from utils.attachment_analyzer import (
+    inject_attachment_analysis,
+    inject_untrusted_attachment_data,
+)
+from utils.transient_attachment_context import get_attachment_analysis
 
 logger = logging.getLogger(__name__)
 
 
-def _prepare_health(state: MedicalState):
+def _prepare_health(state: MedicalState, config: RunnableConfig = None):
     """构建 HealthAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "patient")
     stage = state.get("stage", "greeting")
@@ -52,10 +56,15 @@ def _prepare_health(state: MedicalState):
     logger.info(f"[HealthNode] === 开始处理 === role={role}, stage={stage}, patient_id={patient_id}")
 
     # 注入附件分析结果（如有）
-    attachment_analysis = state.get("attachment_analysis") or ""
-    messages = inject_attachment_analysis(list(messages), attachment_analysis)
-    if attachment_analysis:
-        logger.info(f"[HealthNode] 已注入附件分析，长度={len(attachment_analysis)}")
+    if state.get("platform_prepared"):
+        attachment_context = get_attachment_analysis(config)
+        messages = inject_untrusted_attachment_data(list(messages), attachment_context)
+        logger.info("[HealthNode] 已注入平台附件分析，附件数=%d", len(attachment_context.analyses))
+    else:
+        attachment_analysis = state.get("attachment_analysis") or ""
+        messages = inject_attachment_analysis(list(messages), attachment_analysis)
+        if attachment_analysis:
+            logger.info(f"[HealthNode] 已注入附件分析，长度={len(attachment_analysis)}")
 
     # 根据流式标志选择 LLM
     is_streaming = state.get("is_streaming", False)
@@ -99,17 +108,14 @@ def _finalize_health(state: MedicalState, result: Dict[str, Any], input_messages
         msg_name = getattr(msg, "name", None)
         msg_content = getattr(msg, "content", "")
         msg_tool_calls = getattr(msg, "tool_calls", [])
-        content_preview = (msg_content[:200] + "...") if len(msg_content) > 200 else msg_content
         logger.info(
             f"[HealthNode]   消息[{i}] type={msg_type}, name={msg_name}, "
-            f"content_len={len(msg_content)}, tool_calls={len(msg_tool_calls)}, "
-            f"preview={content_preview}"
+            f"content_len={len(msg_content)}, tool_calls={len(msg_tool_calls)}"
         )
         if msg_tool_calls:
             for tc in msg_tool_calls:
                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                logger.info(f"[HealthNode]     tool_call: {tc_name}({tc_args})")
+                logger.info(f"[HealthNode]     tool_call: {tc_name}")
 
         if isinstance(msg, AIMessage):
             if msg.content:
@@ -140,8 +146,7 @@ def _finalize_health(state: MedicalState, result: Dict[str, Any], input_messages
     logger.info(
         f"[HealthNode] === 处理完成 === new_stage={new_stage}, "
         f"appointment_confirmed={appointment_confirmed}, "
-        f"new_messages_count={len(new_messages)}, "
-        f"response_preview={ai_response[:150]}"
+        f"new_messages_count={len(new_messages)}, response_len={len(ai_response)}"
     )
 
     # 返回状态更新（包含所有新消息：AIMessage + ToolMessage）
@@ -155,12 +160,12 @@ def _finalize_health(state: MedicalState, result: Dict[str, Any], input_messages
 
 def _health_error(e: Exception) -> Dict[str, Any]:
     """HealthAgent 异常兜底（sync/async 共用）"""
-    logger.error(f"[HealthNode] 处理失败: {e}", exc_info=True)
+    logger.error("[HealthNode] 处理失败, error_type=%s", type(e).__name__)
     error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
     return {
         "messages": [AIMessage(content=error_response)],
         "last_response": error_response,
-        "error": str(e),
+        "error": "HEALTH_AGENT_FAILED",
     }
 
 
@@ -198,7 +203,7 @@ async def health_agent_node_async(state: MedicalState, config: RunnableConfig) -
         状态更新字典
     """
     try:
-        agent, input_messages = _prepare_health(state)
+        agent, input_messages = _prepare_health(state, config)
         result = await agent.ainvoke({"messages": input_messages}, config=config)
         return _finalize_health(state, result, input_messages)
     except Exception as e:

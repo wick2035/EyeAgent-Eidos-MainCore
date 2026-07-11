@@ -31,6 +31,7 @@ _ROUTE_SOURCES = {
     "presentation/routers/file_router.py": "/api",
     "presentation/routers/recommendation_router.py": "/api/recommendation",
     "presentation/routers/research_router.py": "/api/research",
+    "presentation/routers/platform_chat_turn_router.py": "/api/platform/chat/turns",
 }
 
 PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
@@ -40,6 +41,10 @@ PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
         ("POST", "/api/chat/regenerate/stream"),
         ("POST", "/api/research/chat/stream"),
         ("PUT", "/api/conversations/{conversation_id}/active-branch"),
+        ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("GET", "/api/platform/chat/turns/{request_id}"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
     }
 )
 
@@ -86,6 +91,10 @@ CURRENT_HTTP_API_ROUTES = frozenset(
         ("POST", "/api/research/chat/stream"),
         ("POST", "/api/upload"),
         ("PUT", "/api/conversations/{conversation_id}/active-branch"),
+        ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/platform/chat/turns/execute"),
+        ("GET", "/api/platform/chat/turns/{request_id}"),
+        ("POST", "/api/platform/chat/turns/{request_id}/abort"),
     }
 )
 

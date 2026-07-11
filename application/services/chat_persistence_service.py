@@ -717,6 +717,44 @@ class ChatPersistenceService:
             logger.error(f"[ChatPersistenceService] 更新消息失败: {e}", exc_info=True)
             return False
 
+    def finalize_platform_assistant(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        content: Optional[str] = None,
+        token_used: Optional[int] = None,
+        context: Optional[MessageContext] = None,
+        error_message: Optional[str] = None,
+    ) -> bool:
+        """在调用方事务内严格收敛 prepared assistant；失败不得静默。"""
+        updates: Dict[str, Any] = {"status": status}
+        if content is not None:
+            updates["message_content"] = content
+        if token_used is not None:
+            updates["token_used"] = token_used
+        if context is not None:
+            updates["context"] = context.to_json()
+        if error_message is not None:
+            updates["error_message"] = error_message
+
+        if not self.message_repo.update(message_id, updates):
+            return False
+        if status != "success":
+            return True
+
+        message = self.message_repo.get_by_id(message_id)
+        if message is None:
+            return False
+        total_messages = self._count_visible_messages(message.chat_id)
+        return bool(
+            self.conversation_repo.update_summary_and_count(
+                message.chat_id,
+                None,
+                total_messages,
+            )
+        )
+
     def is_first_message(self, chat_id: str) -> bool:
         """
         判断是否为会话的首条消息

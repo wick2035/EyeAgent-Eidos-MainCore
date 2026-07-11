@@ -279,6 +279,26 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             logger.error(f"[MySQLPersistenceAdapter] 更新 AI 最终状态失败: {e}", exc_info=True)
             return False
 
+    def finalize_platform_assistant(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        content: Optional[str] = None,
+        token_used: Optional[int] = None,
+        context: Optional[MessageContext] = None,
+        error_message: Optional[str] = None,
+    ) -> bool:
+        """Prepared graph 专用严格终态入口；事务由 execution service 持有。"""
+        return self.service.finalize_platform_assistant(
+            message_id,
+            status=status,
+            content=content,
+            token_used=token_used,
+            context=context,
+            error_message=error_message,
+        )
+
     def update_conversation_title(
         self,
         chat_id: str,

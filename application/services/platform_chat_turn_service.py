@@ -96,6 +96,10 @@ class PlatformChatTurnService:
         try:
             with self.db.transaction():
                 conversation = self._lock_conversation(request.conversation_id)
+                self._assert_conversation_owner(
+                    conversation,
+                    request.doctor_id,
+                )
                 existing = self.turn_repo.get_for_update(
                     request.doctor_id,
                     request.request_id,
@@ -165,6 +169,8 @@ class PlatformChatTurnService:
         entity = self._get_turn(doctor_id, request_id)
         if entity is None:
             raise ChatTurnNotFoundError()
+        conversation = self.conversation_repo.get_by_id(entity.conversation_id)
+        self._assert_conversation_owner(conversation, doctor_id)
         return self._project_status_response(entity)
 
     def abort(
@@ -173,11 +179,11 @@ class PlatformChatTurnService:
         request_id: str,
         conversation_id: Optional[str] = None,
     ):
-        prefetched = self._get_turn(doctor_id, request_id)
-        if prefetched is None:
-            raise ChatTurnNotFoundError()
-        if conversation_id is not None and prefetched.conversation_id != conversation_id:
-            raise ChatTurnNotFoundError()
+        prefetched = self.assert_turn_conversation(
+            doctor_id,
+            request_id,
+            conversation_id,
+        )
 
         with self.db.transaction():
             self._lock_conversation(prefetched.conversation_id)
@@ -231,6 +237,23 @@ class PlatformChatTurnService:
 
             latest = self.turn_repo.get_for_update(doctor_id, request_id) or entity
             return self._project_abort_response(latest)
+
+    def assert_turn_conversation(
+        self,
+        doctor_id: str,
+        request_id: str,
+        conversation_id: Optional[str],
+    ):
+        entity = self._get_turn(doctor_id, request_id)
+        if entity is None:
+            raise ChatTurnNotFoundError()
+        self._assert_conversation_owner(
+            self.conversation_repo.get_by_id(entity.conversation_id),
+            doctor_id,
+        )
+        if conversation_id is not None and entity.conversation_id != conversation_id:
+            raise ChatTurnNotFoundError()
+        return entity
 
     def mark_failed(
         self,
@@ -400,6 +423,15 @@ class PlatformChatTurnService:
         if conversation is None:
             raise ValueError(f"会话不存在: {conversation_id}")
         return conversation
+
+    @staticmethod
+    def _assert_conversation_owner(conversation, doctor_id: str) -> None:
+        if (
+            conversation is None
+            or getattr(conversation, "user_type", None) != "doctor"
+            or getattr(conversation, "host_id", None) != doctor_id
+        ):
+            raise ChatTurnNotFoundError()
 
     def _get_turn(self, doctor_id: str, request_id: str):
         get = getattr(self.turn_repo, "get", None)
