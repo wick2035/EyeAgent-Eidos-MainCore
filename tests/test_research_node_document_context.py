@@ -33,6 +33,16 @@ class _Agent:
     pass
 
 
+class _RecordingTool:
+    def __init__(self, name):
+        self.name = name
+        self.calls = []
+
+    def invoke(self, payload):
+        self.calls.append(payload)
+        return '{"ok": true}'
+
+
 class ResearchNodeDocumentContextTest(unittest.TestCase):
     def _context(self, content="PRIVATE_RESEARCH_SENTINEL"):
         return TransientResearchDocumentContext(
@@ -199,6 +209,154 @@ class ResearchNodeDocumentContextTest(unittest.TestCase):
             ],
         )
 
+    def test_prepared_web_tool_binds_persisted_types_and_hides_overrides(self):
+        source = _RecordingTool("web_search_medical")
+        [bound] = _filter_tools_by_permission(
+            [source],
+            enable_institution_data=False,
+            enable_web_search=True,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-authoritative",
+            web_search_types=["pubmed"],
+        )
+
+        self.assertEqual(bound.name, "web_search_medical")
+        self.assertEqual(
+            set(bound.args_schema.model_json_schema()["properties"]),
+            {"query", "max_results"},
+        )
+        result = bound.invoke(
+            {
+                "query": "DOCUMENT_QUERY_SENTINEL",
+                "max_results": 7,
+                "search_types": "scholar",
+                "crawl_content": True,
+            }
+        )
+
+        self.assertEqual(result, '{"ok": true}')
+        self.assertEqual(
+            source.calls,
+            [{
+                "query": "DOCUMENT_QUERY_SENTINEL",
+                "search_types": "pubmed",
+                "max_results": 7,
+                "crawl_content": False,
+            }],
+        )
+
+    def test_prepared_institution_tool_binds_principal_and_hides_doctor_id(self):
+        source = _RecordingTool("get_institution_research_data")
+        [bound] = _filter_tools_by_permission(
+            [source],
+            enable_institution_data=True,
+            enable_web_search=False,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-authoritative",
+            web_search_types=[],
+        )
+
+        self.assertEqual(bound.name, "get_institution_research_data")
+        self.assertNotIn(
+            "doctor_id",
+            bound.args_schema.model_json_schema()["properties"],
+        )
+        result = bound.invoke(
+            {
+                "doctor_id": "doctor-attacker",
+                "data_type": "patients",
+                "limit": 9,
+            }
+        )
+
+        self.assertEqual(result, '{"ok": true}')
+        self.assertEqual(
+            source.calls,
+            [{
+                "doctor_id": "doctor-authoritative",
+                "data_type": "patients",
+                "date_range_start": None,
+                "date_range_end": None,
+                "limit": 9,
+            }],
+        )
+
+    def test_prepared_web_tool_is_hidden_without_selected_types(self):
+        result = _filter_tools_by_permission(
+            [_RecordingTool("web_search_medical"), _Tool("statistical_analysis")],
+            enable_institution_data=False,
+            enable_web_search=True,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-authoritative",
+            web_search_types=[],
+        )
+
+        self.assertEqual([item.name for item in result], ["statistical_analysis"])
+
+    def test_prepared_tool_binding_fails_closed_without_principal(self):
+        for doctor_id in (None, "", " doctor-1"):
+            with self.subTest(doctor_id=doctor_id):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "RESEARCH_TOOL_CAPABILITY_INVALID",
+                ):
+                    _filter_tools_by_permission(
+                        [_RecordingTool("web_search_medical")],
+                        enable_institution_data=False,
+                        enable_web_search=True,
+                        patient_id=None,
+                        platform_prepared=True,
+                        doctor_id=doctor_id,
+                        web_search_types=["pubmed"],
+                    )
+
+    def test_tool_binding_rejects_non_boolean_prepared_marker(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "RESEARCH_TOOL_CAPABILITY_INVALID",
+        ):
+            _filter_tools_by_permission(
+                [_RecordingTool("web_search_medical")],
+                enable_institution_data=False,
+                enable_web_search=True,
+                patient_id=None,
+                platform_prepared="true",
+                doctor_id="doctor-1",
+                web_search_types=["pubmed"],
+            )
+
+    def test_prepared_tool_wrappers_keep_per_turn_snapshots_isolated(self):
+        source = _RecordingTool("web_search_medical")
+        [pubmed] = _filter_tools_by_permission(
+            [source],
+            enable_institution_data=False,
+            enable_web_search=True,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-1",
+            web_search_types=["pubmed"],
+        )
+        [scholar] = _filter_tools_by_permission(
+            [source],
+            enable_institution_data=False,
+            enable_web_search=True,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-2",
+            web_search_types=["scholar"],
+        )
+
+        scholar.invoke({"query": "second"})
+        pubmed.invoke({"query": "first"})
+
+        self.assertEqual(
+            [call["search_types"] for call in source.calls],
+            ["scholar", "pubmed"],
+        )
+
     def test_prepared_agent_is_authoritative_and_legacy_router_still_switches(self):
         router_module = importlib.import_module("agents.graph.nodes.router_node")
 
@@ -266,6 +424,31 @@ class ResearchNodeDocumentContextTest(unittest.TestCase):
 
 
 class ResearchNodeAsyncContextTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepared_web_tool_supports_async_invoke_with_bound_snapshot(self):
+        source = _RecordingTool("web_search_medical")
+        [bound] = _filter_tools_by_permission(
+            [source],
+            enable_institution_data=False,
+            enable_web_search=True,
+            patient_id=None,
+            platform_prepared=True,
+            doctor_id="doctor-authoritative",
+            web_search_types=["general", "pubmed"],
+        )
+
+        result = await bound.ainvoke({"query": "async-query"})
+
+        self.assertEqual(result, '{"ok": true}')
+        self.assertEqual(
+            source.calls,
+            [{
+                "query": "async-query",
+                "search_types": "general,pubmed",
+                "max_results": 5,
+                "crawl_content": False,
+            }],
+        )
+
     async def test_async_prepared_node_uses_contextvar_without_config_handle(self):
         context = TransientResearchDocumentContext(
             implicit_prompt_id=None,

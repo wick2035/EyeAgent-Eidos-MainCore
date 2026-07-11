@@ -45,10 +45,15 @@ _SAFE_ERROR_PREFIXES = (
     "RESEARCH_PDF_",
     "RESEARCH_DOCUMENT_",
 )
+_INGESTION_TIMEOUT = "RESEARCH_DOCUMENT_INGESTION_TIMEOUT"
+_LEGACY_ERROR_ALIASES = {
+    "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED": _INGESTION_TIMEOUT,
+}
 
 
 class ResearchDocumentIngestionError(RuntimeError):
     def __init__(self, error_code: str) -> None:
+        error_code = _LEGACY_ERROR_ALIASES.get(error_code, error_code)
         if not _SAFE_ERROR.fullmatch(error_code):
             raise ValueError("科研文档摄取错误码无效")
         super().__init__(error_code)
@@ -310,7 +315,7 @@ class ResearchDocumentIngestionService:
             )
             if not done:
                 raise ResearchDocumentIngestionError(
-                    "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED"
+                    _INGESTION_TIMEOUT
                 )
             if renewer in done:
                 await renewer
@@ -349,7 +354,7 @@ class ResearchDocumentIngestionService:
             return await asyncio.wait_for(awaitable, timeout=remaining)
         except asyncio.TimeoutError:
             raise ResearchDocumentIngestionError(
-                "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED"
+                _INGESTION_TIMEOUT
             ) from None
 
     def _remaining(self, deadline: float | None) -> float | None:
@@ -357,12 +362,12 @@ class ResearchDocumentIngestionService:
             return None
         if type(deadline) not in {int, float} or not math.isfinite(deadline):
             raise ResearchDocumentIngestionError(
-                "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED"
+                _INGESTION_TIMEOUT
             )
         remaining = float(deadline) - self._clock()
         if remaining <= 0:
             raise ResearchDocumentIngestionError(
-                "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED"
+                _INGESTION_TIMEOUT
             )
         return remaining
 

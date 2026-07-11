@@ -8,6 +8,7 @@ from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import StructuredTool
 
 # 兼容不同版本的 langgraph
 try:
@@ -91,7 +92,7 @@ def _prepare_research(state: MedicalState, config: RunnableConfig | None = None)
 
 {permission_note}"""
 
-    logger.debug(f"[ResearchNode] role={role}, stage={stage}, doctor_id={doctor_id}")
+    logger.debug("[ResearchNode] role=%s, stage=%s", role, stage)
 
     # 根据流式标志选择 LLM
     is_streaming = state.get("is_streaming", False)
@@ -103,6 +104,9 @@ def _prepare_research(state: MedicalState, config: RunnableConfig | None = None)
         enable_institution_data,
         enable_web_search,
         patient_id=state.get("patient_id"),
+        platform_prepared=state.get("platform_prepared", False),
+        doctor_id=doctor_id,
+        web_search_types=state.get("web_search_types", []),
     )
     research_document_context = None
     if state.get("platform_prepared"):
@@ -253,6 +257,10 @@ def _filter_tools_by_permission(
     enable_institution_data: bool,
     enable_web_search: bool,
     patient_id: str | None = None,
+    *,
+    platform_prepared: bool = False,
+    doctor_id: str | None = None,
+    web_search_types: list[str] | None = None,
 ) -> list:
     """
     根据权限过滤工具
@@ -265,6 +273,17 @@ def _filter_tools_by_permission(
     Returns:
         过滤后的工具列表
     """
+    selected_types: tuple[str, ...] = ()
+    if type(platform_prepared) is not bool:
+        raise ValueError("RESEARCH_TOOL_CAPABILITY_INVALID")
+    if platform_prepared:
+        selected_types = _validate_prepared_tool_capability(
+            doctor_id=doctor_id,
+            enable_institution_data=enable_institution_data,
+            enable_web_search=enable_web_search,
+            web_search_types=web_search_types,
+        )
+
     filtered = []
 
     for tool in tools:
@@ -274,16 +293,93 @@ def _filter_tools_by_permission(
             continue
 
         # 过滤机构数据工具
-        if tool_name == "get_institution_research_data" and not enable_institution_data:
-            continue
+        if tool_name == "get_institution_research_data":
+            if not enable_institution_data:
+                continue
+            if platform_prepared:
+                tool = _bind_prepared_institution_tool(tool, doctor_id)
 
         # 过滤网页搜索工具
-        if tool_name == "web_search_medical" and not enable_web_search:
-            continue
+        if tool_name == "web_search_medical":
+            if not enable_web_search or (platform_prepared and not selected_types):
+                continue
+            if platform_prepared:
+                tool = _bind_prepared_web_tool(tool, selected_types)
 
         filtered.append(tool)
 
     return filtered
+
+
+def _validate_prepared_tool_capability(
+    *,
+    doctor_id: str | None,
+    enable_institution_data: bool,
+    enable_web_search: bool,
+    web_search_types: list[str] | None,
+) -> tuple[str, ...]:
+    canonical_order = ("general", "pubmed", "scholar")
+    if (
+        not isinstance(doctor_id, str)
+        or not doctor_id
+        or doctor_id.strip() != doctor_id
+        or type(enable_institution_data) is not bool
+        or type(enable_web_search) is not bool
+        or not isinstance(web_search_types, list)
+        or not all(type(item) is str for item in web_search_types)
+        or len(set(web_search_types)) != len(web_search_types)
+        or tuple(web_search_types)
+        != tuple(item for item in canonical_order if item in web_search_types)
+        or (not enable_web_search and web_search_types)
+    ):
+        raise ValueError("RESEARCH_TOOL_CAPABILITY_INVALID")
+    return tuple(web_search_types)
+
+
+def _bind_prepared_web_tool(source_tool, selected_types: tuple[str, ...]):
+    fixed_types = ",".join(selected_types)
+
+    def prepared_web_search(query: str, max_results: int = 5) -> str:
+        """使用当前科研回合允许的来源搜索医学资料。"""
+        return source_tool.invoke(
+            {
+                "query": query,
+                "search_types": fixed_types,
+                "max_results": max_results,
+                "crawl_content": False,
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=prepared_web_search,
+        name="web_search_medical",
+        description="使用当前科研回合允许的来源搜索医学资料。",
+    )
+
+
+def _bind_prepared_institution_tool(source_tool, doctor_id: str):
+    def prepared_institution_search(
+        data_type: str,
+        date_range_start: str | None = None,
+        date_range_end: str | None = None,
+        limit: int = 100,
+    ) -> str:
+        """以当前医生身份查询获准的机构科研数据。"""
+        return source_tool.invoke(
+            {
+                "doctor_id": doctor_id,
+                "data_type": data_type,
+                "date_range_start": date_range_start,
+                "date_range_end": date_range_end,
+                "limit": limit,
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=prepared_institution_search,
+        name="get_institution_research_data",
+        description="以当前医生身份查询获准的机构科研数据。",
+    )
 
 
 def _get_last_user_message(messages: list) -> str:

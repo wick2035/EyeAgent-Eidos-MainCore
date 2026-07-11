@@ -63,6 +63,49 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
         )
         return self._row_to_entity(row) if row else None
 
+    def get_by_assistant_message_id_for_update(
+        self,
+        doctor_id: str,
+        conversation_id: str,
+        assistant_message_id: str,
+    ) -> Optional[ChatTurnRequestEntity]:
+        row = self.db.fetch_one(
+            f"""
+                SELECT {self._SELECT_COLUMNS}
+                FROM chat_turn_request
+                WHERE doctor_id = %s
+                  AND conversation_id = %s
+                  AND assistant_message_id = %s
+                FOR UPDATE
+            """,
+            (doctor_id, conversation_id, assistant_message_id),
+        )
+        return self._row_to_entity(row) if row else None
+
+    def get_origin_by_user_message_id_for_update(
+        self,
+        doctor_id: str,
+        conversation_id: str,
+        user_message_id: str,
+    ) -> Optional[ChatTurnRequestEntity]:
+        rows = self.db.fetch_all(
+            f"""
+                SELECT {self._SELECT_COLUMNS}
+                FROM chat_turn_request
+                WHERE doctor_id = %s
+                  AND conversation_id = %s
+                  AND user_message_id = %s
+                  AND operation IN ('normal', 'edit_resend')
+                ORDER BY create_time ASC
+                LIMIT 2
+                FOR UPDATE
+            """,
+            (doctor_id, conversation_id, user_message_id),
+        )
+        if len(rows) > 1:
+            raise ValueError("SOURCE_TURN_AUTHORITY_MISMATCH")
+        return self._row_to_entity(rows[0]) if rows else None
+
     def insert(self, entity: ChatTurnRequestEntity) -> ChatTurnRequestEntity:
         sql = """
             INSERT INTO chat_turn_request (

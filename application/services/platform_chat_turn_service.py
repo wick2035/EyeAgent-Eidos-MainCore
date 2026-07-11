@@ -1,6 +1,9 @@
 import json
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
+
+from pydantic import ValidationError
 
 from application.services.conversation_activity_guard import (
     ConversationActivityGuard,
@@ -21,6 +24,7 @@ from presentation.schemas.platform_chat_turn_schemas import (
     PlatformChatTurnStatusResponse,
     PreparePlatformChatTurnRequest,
     PreparePlatformChatTurnResponse,
+    ResearchOptionsV2,
 )
 
 
@@ -50,6 +54,23 @@ class InvalidTurnStateError(ValueError):
 
     def __init__(self):
         super().__init__(self.code)
+
+
+class SourceTurnAuthorityError(ValueError):
+    code = "SOURCE_TURN_AUTHORITY_MISMATCH"
+
+    def __init__(self):
+        super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class _TurnAuthoritySnapshot:
+    protocol_version: int
+    agent_type: str
+    attachment_scope: str
+    patient_id: Optional[str]
+    research_options: Optional[dict[str, Any]]
+    attachment_ids: tuple[str, ...]
 
 
 class PlatformChatTurnService:
@@ -114,32 +135,33 @@ class PlatformChatTurnService:
                     request.conversation_id,
                 )
                 previous_active_node_id = conversation.active_node_id
-                ids = self._prepare_tree_nodes(request)
+                authority = self._resolve_turn_authority(request)
+                ids = self._prepare_tree_nodes(request, authority)
                 now = datetime.now()
                 entity = ChatTurnRequestEntity(
                     doctor_id=request.doctor_id,
                     request_id=request.request_id,
                     request_fingerprint=request.request_fingerprint,
-                    protocol_version=request.version,
-                    agent_type=request.agent_type or "health",
-                    attachment_scope=request.attachment_scope or "patient",
+                    protocol_version=authority.protocol_version,
+                    agent_type=authority.agent_type,
+                    attachment_scope=authority.attachment_scope,
                     research_options_json=(
                         json.dumps(
-                            request.research_options.model_dump(mode="json"),
+                            authority.research_options,
                             ensure_ascii=False,
                             separators=(",", ":"),
                         )
-                        if request.research_options is not None
+                        if authority.research_options is not None
                         else None
                     ),
                     operation=request.operation,
                     conversation_id=request.conversation_id,
                     session_id=request.session_id,
-                    patient_id=request.patient_id,
+                    patient_id=authority.patient_id,
                     source_message_id=request.source_message_id,
                     implicit_prompt_id=request.implicit_prompt_id,
                     attachment_ids_json=json.dumps(
-                        request.attachment_ids,
+                        authority.attachment_ids,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
@@ -382,18 +404,18 @@ class PlatformChatTurnService:
             latest = self.turn_repo.get_for_update(doctor_id, request_id) or entity
             return self._project_status_response(latest)
 
-    def _prepare_tree_nodes(self, request) -> dict[str, str]:
+    def _prepare_tree_nodes(
+        self,
+        request,
+        authority: _TurnAuthoritySnapshot,
+    ) -> dict[str, str]:
         metadata = {
-            "attachment_ids": list(request.attachment_ids),
+            "attachment_ids": list(authority.attachment_ids),
             "turn_configuration": {
-                "protocol_version": request.version,
-                "agent_type": request.agent_type or "health",
-                "attachment_scope": request.attachment_scope or "patient",
-                "research_options": (
-                    request.research_options.model_dump(mode="json")
-                    if request.research_options is not None
-                    else None
-                ),
+                "protocol_version": authority.protocol_version,
+                "agent_type": authority.agent_type,
+                "attachment_scope": authority.attachment_scope,
+                "research_options": authority.research_options,
             },
         }
         if request.attachment_only:
@@ -437,6 +459,281 @@ class PlatformChatTurnService:
             "user_message_id": assistant.parent_id,
             "assistant_message_id": assistant.id,
         }
+
+    def _resolve_turn_authority(
+        self,
+        request: PreparePlatformChatTurnRequest,
+    ) -> _TurnAuthoritySnapshot:
+        requested = self._snapshot_from_request(request)
+        if request.operation == "normal":
+            return requested
+
+        source_user, source_turn = self._resolve_source_user_and_turn(request)
+        context_snapshot = self._parse_source_user_snapshot(source_user.context)
+        if context_snapshot is None or source_turn is None:
+            raise SourceTurnAuthorityError()
+
+        authoritative = _TurnAuthoritySnapshot(
+            protocol_version=context_snapshot.protocol_version,
+            agent_type=context_snapshot.agent_type,
+            attachment_scope=context_snapshot.attachment_scope,
+            patient_id=source_turn.patient_id,
+            research_options=context_snapshot.research_options,
+            attachment_ids=context_snapshot.attachment_ids,
+        )
+        if not self._source_turn_matches_snapshot(source_turn, authoritative):
+            raise SourceTurnAuthorityError()
+        if authoritative != requested:
+            raise SourceTurnAuthorityError()
+        return authoritative
+
+    def _resolve_source_user_and_turn(self, request):
+        source = self.message_repo.get_by_id(request.source_message_id)
+        if not self._is_visible_success_message(
+            source,
+            request.conversation_id,
+        ):
+            raise SourceTurnAuthorityError()
+
+        if request.operation == "edit_resend":
+            if (
+                source.message_type != "user"
+                or source.sender_id != request.doctor_id
+            ):
+                raise SourceTurnAuthorityError()
+            source_user = source
+            source_turn = self.turn_repo.get_origin_by_user_message_id_for_update(
+                request.doctor_id,
+                request.conversation_id,
+                source_user.id,
+            )
+            if source_turn is not None:
+                assistant = self.message_repo.get_by_id(
+                    source_turn.assistant_message_id
+                )
+                if not self._is_visible_success_message(
+                    assistant,
+                    request.conversation_id,
+                ) or assistant.parent_id != source_user.id:
+                    raise SourceTurnAuthorityError()
+            elif not any(
+                self._is_visible_success_message(
+                    child,
+                    request.conversation_id,
+                ) and child.message_type == "assistant"
+                for child in self.message_repo.get_children(
+                    request.conversation_id,
+                    source_user.id,
+                )
+            ):
+                raise SourceTurnAuthorityError()
+            return source_user, source_turn
+
+        if source.message_type != "assistant" or not source.parent_id:
+            raise SourceTurnAuthorityError()
+        source_user = self.message_repo.get_by_id(source.parent_id)
+        if not self._is_visible_success_message(
+            source_user,
+            request.conversation_id,
+            request.doctor_id,
+        ) or source_user.message_type != "user":
+            raise SourceTurnAuthorityError()
+        source_turn = self.turn_repo.get_by_assistant_message_id_for_update(
+            request.doctor_id,
+            request.conversation_id,
+            source.id,
+        )
+        if source_turn is not None and (
+            source_turn.user_message_id != source_user.id
+            or source_turn.status != "completed"
+        ):
+            raise SourceTurnAuthorityError()
+        return source_user, source_turn
+
+    @staticmethod
+    def _is_visible_success_message(
+        message,
+        conversation_id: str,
+        doctor_id: Optional[str] = None,
+    ) -> bool:
+        return bool(
+            message is not None
+            and message.chat_id == conversation_id
+            and message.status == "success"
+            and not message.deleted
+            and (doctor_id is None or message.sender_id == doctor_id)
+        )
+
+    @classmethod
+    def _parse_source_user_snapshot(
+        cls,
+        raw_context: Optional[str],
+    ) -> Optional[_TurnAuthoritySnapshot]:
+        if raw_context is None:
+            return None
+        if not isinstance(raw_context, str) or not raw_context.strip():
+            raise SourceTurnAuthorityError()
+        try:
+            context = json.loads(
+                raw_context,
+                object_pairs_hook=cls._strict_json_object,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise SourceTurnAuthorityError() from None
+        if not isinstance(context, list) or not all(
+            isinstance(item, dict) for item in context
+        ):
+            raise SourceTurnAuthorityError()
+        metadata_entries = [
+            item["metadata"] for item in context if "metadata" in item
+        ]
+        if not metadata_entries:
+            return None
+        if len(metadata_entries) != 1 or not isinstance(
+            metadata_entries[0],
+            dict,
+        ):
+            raise SourceTurnAuthorityError()
+        metadata = metadata_entries[0]
+        has_configuration = "turn_configuration" in metadata
+        has_attachments = "attachment_ids" in metadata
+        if not has_configuration and not has_attachments:
+            return None
+        if not has_configuration or not has_attachments:
+            raise SourceTurnAuthorityError()
+        if set(metadata) - {
+            "turn_configuration",
+            "attachment_ids",
+            "attachment_only",
+            "implicit_prompt_id",
+        }:
+            raise SourceTurnAuthorityError()
+
+        has_attachment_only = "attachment_only" in metadata
+        has_implicit_prompt = "implicit_prompt_id" in metadata
+        if has_attachment_only != has_implicit_prompt:
+            raise SourceTurnAuthorityError()
+        if has_attachment_only and metadata["attachment_only"] is not True:
+            raise SourceTurnAuthorityError()
+
+        configuration = metadata["turn_configuration"]
+        if not isinstance(configuration, dict) or set(configuration) != {
+            "protocol_version",
+            "agent_type",
+            "attachment_scope",
+            "research_options",
+        }:
+            raise SourceTurnAuthorityError()
+        protocol_version = configuration["protocol_version"]
+        agent_type = configuration["agent_type"]
+        attachment_scope = configuration["attachment_scope"]
+        research_options = configuration["research_options"]
+        if type(protocol_version) is not int or protocol_version not in (1, 2):
+            raise SourceTurnAuthorityError()
+        if (agent_type, attachment_scope) not in {
+            ("health", "patient"),
+            ("research", "research"),
+        }:
+            raise SourceTurnAuthorityError()
+        if protocol_version == 1 and (agent_type, attachment_scope) != (
+            "health",
+            "patient",
+        ):
+            raise SourceTurnAuthorityError()
+        if agent_type == "health":
+            if research_options is not None:
+                raise SourceTurnAuthorityError()
+            canonical_options = None
+        else:
+            if protocol_version != 2 or not isinstance(research_options, dict):
+                raise SourceTurnAuthorityError()
+            try:
+                parsed_options = ResearchOptionsV2.model_validate(
+                    research_options,
+                    strict=True,
+                )
+            except (TypeError, ValueError, ValidationError):
+                raise SourceTurnAuthorityError() from None
+            canonical_options = parsed_options.model_dump(mode="json")
+            if canonical_options != research_options:
+                raise SourceTurnAuthorityError()
+
+        if has_implicit_prompt:
+            expected_prompt = (
+                "research-document-analysis-v1"
+                if agent_type == "research"
+                else "attachment-analysis-v1"
+            )
+            if metadata["implicit_prompt_id"] != expected_prompt:
+                raise SourceTurnAuthorityError()
+
+        attachment_ids = metadata["attachment_ids"]
+        if (
+            not isinstance(attachment_ids, list)
+            or not 1 <= len(attachment_ids) <= 4
+            or not all(
+                isinstance(item, str) and item.strip() == item and item
+                for item in attachment_ids
+            )
+            or len(set(attachment_ids)) != len(attachment_ids)
+        ):
+            raise SourceTurnAuthorityError()
+        return _TurnAuthoritySnapshot(
+            protocol_version=protocol_version,
+            agent_type=agent_type,
+            attachment_scope=attachment_scope,
+            patient_id=None,
+            research_options=canonical_options,
+            attachment_ids=tuple(attachment_ids),
+        )
+
+    @staticmethod
+    def _strict_json_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if not isinstance(key, str) or key in value:
+                raise SourceTurnAuthorityError()
+            value[key] = item
+        return value
+
+    @staticmethod
+    def _snapshot_from_request(
+        request: PreparePlatformChatTurnRequest,
+    ) -> _TurnAuthoritySnapshot:
+        return _TurnAuthoritySnapshot(
+            protocol_version=request.version,
+            agent_type=request.agent_type or "health",
+            attachment_scope=request.attachment_scope or "patient",
+            patient_id=request.patient_id,
+            research_options=(
+                request.research_options.model_dump(mode="json")
+                if request.research_options is not None
+                else None
+            ),
+            attachment_ids=tuple(request.attachment_ids),
+        )
+
+    @staticmethod
+    def _source_turn_matches_snapshot(
+        source_turn,
+        snapshot: _TurnAuthoritySnapshot,
+    ) -> bool:
+        try:
+            return bool(
+                source_turn.status == "completed"
+                and source_turn.protocol_version == snapshot.protocol_version
+                and source_turn.agent_type == snapshot.agent_type
+                and source_turn.attachment_scope == snapshot.attachment_scope
+                and source_turn.patient_id == snapshot.patient_id
+                and source_turn.research_options == snapshot.research_options
+                and tuple(source_turn.attachment_ids) == snapshot.attachment_ids
+                and (
+                    snapshot.agent_type != "research"
+                    or snapshot.patient_id is None
+                )
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     def _lock_conversation(self, conversation_id: str):
         lock_by_id = getattr(self.conversation_repo, "lock_by_id", None)

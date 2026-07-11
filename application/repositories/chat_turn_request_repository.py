@@ -25,6 +25,24 @@ class ChatTurnRequestRepository(ABC):
         pass
 
     @abstractmethod
+    def get_by_assistant_message_id_for_update(
+        self,
+        doctor_id: str,
+        conversation_id: str,
+        assistant_message_id: str,
+    ) -> Optional[ChatTurnRequestEntity]:
+        pass
+
+    @abstractmethod
+    def get_origin_by_user_message_id_for_update(
+        self,
+        doctor_id: str,
+        conversation_id: str,
+        user_message_id: str,
+    ) -> Optional[ChatTurnRequestEntity]:
+        pass
+
+    @abstractmethod
     def insert(self, entity: ChatTurnRequestEntity) -> ChatTurnRequestEntity:
         pass
 

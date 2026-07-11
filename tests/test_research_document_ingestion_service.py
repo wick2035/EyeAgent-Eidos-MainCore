@@ -193,6 +193,17 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
+    def test_legacy_deadline_code_maps_to_stable_ingestion_timeout(self):
+        error = ResearchDocumentIngestionError(
+            "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED"
+        )
+
+        self.assertEqual(
+            error.error_code,
+            "RESEARCH_DOCUMENT_INGESTION_TIMEOUT",
+        )
+        self.assertEqual(str(error), "RESEARCH_DOCUMENT_INGESTION_TIMEOUT")
+
     async def test_authoritative_metadata_limits_cover_4_40_100_120(self):
         files = [
             _downloaded(
@@ -505,22 +516,30 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
 
         coroutine = pending_work()
         try:
-            with self.assertRaises(ResearchDocumentIngestionError):
+            with self.assertRaises(ResearchDocumentIngestionError) as raised:
                 await service._await_deadline(
                     coroutine,
                     time.monotonic() - 1,
                 )
+            self.assertEqual(
+                raised.exception.error_code,
+                "RESEARCH_DOCUMENT_INGESTION_TIMEOUT",
+            )
             self.assertIsNone(coroutine.cr_frame)
         finally:
             coroutine.close()
 
         future = asyncio.get_running_loop().create_future()
         try:
-            with self.assertRaises(ResearchDocumentIngestionError):
+            with self.assertRaises(ResearchDocumentIngestionError) as raised:
                 await service._await_deadline(
                     future,
                     time.monotonic() - 1,
                 )
+            self.assertEqual(
+                raised.exception.error_code,
+                "RESEARCH_DOCUMENT_INGESTION_TIMEOUT",
+            )
             self.assertTrue(future.cancelled())
         finally:
             if not future.done():
@@ -694,7 +713,7 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
                         await task
                     self.assertEqual(
                         raised.exception.error_code,
-                        "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED",
+                        "RESEARCH_DOCUMENT_INGESTION_TIMEOUT",
                     )
                 self.assertIn(item.attachment_id, self.processor.cancelled)
                 self.assertEqual(self.repo.complete_calls, [])

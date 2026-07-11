@@ -71,14 +71,26 @@ class SnapshotFakeDB:
 
 
 class RecordingDB:
-    def __init__(self):
+    def __init__(self, *, fetch_one_result=None, fetch_all_result=None):
         self.sql = None
         self.params = None
+        self.fetch_one_result = fetch_one_result
+        self.fetch_all_result = fetch_all_result or []
 
     def execute(self, sql, params=None):
         self.sql = sql
         self.params = params
         return 1
+
+    def fetch_one(self, sql, params=None):
+        self.sql = sql
+        self.params = params
+        return self.fetch_one_result
+
+    def fetch_all(self, sql, params=None):
+        self.sql = sql
+        self.params = params
+        return self.fetch_all_result
 
 
 class FakeConversationRepository:
@@ -218,6 +230,41 @@ class FakeChatTurnRequestRepository:
         with self._lock:
             return self.items.get((doctor_id, request_id))
 
+    def get_by_assistant_message_id_for_update(
+        self,
+        doctor_id,
+        conversation_id,
+        assistant_message_id,
+    ):
+        with self._lock:
+            matches = [
+                item
+                for item in self.items.values()
+                if item.doctor_id == doctor_id
+                and item.conversation_id == conversation_id
+                and item.assistant_message_id == assistant_message_id
+            ]
+            return matches[0] if len(matches) == 1 else None
+
+    def get_origin_by_user_message_id_for_update(
+        self,
+        doctor_id,
+        conversation_id,
+        user_message_id,
+    ):
+        with self._lock:
+            matches = [
+                item
+                for item in self.items.values()
+                if item.doctor_id == doctor_id
+                and item.conversation_id == conversation_id
+                and item.user_message_id == user_message_id
+                and item.operation in ("normal", "edit_resend")
+            ]
+            if len(matches) > 1:
+                raise ValueError("SOURCE_TURN_AUTHORITY_MISMATCH")
+            return matches[0] if matches else None
+
     def insert(self, entity):
         if self.insert_barrier is not None:
             self.insert_barrier.wait(timeout=5)
@@ -351,6 +398,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         source_message_id=None,
         attachment_ids=None,
         implicit_prompt_id=None,
+        patient_id="patient-1",
     ):
         attachment_ids = attachment_ids or ["attachment-1"]
         fingerprint = fingerprint_turn(
@@ -358,7 +406,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             operation=operation,
             conversation_id=conversation_id,
             session_id=f"session-{conversation_id}",
-            patient_id="patient-1",
+            patient_id=patient_id,
             message=message,
             source_message_id=source_message_id,
             implicit_prompt_id=implicit_prompt_id,
@@ -371,7 +419,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             operation=operation,
             conversation_id=conversation_id,
             session_id=f"session-{conversation_id}",
-            patient_id="patient-1",
+            patient_id=patient_id,
             doctor_id="doctor-1",
             message=message,
             source_message_id=source_message_id,
@@ -387,12 +435,15 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         source_message_id=None,
         message="",
         implicit_prompt_id="research-document-analysis-v1",
+        attachment_ids=None,
+        research_options=None,
     ):
-        research_options = ResearchOptionsV2(
+        research_options = research_options or ResearchOptionsV2(
             enable_institution_data=True,
             enable_web_search=True,
             types=["scholar", "general", "general"],
         )
+        attachment_ids = attachment_ids or ["attachment-1"]
         payload = {
             "version": 2,
             "request_id": request_id,
@@ -407,7 +458,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             "message": message,
             "source_message_id": source_message_id,
             "implicit_prompt_id": implicit_prompt_id,
-            "attachment_ids": ["attachment-1"],
+            "attachment_ids": attachment_ids,
         }
         payload["request_fingerprint"] = fingerprint_turn(
             version=payload["version"],
@@ -424,6 +475,62 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             research_options=research_options,
         )
         return PreparePlatformChatTurnRequest(**payload)
+
+    def _v2_health_request(
+        self,
+        *,
+        request_id,
+        operation="normal",
+        source_message_id=None,
+        patient_id="patient-1",
+        attachment_ids=None,
+    ):
+        payload = {
+            "version": 2,
+            "request_id": request_id,
+            "operation": operation,
+            "conversation_id": "conversation-1",
+            "session_id": "session-conversation-1",
+            "patient_id": patient_id,
+            "doctor_id": "doctor-1",
+            "agent_type": "health",
+            "attachment_scope": "patient",
+            "research_options": None,
+            "message": "请分析",
+            "source_message_id": source_message_id,
+            "implicit_prompt_id": None,
+            "attachment_ids": attachment_ids or ["attachment-1"],
+        }
+        payload["request_fingerprint"] = fingerprint_turn(
+            version=payload["version"],
+            operation=payload["operation"],
+            conversation_id=payload["conversation_id"],
+            session_id=payload["session_id"],
+            patient_id=payload["patient_id"],
+            message=payload["message"],
+            source_message_id=payload["source_message_id"],
+            implicit_prompt_id=payload["implicit_prompt_id"],
+            attachment_ids=payload["attachment_ids"],
+            agent_type=payload["agent_type"],
+            attachment_scope=payload["attachment_scope"],
+            research_options=None,
+        )
+        return PreparePlatformChatTurnRequest(**payload)
+
+    def _complete_source_turn(self, request):
+        self.service.prepare(request)
+        turn = self._stored_turn(request.request_id)
+        self.turn_repo.compare_and_set_status(
+            "doctor-1",
+            turn.request_id,
+            "prepared",
+            "completed",
+        )
+        self.message_repo.update(
+            turn.assistant_message_id,
+            {"status": "success"},
+        )
+        return turn
 
     def _seed_completed_legacy_turn(self):
         user, assistant = self.chat_service.create_turn(
@@ -549,7 +656,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(str(conflicts[0]), "REQUEST_IDEMPOTENCY_CONFLICT")
         self.assertEqual(len(self.turn_repo.items), 1)
 
-    def test_prepare_edit_creates_user_sibling_and_assistant_child(self):
+    def test_prepare_edit_rejects_source_without_platform_turn_snapshot(self):
         original_user, _ = self._seed_completed_legacy_turn()
         request = self._request(
             operation="edit_resend",
@@ -557,47 +664,39 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             message="新问题",
         )
 
-        self.service.prepare(request)
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(request)
 
-        turn = self._stored_turn()
-        edited_user = self.message_repo.get_by_id(turn.user_message_id)
-        edited_assistant = self.message_repo.get_by_id(turn.assistant_message_id)
-        self.assertEqual(edited_user.parent_id, original_user.parent_id)
-        self.assertEqual(edited_user.siblings_group_id, original_user.siblings_group_id)
-        self.assertEqual(edited_assistant.parent_id, edited_user.id)
-        metadata = next(
-            item["metadata"]
-            for item in json.loads(edited_user.context)
-            if "metadata" in item
-        )
-        self.assertEqual(metadata["turn_configuration"]["agent_type"], "health")
-
-    def test_prepare_regenerate_reuses_parent_user_and_only_creates_assistant(self):
-        original_user, original_assistant = self._seed_completed_legacy_turn()
-        user_count_before = len([
-            item for item in self.message_repo.items.values() if item.message_type == "user"
-        ])
+    def test_prepare_regenerate_rejects_source_without_platform_turn_snapshot(self):
+        _, original_assistant = self._seed_completed_legacy_turn()
         request = self._request(
             operation="regenerate",
             source_message_id=original_assistant.id,
         )
 
-        self.service.prepare(request)
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(request)
 
-        turn = self._stored_turn()
-        regenerated = self.message_repo.get_by_id(turn.assistant_message_id)
-        user_count_after = len([
-            item for item in self.message_repo.items.values() if item.message_type == "user"
-        ])
-        self.assertEqual(turn.user_message_id, original_user.id)
-        self.assertEqual(regenerated.parent_id, original_user.id)
-        self.assertEqual(user_count_after, user_count_before)
-        metadata = next(
-            item["metadata"]
-            for item in json.loads(regenerated.context)
-            if "metadata" in item
+    def test_v1_health_regenerate_missing_source_context_fails_closed(self):
+        _, source_assistant = self._seed_completed_legacy_turn()
+        request = self._request(
+            operation="regenerate",
+            source_message_id=source_assistant.id,
+            patient_id="patient-foreign",
+            attachment_ids=["attachment-replaced"],
         )
-        self.assertEqual(metadata["turn_configuration"]["agent_type"], "health")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(request)
 
     def test_research_regenerate_round_trips_source_turn_configuration(self):
         source_request = self._research_request()
@@ -652,6 +751,179 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
                 "PRIVATE_RESEARCH_CONTEXT",
             ):
                 self.assertNotIn(forbidden, serialized)
+
+    def test_research_regenerate_rejects_health_patient_redeclaration(self):
+        source = self._complete_source_turn(self._research_request())
+        branch = self._v2_health_request(
+            request_id="request-research-as-health",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+            patient_id="patient-foreign",
+            attachment_ids=["attachment-patient"],
+        )
+        turn_count = len(self.turn_repo.items)
+        message_ids = set(self.message_repo.items)
+        active_node_id = self.conversation_repo.get_by_id(
+            "conversation-1"
+        ).active_node_id
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+        self.assertIsNone(self._stored_turn("request-research-as-health"))
+        self.assertEqual(len(self.turn_repo.items), turn_count)
+        self.assertEqual(set(self.message_repo.items), message_ids)
+        self.assertEqual(
+            self.conversation_repo.get_by_id("conversation-1").active_node_id,
+            active_node_id,
+        )
+
+    def test_research_edit_rejects_replaced_attachment_ids(self):
+        source = self._complete_source_turn(
+            self._research_request(attachment_ids=["attachment-a", "attachment-b"])
+        )
+        branch = self._research_request(
+            request_id="request-research-edit-replaced-ids",
+            operation="edit_resend",
+            source_message_id=source.user_message_id,
+            message="改写问题",
+            implicit_prompt_id=None,
+            attachment_ids=["attachment-a", "attachment-foreign"],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+    def test_research_regenerate_rejects_reordered_attachment_ids(self):
+        source = self._complete_source_turn(
+            self._research_request(attachment_ids=["attachment-a", "attachment-b"])
+        )
+        branch = self._research_request(
+            request_id="request-research-regenerate-reordered",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+            attachment_ids=["attachment-b", "attachment-a"],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+    def test_research_regenerate_rejects_replaced_research_options(self):
+        source = self._complete_source_turn(self._research_request())
+        branch = self._research_request(
+            request_id="request-research-regenerate-replaced-options",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+            research_options=ResearchOptionsV2(
+                enable_institution_data=False,
+                enable_web_search=True,
+                types=["pubmed"],
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+    def test_research_regenerate_fails_closed_when_source_context_is_missing(self):
+        source = self._complete_source_turn(self._research_request())
+        self.message_repo.get_by_id(source.user_message_id).context = None
+        branch = self._research_request(
+            request_id="request-research-missing-source-context",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+    def test_research_regenerate_rejects_malformed_or_duplicate_source_metadata(self):
+        source = self._complete_source_turn(self._research_request())
+        source_user = self.message_repo.get_by_id(source.user_message_id)
+        original_context = source_user.context
+        parsed_context = json.loads(original_context)
+        source_metadata = next(
+            item["metadata"] for item in parsed_context if "metadata" in item
+        )
+        invalid_optional_metadata = dict(source_metadata)
+        invalid_optional_metadata["attachment_only"] = "true"
+        invalid_contexts = {
+            "malformed": "{PRIVATE_MALFORMED_CONTEXT",
+            "duplicate": json.dumps(
+                [
+                    {"metadata": source_metadata},
+                    {"metadata": source_metadata},
+                ],
+                ensure_ascii=False,
+            ),
+            "invalid_optional_type": json.dumps(
+                [{"metadata": invalid_optional_metadata}],
+                ensure_ascii=False,
+            ),
+        }
+
+        for index, (case, invalid_context) in enumerate(invalid_contexts.items()):
+            with self.subTest(case=case):
+                source_user.context = invalid_context
+                branch = self._research_request(
+                    request_id=f"request-invalid-source-context-{index}",
+                    operation="regenerate",
+                    source_message_id=source.assistant_message_id,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "SOURCE_TURN_AUTHORITY_MISMATCH",
+                ):
+                    self.service.prepare(branch)
+                self.assertIsNone(self._stored_turn(branch.request_id))
+
+        source_user.context = original_context
+
+    def test_research_regenerate_rejects_deleted_source_assistant(self):
+        source = self._complete_source_turn(self._research_request())
+        self.message_repo.get_by_id(source.assistant_message_id).deleted = True
+        branch = self._research_request(
+            request_id="request-deleted-source-assistant",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
+
+    def test_v2_health_regenerate_rejects_replaced_patient(self):
+        source = self._complete_source_turn(
+            self._v2_health_request(request_id="request-health-source")
+        )
+        branch = self._v2_health_request(
+            request_id="request-health-foreign-patient",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+            patient_id="patient-foreign",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            self.service.prepare(branch)
 
     def test_prepare_rejects_when_legacy_text_turn_is_streaming(self):
         _, assistant = self.chat_service.create_turn(
@@ -952,6 +1224,57 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
 
 
 class ChatTurnRequestRepositoryTest(unittest.TestCase):
+    def test_source_turn_lookups_are_scoped_and_locked(self):
+        db = RecordingDB()
+        repository = ChatTurnRequestRepositoryImpl(db)
+
+        self.assertIsNone(
+            repository.get_by_assistant_message_id_for_update(
+                "doctor-1",
+                "conversation-1",
+                "assistant-1",
+            )
+        )
+        normalized = " ".join(db.sql.split())
+        self.assertIn("doctor_id = %s", normalized)
+        self.assertIn("conversation_id = %s", normalized)
+        self.assertIn("assistant_message_id = %s", normalized)
+        self.assertIn("FOR UPDATE", normalized)
+        self.assertEqual(
+            db.params,
+            ("doctor-1", "conversation-1", "assistant-1"),
+        )
+
+        self.assertIsNone(
+            repository.get_origin_by_user_message_id_for_update(
+                "doctor-1",
+                "conversation-1",
+                "user-1",
+            )
+        )
+        normalized = " ".join(db.sql.split())
+        self.assertIn("operation IN ('normal', 'edit_resend')", normalized)
+        self.assertIn("LIMIT 2 FOR UPDATE", normalized)
+        self.assertEqual(
+            db.params,
+            ("doctor-1", "conversation-1", "user-1"),
+        )
+
+    def test_ambiguous_originating_user_turn_fails_closed(self):
+        repository = ChatTurnRequestRepositoryImpl(
+            RecordingDB(fetch_all_result=[{}, {}])
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "SOURCE_TURN_AUTHORITY_MISMATCH",
+        ):
+            repository.get_origin_by_user_message_id_for_update(
+                "doctor-1",
+                "conversation-1",
+                "user-1",
+            )
+
     def test_table_scripts_define_v2_snapshot_columns_and_nullable_patient(self):
         project_root = Path(__file__).resolve().parents[1]
         create_sql = (

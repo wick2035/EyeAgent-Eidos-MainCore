@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -202,6 +203,46 @@ def research_execute_request():
 
 
 class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_source_mismatch_is_safe_400_without_new_records(self):
+        source_id = "PRIVATE_SOURCE_MESSAGE_ID_SENTINEL"
+        private_context = "PRIVATE_SOURCE_CONTEXT_SENTINEL"
+
+        class RejectingService(FakeTurnService):
+            def __init__(self):
+                super().__init__()
+                self.turns = ["source-turn"]
+                self.messages = ["source-user", "source-assistant"]
+
+            def prepare(self, payload):
+                self.prepare_calls.append(payload)
+                raise ValueError(f"{private_context}:{source_id}")
+
+        service = RejectingService()
+        payload = research_prepare_request().model_copy(
+            update={
+                "operation": "regenerate",
+                "source_message_id": source_id,
+            }
+        )
+        before = (list(service.turns), list(service.messages))
+
+        with self.assertRaises(HTTPException) as caught:
+            await prepare_platform_chat_turn(
+                payload,
+                starlette_request(principal(scopes={"ai:research"})),
+                service,
+            )
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(
+            caught.exception.detail,
+            {"error_code": "PLATFORM_TURN_PREPARE_REJECTED"},
+        )
+        serialized = json.dumps(caught.exception.detail)
+        self.assertNotIn(source_id, serialized)
+        self.assertNotIn(private_context, serialized)
+        self.assertEqual((service.turns, service.messages), before)
+
     async def test_prepare_and_execute_research_require_ai_research_scope(self):
         service = FakeTurnService()
         with self.assertRaises(HTTPException) as prepare_error:

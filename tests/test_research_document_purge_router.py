@@ -16,6 +16,7 @@ from presentation.routers.research_document_router import (
 
 
 DOCTOR_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+HEX_DOCTOR_ID = "0123456789abcdef0123456789abcdef"
 OTHER_DOCTOR_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 ATTACHMENT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 
@@ -139,6 +140,29 @@ class ResearchDocumentPurgeRouterTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(db.events, ["begin", "commit"])
 
+    async def test_32_hex_principal_is_preserved_and_authorized_for_purge(self):
+        response, db, repository = await self._delete(
+            _principal(subject=HEX_DOCTOR_ID),
+            doctor_id=HEX_DOCTOR_ID,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(
+            repository.calls,
+            [(HEX_DOCTOR_ID, ATTACHMENT_ID, 1)],
+        )
+        self.assertEqual(db.events, ["begin", "commit"])
+
+    async def test_32_hex_body_must_equal_principal_subject_verbatim(self):
+        response, db, repository = await self._delete(
+            _principal(subject=DOCTOR_ID),
+            doctor_id=HEX_DOCTOR_ID,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(repository.calls, [])
+        self.assertEqual(db.events, [])
+
     async def test_repeated_delete_is_idempotent_and_never_leaks_existence(self):
         app, db, repository = self._app(_principal())
         async with httpx.AsyncClient(
@@ -179,7 +203,39 @@ class ResearchDocumentPurgeRouterTest(unittest.IsolatedAsyncioTestCase):
                 ATTACHMENT_ID,
             ),
             (
-                {"doctor_id": DOCTOR_ID.replace("-", "")},
+                {"doctor_id": "aaaaaaaa-aaaa-0aaa-8aaa-aaaaaaaaaaaa"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": "aaaaaaaa-aaaa-9aaa-8aaa-aaaaaaaaaaaa"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": "aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": "aaaaaaaa-aaaa-4aaa-caaa-aaaaaaaaaaaa"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": HEX_DOCTOR_ID.upper()},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": f" {HEX_DOCTOR_ID}"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": HEX_DOCTOR_ID[:-1]},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": f"{HEX_DOCTOR_ID}0"},
+                ATTACHMENT_ID,
+            ),
+            (
+                {"doctor_id": f"g{HEX_DOCTOR_ID[1:]}"},
                 ATTACHMENT_ID,
             ),
             (

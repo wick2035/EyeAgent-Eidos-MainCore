@@ -162,7 +162,11 @@ class GraphManager:
             from agents.graph.mysql_persistence_adapter import get_mysql_persistence_adapter
             return get_mysql_persistence_adapter()
         except Exception as e:
-            logger.warning(f"[GraphManager] 创建 MySQL 适配器失败，使用空适配器: {e}")
+            logger.warning(
+                "[GraphManager] 创建 MySQL 适配器失败，使用空适配器, "
+                "error_type=%s",
+                type(e).__name__,
+            )
             return NullPersistenceAdapter()
 
     def chat(
@@ -203,7 +207,7 @@ class GraphManager:
         thread_config = get_thread_config(session_id, conversation_id)
         thread_id = thread_config["configurable"]["thread_id"]
 
-        logger.info(f"[GraphManager] chat: patient={patient_id}, thread={thread_id}")
+        logger.info("[GraphManager] chat started, agent_type=%s", agent_type)
 
         # === 安全检查：角色校验 + 输入防护 ===
         from utils.role_verification import verify_role
@@ -217,8 +221,9 @@ class GraphManager:
         )
         if was_downgraded:
             logger.warning(
-                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
-                f"patient_id={patient_id}, doctor_id={doctor_id}"
+                "[GraphManager] 角色降级: %s -> %s",
+                role,
+                verified_role,
             )
             role = verified_role
             if agent_type in ("compliance", "research"):
@@ -229,9 +234,9 @@ class GraphManager:
         })
         if not guard_result.is_safe:
             logger.warning(
-                f"[GraphManager] 安全拦截: risk={guard_result.risk_level.value}, "
-                f"category={guard_result.category.value if guard_result.category else 'N/A'}, "
-                f"detail={guard_result.detail}"
+                "[GraphManager] 安全拦截: risk=%s, category=%s",
+                guard_result.risk_level.value,
+                guard_result.category.value if guard_result.category else "N/A",
             )
             blocked_response = HIGH_RISK_RESPONSE if guard_result.risk_level == RiskLevel.HIGH else LOW_RISK_RESPONSE
             return {
@@ -273,12 +278,13 @@ class GraphManager:
                     context={"stage": agent_type, "agent_type": agent_type},
                 )
 
-                logger.debug(
-                    f"[GraphManager] 两阶段写入 - 用户消息已保存, AI占位: {assistant_msg_id}"
-                )
+                logger.debug("[GraphManager] 两阶段写入 - 用户消息与 AI 占位已保存")
 
             except Exception as e:
-                logger.error(f"[GraphManager] 保存用户消息失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 保存用户消息失败, error_type=%s",
+                    type(e).__name__,
+                )
                 # 持久化失败不影响对话，继续执行
 
         # 准备输入状态
@@ -330,10 +336,13 @@ class GraphManager:
                             "agent_type": current_agent,
                         },
                     )
-                    logger.debug(f"[GraphManager] 两阶段写入 - AI回复已更新: {assistant_msg_id}")
+                    logger.debug("[GraphManager] 两阶段写入 - AI 回复已更新")
 
                 except Exception as e:
-                    logger.error(f"[GraphManager] 更新 AI 回复失败: {e}", exc_info=True)
+                    logger.error(
+                        "[GraphManager] 更新 AI 回复失败, error_type=%s",
+                        type(e).__name__,
+                    )
 
             # 检测 Agent 切换并记录历史
             if previous_agent is None:
@@ -351,8 +360,9 @@ class GraphManager:
                     checkpoint_id=thread_config["configurable"].get("checkpoint_id"),
                 )
                 logger.info(
-                    f"[GraphManager] Agent 切换: {previous_agent} -> {current_agent}, "
-                    f"thread={thread_id}"
+                    "[GraphManager] Agent 切换: %s -> %s",
+                    previous_agent,
+                    current_agent,
                 )
 
             # 保存线程映射（agent_type 为主要 Agent）
@@ -382,11 +392,17 @@ class GraphManager:
                         message_id=assistant_msg_id,
                         error_message=str(e),
                     )
-                    logger.debug(f"[GraphManager] 两阶段写入 - AI回复标记失败: {assistant_msg_id}")
+                    logger.debug("[GraphManager] 两阶段写入 - AI 回复标记失败")
                 except Exception as pe:
-                    logger.error(f"[GraphManager] 更新 AI 失败状态失败: {pe}", exc_info=True)
+                    logger.error(
+                        "[GraphManager] 更新 AI 失败状态失败, error_type=%s",
+                        type(pe).__name__,
+                    )
 
-            logger.error(f"[GraphManager] chat 失败: {e}", exc_info=True)
+            logger.error(
+                "[GraphManager] chat 失败, error_type=%s",
+                type(e).__name__,
+            )
             return {
                 "response": "抱歉，我遇到了一些技术问题，请稍后再试。",
                 "agent_type": agent_type,
@@ -425,7 +441,7 @@ class GraphManager:
         thread_config = get_thread_config(session_id, conversation_id)
         thread_id = thread_config["configurable"]["thread_id"]
 
-        logger.info(f"[GraphManager] chat_stream: patient={patient_id}, thread={thread_id}")
+        logger.info("[GraphManager] chat_stream started, agent_type=%s", agent_type)
 
         # === 安全检查：角色校验 + 输入防护 ===
         from utils.role_verification import verify_role
@@ -439,8 +455,9 @@ class GraphManager:
         )
         if was_downgraded:
             logger.warning(
-                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
-                f"patient_id={patient_id}, doctor_id={doctor_id}"
+                "[GraphManager] 角色降级: %s -> %s",
+                role,
+                verified_role,
             )
             role = verified_role
             if agent_type in ("compliance", "research"):
@@ -493,7 +510,10 @@ class GraphManager:
                 )
 
             except Exception as e:
-                logger.error(f"[GraphManager] 流式 - 保存用户消息失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 流式 - 保存用户消息失败, error_type=%s",
+                    type(e).__name__,
+                )
 
         # 准备输入状态
         input_state = self._prepare_input_state(
@@ -575,7 +595,10 @@ class GraphManager:
 
         except Exception as e:
             stream_error = e
-            logger.error(f"[GraphManager] chat_stream 失败: {e}", exc_info=True)
+            logger.error(
+                "[GraphManager] chat_stream 失败, error_type=%s",
+                type(e).__name__,
+            )
             yield {
                 "type": "error",
                 "content": "抱歉，我遇到了一些技术问题，请稍后再试。",
@@ -601,10 +624,13 @@ class GraphManager:
                             "agent_type": current_agent,
                         },
                     )
-                    logger.debug(f"[GraphManager] 流式 - AI回复已保存: {assistant_msg_id}")
+                    logger.debug("[GraphManager] 流式 - AI 回复已保存")
 
             except Exception as e:
-                logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 流式 - 保存 AI 回复失败, error_type=%s",
+                    type(e).__name__,
+                )
 
     async def chat_stream_prepared_async(
         self,
@@ -747,7 +773,10 @@ class GraphManager:
         thread_config = get_thread_config(session_id, conversation_id)
         thread_id = thread_config["configurable"]["thread_id"]
 
-        logger.info(f"[GraphManager] chat_stream_async: patient={patient_id}, thread={thread_id}")
+        logger.info(
+            "[GraphManager] chat_stream_async started, agent_type=%s",
+            agent_type,
+        )
 
         allowed_branch_modes = {"normal", "edit", "regenerate"}
         if branch_mode not in allowed_branch_modes:
@@ -775,7 +804,11 @@ class GraphManager:
                 message = regenerate_user.message_content
                 regenerate_user_message_id = regenerate_user.id
             except Exception as e:
-                logger.error(f"[GraphManager] 重新生成 - 获取原始用户问题失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 重新生成 - 获取原始用户问题失败, "
+                    "error_type=%s",
+                    type(e).__name__,
+                )
                 yield {
                     "type": "error",
                     "content": str(e),
@@ -804,8 +837,9 @@ class GraphManager:
             if prepared_mode:
                 raise ValueError("PREPARED_ROLE_INVALID")
             logger.warning(
-                f"[GraphManager] 角色降级: {role} -> {verified_role}, "
-                f"patient_id={patient_id}, doctor_id={doctor_id}"
+                "[GraphManager] 角色降级: %s -> %s",
+                role,
+                verified_role,
             )
             role = verified_role
             if agent_type in ("compliance", "research"):
@@ -894,7 +928,10 @@ class GraphManager:
                     )
 
             except Exception as e:
-                logger.error(f"[GraphManager] 流式 - 准备消息树节点失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 流式 - 准备消息树节点失败, error_type=%s",
+                    type(e).__name__,
+                )
                 yield {
                     "type": "error",
                     "content": f"准备消息树节点失败: {str(e)}",
@@ -935,7 +972,11 @@ class GraphManager:
                         },
                     )
                 except Exception as e:
-                    logger.error(f"[GraphManager] 流式 - 保存安全拦截回复失败: {e}", exc_info=True)
+                    logger.error(
+                        "[GraphManager] 流式 - 保存安全拦截回复失败, "
+                        "error_type=%s",
+                        type(e).__name__,
+                    )
             yield {
                 "type": "token",
                 "content": blocked_response,
@@ -1142,10 +1183,7 @@ class GraphManager:
         except (asyncio.CancelledError, GeneratorExit) as e:
             cancelled = True
             last_error = e
-            logger.info(
-                f"[GraphManager] chat_stream_async 已取消: conversation_id={conversation_id}, "
-                f"assistant_message_id={assistant_message_id}"
-            )
+            logger.info("[GraphManager] chat_stream_async 已取消")
             raise
 
         except Exception as e:
@@ -1156,7 +1194,10 @@ class GraphManager:
                     type(e).__name__,
                 )
                 raise
-            logger.error(f"[GraphManager] chat_stream_async 失败: {e}", exc_info=True)
+            logger.error(
+                "[GraphManager] chat_stream_async 失败, error_type=%s",
+                type(e).__name__,
+            )
             yield {
                 "type": "error",
                 "content": "抱歉，我遇到了一些技术问题，请稍后再试。",
@@ -1194,13 +1235,14 @@ class GraphManager:
                         },
                     )
                     logger.info(
-                        f"[GraphManager] 流式 - AI回复终态已保存: "
-                        f"message_id={assistant_message_id}, status={final_status}"
+                        "[GraphManager] 流式 - AI 回复终态已保存, status=%s",
+                        final_status,
                     )
                 except Exception as persist_error:
                     logger.error(
-                        f"[GraphManager] 流式 - 保存 AI 回复终态失败: {persist_error}",
-                        exc_info=True,
+                        "[GraphManager] 流式 - 保存 AI 回复终态失败, "
+                        "error_type=%s",
+                        type(persist_error).__name__,
                     )
 
         # 兜底：节点内部使用阻塞 agent.invoke 时，astream_events 捕获不到 on_chat_model_stream，
@@ -1234,7 +1276,10 @@ class GraphManager:
                         type(e).__name__,
                     )
                 else:
-                    logger.warning(f"[GraphManager] 流式回退 last_response 失败: {e}")
+                    logger.warning(
+                        "[GraphManager] 流式回退 last_response 失败, error_type=%s",
+                        type(e).__name__,
+                    )
 
         if token_used is None and not last_error and streaming_graph is not None:
             try:
@@ -1251,7 +1296,11 @@ class GraphManager:
                         type(e).__name__,
                     )
                 else:
-                    logger.debug(f"[GraphManager] 流式回退提取 token_used 失败: {e}")
+                    logger.debug(
+                        "[GraphManager] 流式回退提取 token_used 失败, "
+                        "error_type=%s",
+                        type(e).__name__,
+                    )
 
         stream_completed = not last_error and not cancelled
 
@@ -1280,10 +1329,13 @@ class GraphManager:
                         "agent_type": current_agent,
                     },
                 )
-                logger.debug(f"[GraphManager] 流式 - AI回复已保存: {assistant_message_id}")
+                logger.debug("[GraphManager] 流式 - AI 回复已保存")
 
             except Exception as e:
-                logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
+                logger.error(
+                    "[GraphManager] 流式 - 保存 AI 回复失败, error_type=%s",
+                    type(e).__name__,
+                )
 
         final_citations = merge_citations(
             collected_citations,
@@ -1347,7 +1399,9 @@ class GraphManager:
             _conversation, messages, _sibling_map = load_active_path(conversation_id)
         except Exception as e:
             logger.warning(
-                f"[GraphManager] 加载分支 active path 失败，将使用当前消息作为上下文: {e}"
+                "[GraphManager] 加载分支 active path 失败，将使用当前消息作为上下文, "
+                "error_type=%s",
+                type(e).__name__,
             )
             return []
 
@@ -1394,7 +1448,10 @@ class GraphManager:
                 return checkpoint.checkpoint
             return None
         except Exception as e:
-            logger.error(f"[GraphManager] 获取状态失败: {e}")
+            logger.error(
+                "[GraphManager] 获取状态失败, error_type=%s",
+                type(e).__name__,
+            )
             return None
 
     def reset_conversation(
@@ -1417,7 +1474,10 @@ class GraphManager:
         try:
             return self.checkpointer.delete_thread(thread_id)
         except Exception as e:
-            logger.error(f"[GraphManager] 重置会话失败: {e}")
+            logger.error(
+                "[GraphManager] 重置会话失败, error_type=%s",
+                type(e).__name__,
+            )
             return False
 
     def get_agent_history(
@@ -1440,7 +1500,10 @@ class GraphManager:
         try:
             return self.checkpointer.get_agent_history(thread_id)
         except Exception as e:
-            logger.error(f"[GraphManager] 获取 Agent 历史失败: {e}")
+            logger.error(
+                "[GraphManager] 获取 Agent 历史失败, error_type=%s",
+                type(e).__name__,
+            )
             return []
 
     def get_checkpoints(
@@ -1465,7 +1528,10 @@ class GraphManager:
         try:
             return self.checkpointer.list_checkpoints_summary(thread_id, limit)
         except Exception as e:
-            logger.error(f"[GraphManager] 获取检查点列表失败: {e}")
+            logger.error(
+                "[GraphManager] 获取检查点列表失败, error_type=%s",
+                type(e).__name__,
+            )
             return []
 
     def get_messages(
@@ -1516,7 +1582,10 @@ class GraphManager:
             }
 
         except Exception as e:
-            logger.error(f"[GraphManager] 获取消息历史失败: {e}")
+            logger.error(
+                "[GraphManager] 获取消息历史失败, error_type=%s",
+                type(e).__name__,
+            )
             return {"message_count": 0, "messages": []}
 
     def _prepare_input_state(
@@ -1594,16 +1663,12 @@ class GraphManager:
                     "check_history": profile.get("checkHistory") or [],
                     "prescriptions": profile.get("prescriptions") or [],
                 }
-
-                logger.debug(
-                    f"[GraphManager] 综合画像加载成功: "
-                    f"name={(state.get('patient_info') or {}).get('name', 'N/A')}, "
-                    f"records={len(state['patient_full_data']['medical_records'])}, "
-                    f"checks={len(state['patient_full_data']['check_history'])}, "
-                    f"prescriptions={len(state['patient_full_data']['prescriptions'])}"
-                )
+                logger.debug("[GraphManager] 综合画像加载成功")
         except Exception as _e:
-            logger.warning(f"[GraphManager] 加载综合画像失败，将继续执行: {_e}")
+            logger.warning(
+                "[GraphManager] 加载综合画像失败，将继续执行, error_type=%s",
+                type(_e).__name__,
+            )
             # patient_info / patient_full_data 保持 None，各 context builder 已优雅降级
 
         # 合并额外参数
@@ -1680,7 +1745,11 @@ class GraphManager:
             messages = values.get("messages", [])
             return len(messages) if isinstance(messages, list) else 0
         except Exception as e:
-            logger.debug(f"[GraphManager] 读取历史消息数量失败，跳过本轮范围判断: {e}")
+            logger.debug(
+                "[GraphManager] 读取历史消息数量失败，跳过本轮范围判断, "
+                "error_type=%s",
+                type(e).__name__,
+            )
             return 0
 
     def _extract_citations(
