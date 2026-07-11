@@ -6,7 +6,9 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -26,9 +28,16 @@ _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ERROR_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _MAX_STDOUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+_LABEL_KEY = "eyeagent.attachment-parser.run"
+_STARTUP_CLEANUP_WAIT_SECONDS = 2.0
 
 
 CommandRunner = Callable[..., Awaitable[int]]
+LabelFinder = Callable[[str, str], Awaitable[tuple[str, ...]]]
+
+
+class _WorkerOutputLimitError(RuntimeError):
+    pass
 
 
 class AttachmentParserSandbox:
@@ -96,7 +105,9 @@ class AttachmentParserSandbox:
         cid_directory: Path | None = None
         cidfile: Path | None = None
         process: asyncio.subprocess.Process | None = None
-        runner_launch_attempted = False
+        launch_task: asyncio.Task | None = None
+        launch_interrupted = False
+        label: str | None = None
 
         try:
             try:
@@ -110,9 +121,14 @@ class AttachmentParserSandbox:
                 os.chmod(request_directory, 0o700)
                 os.chmod(cid_directory, 0o700)
                 input_directory = request_directory / "input"
-                output_directory = request_directory / "output"
+                output_bundle = request_directory / "output.bundle"
                 input_directory.mkdir(mode=0o700)
-                output_directory.mkdir(mode=0o700)
+                bundle_descriptor = os.open(
+                    output_bundle,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                os.close(bundle_descriptor)
             except OSError as exc:
                 raise AttachmentParserError(
                     "ATTACHMENT_SANDBOX_UNAVAILABLE"
@@ -132,36 +148,49 @@ class AttachmentParserSandbox:
                 raise AttachmentParserError("ATTACHMENT_SANDBOX_LABEL_INVALID")
 
             try:
-                runner_launch_attempted = True
-                process = await asyncio.create_subprocess_exec(
-                    str(self._runner_path),
-                    str(input_directory),
-                    str(output_directory),
-                    str(cidfile),
-                    label,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                launch_task = asyncio.create_task(
+                    asyncio.create_subprocess_exec(
+                        str(self._runner_path),
+                        str(input_directory),
+                        str(output_bundle),
+                        str(cidfile),
+                        label,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        limit=_MAX_STDOUT_BYTES + 1,
+                    )
                 )
-            except (OSError, asyncio.SubprocessError) as exc:
+                process = await asyncio.shield(launch_task)
+            except asyncio.CancelledError:
+                launch_interrupted = True
+                raise
+            except (OSError, subprocess.SubprocessError) as exc:
                 raise AttachmentParserError("ATTACHMENT_SANDBOX_UNAVAILABLE") from exc
 
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(request.to_json_bytes()),
+                    _communicate_bounded(process, request.to_json_bytes()),
                     timeout=self._timeout_seconds,
                 )
+            except _WorkerOutputLimitError as exc:
+                await _stop_process(process)
+                raise AttachmentParserError(
+                    "ATTACHMENT_WORKER_OUTPUT_LIMIT"
+                ) from exc
             except asyncio.TimeoutError as exc:
+                launch_interrupted = True
                 await _stop_process(process)
                 raise AttachmentParserError("ATTACHMENT_PARSER_TIMEOUT") from exc
             except asyncio.CancelledError:
+                launch_interrupted = True
                 await asyncio.shield(_stop_process(process))
                 raise
 
             if process.returncode != 0:
                 raise AttachmentParserError(_worker_error_code(stderr))
-            pages = _read_validated_pages(
-                output_directory,
+            pages = _read_validated_bundle(
+                output_bundle,
                 stdout,
                 (
                     str(_value(downloaded, "mime_type"))
@@ -176,6 +205,8 @@ class AttachmentParserSandbox:
                 pages=pages,
             )
         finally:
+            if launch_task is not None and process is None:
+                process = await asyncio.shield(_reclaim_launch_task(launch_task))
             if process is not None and process.returncode is None:
                 await asyncio.shield(_stop_process(process))
             if cidfile is not None:
@@ -183,9 +214,10 @@ class AttachmentParserSandbox:
                     _cleanup_container(
                         cidfile,
                         docker_binary=self._docker_binary,
+                        label=label,
                         wait_for_cidfile_seconds=(
-                            1.0
-                            if runner_launch_attempted and process is None
+                            _STARTUP_CLEANUP_WAIT_SECONDS
+                            if launch_interrupted
                             else 0.0
                         ),
                     )
@@ -210,35 +242,52 @@ async def _cleanup_container(
     *,
     docker_binary: str,
     command_runner: CommandRunner | None = None,
+    label: str | None = None,
+    label_finder: LabelFinder | None = None,
     wait_for_cidfile_seconds: float = 0.0,
 ) -> None:
     runner = command_runner or _run_cleanup_command
+    find_by_label = label_finder or _find_labeled_containers
     try:
         deadline = asyncio.get_running_loop().time() + max(
             wait_for_cidfile_seconds,
             0.0,
         )
-        container_id = ""
+        cleaned_container_ids: set[str] = set()
         while True:
+            discovered: list[str] = []
             try:
                 container_id = cidfile.read_text(encoding="ascii").strip()
-                break
+                if _CID_PATTERN.fullmatch(container_id):
+                    discovered.append(container_id)
             except FileNotFoundError:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(0.05, remaining))
+                pass
             except (OSError, UnicodeError):
+                pass
+            if label is not None:
+                try:
+                    discovered.extend(await find_by_label(docker_binary, label))
+                except BaseException:
+                    pass
+            container_ids = tuple(dict.fromkeys(
+                item for item in discovered if _CID_PATTERN.fullmatch(item)
+            ))
+            for container_id in container_ids:
+                if container_id in cleaned_container_ids:
+                    continue
+                try:
+                    await runner(docker_binary, "kill", container_id)
+                except BaseException:
+                    pass
+                try:
+                    await runner(docker_binary, "rm", "-f", container_id)
+                except BaseException:
+                    pass
+                cleaned_container_ids.add(container_id)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
                 break
-        if _CID_PATTERN.fullmatch(container_id):
-            try:
-                await runner(docker_binary, "kill", container_id)
-            except BaseException:
-                pass
-            try:
-                await runner(docker_binary, "rm", "-f", container_id)
-            except BaseException:
-                pass
+            await asyncio.sleep(min(0.05, remaining))
     finally:
         try:
             cidfile.unlink()
@@ -255,22 +304,130 @@ async def _run_cleanup_command(*command: str) -> int:
             stderr=asyncio.subprocess.DEVNULL,
         )
         return await process.wait()
-    except (OSError, asyncio.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return 127
 
 
 async def _run_capture_command(*command: str) -> tuple[int, bytes, bytes]:
+    process = None
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_MAX_STDOUT_BYTES + 1,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+        stdout, stderr = await asyncio.wait_for(
+            _communicate_bounded(process),
+            timeout=15,
+        )
         return process.returncode or 0, stdout, stderr
-    except (OSError, asyncio.SubprocessError, asyncio.TimeoutError):
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        asyncio.TimeoutError,
+        _WorkerOutputLimitError,
+    ):
         return 127, b"", b""
+    finally:
+        if process is not None and process.returncode is None:
+            await _stop_process(process)
+
+
+async def _find_labeled_containers(
+    docker_binary: str,
+    label: str,
+) -> tuple[str, ...]:
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", label):
+        return ()
+    return_code, stdout, _ = await _run_capture_command(
+        docker_binary,
+        "ps",
+        "-aq",
+        "--filter",
+        f"label={_LABEL_KEY}={label}",
+    )
+    if return_code != 0:
+        return ()
+    container_ids = []
+    for raw_line in stdout.splitlines():
+        try:
+            container_id = raw_line.decode("ascii")
+        except UnicodeDecodeError:
+            continue
+        if _CID_PATTERN.fullmatch(container_id):
+            container_ids.append(container_id)
+    return tuple(container_ids)
+
+
+async def _communicate_bounded(
+    process: asyncio.subprocess.Process,
+    payload: bytes | None = None,
+) -> tuple[bytes, bytes]:
+    stdout_task = asyncio.create_task(_read_stream_bounded(process.stdout))
+    stderr_task = asyncio.create_task(_read_stream_bounded(process.stderr))
+    wait_task = asyncio.create_task(process.wait())
+    tasks = [stdout_task, stderr_task, wait_task]
+    if payload is not None:
+        tasks.append(asyncio.create_task(_write_process_stdin(process, payload)))
+    try:
+        await asyncio.gather(*tasks)
+        return stdout_task.result(), stderr_task.result()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _read_stream_bounded(
+    stream: asyncio.StreamReader | None,
+) -> bytes:
+    if stream is None:
+        return b""
+    output = bytearray()
+    while True:
+        remaining = _MAX_STDOUT_BYTES + 1 - len(output)
+        chunk = await stream.read(min(16 * 1024, max(remaining, 1)))
+        if not chunk:
+            return bytes(output)
+        output.extend(chunk)
+        if len(output) > _MAX_STDOUT_BYTES:
+            raise _WorkerOutputLimitError()
+
+
+async def _write_process_stdin(
+    process: asyncio.subprocess.Process,
+    payload: bytes,
+) -> None:
+    if process.stdin is None:
+        return
+    try:
+        process.stdin.write(payload)
+        await process.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        process.stdin.close()
+        try:
+            await process.stdin.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+async def _reclaim_launch_task(
+    launch_task: asyncio.Task,
+) -> asyncio.subprocess.Process | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(launch_task),
+            timeout=5,
+        )
+    except BaseException:
+        if not launch_task.done():
+            launch_task.cancel()
+        return None
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
@@ -286,8 +443,8 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
         pass
 
 
-def _read_validated_pages(
-    output_directory: Path,
+def _read_validated_bundle(
+    output_bundle: Path,
     stdout: bytes,
     mime_type: str,
 ) -> tuple[ParsedAttachmentPage, ...]:
@@ -295,52 +452,59 @@ def _read_validated_pages(
         raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
     manifest = WorkerManifest.from_json_bytes(stdout)
     try:
-        output_root = output_directory.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
-
-    expected_names = {page.relative_path for page in manifest.pages}
-    try:
-        actual_names = {entry.name for entry in output_root.iterdir()}
+        metadata = output_bundle.lstat()
     except OSError as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
-    if actual_names != expected_names:
+    if (
+        output_bundle.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if metadata.st_size > _MAX_OUTPUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
 
+    expected_names = {page.relative_path for page in manifest.pages}
     parsed_pages: list[ParsedAttachmentPage] = []
     total_bytes = 0
-    for page in manifest.pages:
-        candidate = output_root / page.relative_path
-        try:
-            metadata = candidate.lstat()
-            real_path = candidate.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
-        if (
-            candidate.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or real_path.parent != output_root
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-        ):
-            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
-        total_bytes += metadata.st_size
-        if total_bytes > _MAX_OUTPUT_BYTES:
-            raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
-        try:
-            content = real_path.read_bytes()
-        except OSError as exc:
-            raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
-        digest = hashlib.sha256(content).hexdigest()
-        if digest != page.sha256:
-            raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
-        parsed_pages.append(
-            ParsedAttachmentPage(
-                page_number=page.page_number,
-                mime_type=mime_type,
-                sha256=digest,
-                content=content,
-            )
-        )
+    try:
+        with zipfile.ZipFile(output_bundle, mode="r") as archive:
+            entries = archive.infolist()
+            actual_names = {entry.filename for entry in entries}
+            if len(entries) != len(actual_names) or actual_names != expected_names:
+                raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+            entries_by_name = {entry.filename: entry for entry in entries}
+            for page in manifest.pages:
+                entry = entries_by_name[page.relative_path]
+                if (
+                    entry.is_dir()
+                    or entry.flag_bits & 0x1
+                    or entry.compress_type != zipfile.ZIP_STORED
+                    or entry.compress_size != entry.file_size
+                ):
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+                total_bytes += entry.file_size
+                if total_bytes > _MAX_OUTPUT_BYTES:
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+                with archive.open(entry, mode="r") as input_file:
+                    content = input_file.read(entry.file_size + 1)
+                if len(content) != entry.file_size:
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED")
+                digest = hashlib.sha256(content).hexdigest()
+                if digest != page.sha256:
+                    raise AttachmentParserError(
+                        "ATTACHMENT_OUTPUT_HASH_MISMATCH"
+                    )
+                parsed_pages.append(ParsedAttachmentPage(
+                    page_number=page.page_number,
+                    mime_type=mime_type,
+                    sha256=digest,
+                    content=content,
+                ))
+    except AttachmentParserError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
     return tuple(parsed_pages)
 
 

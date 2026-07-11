@@ -224,6 +224,42 @@ class AttachmentParserLimitsTest(unittest.TestCase):
                     self.output_dir,
                 )
 
+    def test_bundle_rejects_cumulative_multi_file_output_before_host_write(self):
+        from infrastructure.attachments.attachment_parser_worker import (
+            _write_output_bundle,
+        )
+        from infrastructure.attachments.parser_protocol import (
+            WorkerManifest,
+            WorkerPageManifest,
+        )
+
+        tmpfs_output = self.output_dir / "tmpfs"
+        host_bundle = self.output_dir / "output.bundle"
+        tmpfs_output.mkdir()
+        host_bundle.touch(mode=0o600)
+        first = tmpfs_output / "page-0001.jpg"
+        second = tmpfs_output / "page-0002.jpg"
+        first.write_bytes(b"a" * 6)
+        second.write_bytes(b"b" * 6)
+        first.chmod(0o600)
+        second.chmod(0o600)
+        manifest = WorkerManifest((
+            WorkerPageManifest(1, first.name, hashlib.sha256(first.read_bytes()).hexdigest()),
+            WorkerPageManifest(2, second.name, hashlib.sha256(second.read_bytes()).hexdigest()),
+        ))
+
+        with patch(
+            "infrastructure.attachments.attachment_parser_worker._MAX_OUTPUT_TOTAL_BYTES",
+            10,
+        ):
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_LIMIT",
+            ):
+                _write_output_bundle(manifest, tmpfs_output, host_bundle)
+
+        self.assertEqual(host_bundle.read_bytes(), b"")
+
 
 if __name__ == "__main__":
     unittest.main()

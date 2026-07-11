@@ -4,6 +4,7 @@ import os
 import resource
 import stat
 import sys
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -20,6 +21,7 @@ from utils.pdf_utils import StrictPdfError, render_pdf_path_strict
 MAX_IMAGE_PIXELS = 50_000_000
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024
+_MAX_OUTPUT_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 def parse_attachment_file(
@@ -153,6 +155,53 @@ def _resolve_directory(path: Path | str) -> Path:
     return resolved
 
 
+def _write_output_bundle(
+    manifest: WorkerManifest,
+    output_dir: Path | str,
+    bundle_path: Path | str,
+) -> None:
+    output_root = _resolve_directory(output_dir)
+    bundle = Path(bundle_path)
+    try:
+        bundle_metadata = bundle.lstat()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    if bundle.is_symlink() or not stat.S_ISREG(bundle_metadata.st_mode):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+
+    validated: list[tuple[Path, str]] = []
+    total_bytes = 0
+    for page in manifest.pages:
+        source = output_root / page.relative_path
+        try:
+            metadata = source.lstat()
+            resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+        if (
+            source.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or resolved.parent != output_root
+        ):
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        total_bytes += metadata.st_size
+        if total_bytes > _MAX_OUTPUT_TOTAL_BYTES:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+        validated.append((resolved, page.relative_path))
+
+    try:
+        with zipfile.ZipFile(
+            bundle,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+            allowZip64=False,
+        ) as archive:
+            for source, relative_path in validated:
+                archive.write(source, arcname=relative_path)
+    except (OSError, RuntimeError, zipfile.LargeZipFile) as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_FAILED") from exc
+
+
 def _apply_resource_limits() -> None:
     limits = (
         (resource.RLIMIT_CPU, 120, 121),
@@ -209,6 +258,7 @@ def main() -> int:
         _assert_network_namespace_isolated()
         _assert_input_is_read_only(Path("/input") / request.input_filename)
         manifest = parse_attachment_file(request, Path("/input"), Path("/output"))
+        _write_output_bundle(manifest, Path("/output"), Path("/output.bundle"))
         sys.stdout.buffer.write(manifest.to_json_bytes())
         sys.stdout.buffer.write(b"\n")
         sys.stdout.buffer.flush()
