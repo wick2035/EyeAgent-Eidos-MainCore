@@ -497,6 +497,35 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.claim_calls, [])
         self.assertEqual(self.processor.calls, [])
 
+    async def test_pre_await_deadline_closes_coroutine_and_cancels_future(self):
+        service = self._service()
+
+        async def pending_work():
+            await asyncio.sleep(0)
+
+        coroutine = pending_work()
+        try:
+            with self.assertRaises(ResearchDocumentIngestionError):
+                await service._await_deadline(
+                    coroutine,
+                    time.monotonic() - 1,
+                )
+            self.assertIsNone(coroutine.cr_frame)
+        finally:
+            coroutine.close()
+
+        future = asyncio.get_running_loop().create_future()
+        try:
+            with self.assertRaises(ResearchDocumentIngestionError):
+                await service._await_deadline(
+                    future,
+                    time.monotonic() - 1,
+                )
+            self.assertTrue(future.cancelled())
+        finally:
+            if not future.done():
+                future.cancel()
+
     async def test_pdf_identity_uses_fixed_versions_and_failed_record_is_taken_over(self):
         item = _downloaded(
             self.temp.name,

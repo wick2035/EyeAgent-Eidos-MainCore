@@ -338,7 +338,11 @@ class ResearchDocumentIngestionService:
             pass
 
     async def _await_deadline(self, awaitable: Any, deadline: float | None):
-        remaining = self._remaining(deadline)
+        try:
+            remaining = self._remaining(deadline)
+        except BaseException:
+            _dispose_unawaited(awaitable)
+            raise
         try:
             if remaining is None:
                 return await awaitable
@@ -582,6 +586,16 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
         if not task.done():
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _dispose_unawaited(awaitable: Any) -> None:
+    if isinstance(awaitable, asyncio.Future):
+        if not awaitable.done():
+            awaitable.cancel()
+        return
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
 
 
 def _is_sha256(value: Any) -> bool:
