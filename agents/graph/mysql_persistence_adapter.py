@@ -8,6 +8,10 @@ from contextvars import ContextVar
 from typing import Optional, Dict, Any, List
 
 from agents.graph.persistence_adapter import PersistenceAdapter
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+    parse_legacy_text_turn_metadata,
+)
 from domain.models.chat_entity import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -147,15 +151,18 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         content: str,
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional[LegacyTextTurnAuthority] = None,
     ) -> Dict[str, str]:
+        if not isinstance(expected_authority, LegacyTextTurnAuthority):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
         msg_context = self._build_user_context(context, False)
-        user, assistant = self.service.create_turn(
-            chat_id,
-            content,
-            sender_id,
-            msg_context,
+        user, assistant = self.service.create_legacy_edit_turn(
+            chat_id=chat_id,
+            content=content,
+            sender_id=sender_id,
+            context=msg_context,
             source_message_id=source_message_id,
-            mode="edit",
+            expected_authority=expected_authority,
         )
         return {"user_message_id": user.id, "assistant_message_id": assistant.id}
 
@@ -164,12 +171,22 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         chat_id: str,
         source_assistant_id: str,
         context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional[LegacyTextTurnAuthority] = None,
     ) -> Dict[str, str]:
+        if (
+            not isinstance(doctor_id, str)
+            or not doctor_id
+            or not isinstance(expected_authority, LegacyTextTurnAuthority)
+        ):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
         msg_context = self._build_assistant_context(context)
-        assistant = self.service.create_assistant_regeneration(
-            chat_id,
-            source_assistant_id,
-            msg_context,
+        assistant = self.service.create_legacy_assistant_regeneration(
+            chat_id=chat_id,
+            source_assistant_id=source_assistant_id,
+            doctor_id=doctor_id,
+            expected_authority=expected_authority,
+            context=msg_context,
         )
         return {"assistant_message_id": assistant.id}
 
@@ -374,16 +391,32 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         if not context:
             return None
 
+        metadata = None
+        if context.get("agent_type"):
+            metadata = {
+                "agent_type": context.get("agent_type"),
+                "patient_id": context.get("patient_id"),
+            }
+            has_configuration = "turn_configuration" in context
+            has_attachments = "attachment_ids" in context
+            if has_configuration != has_attachments:
+                raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+            if has_configuration:
+                metadata.update({
+                    "turn_configuration": context["turn_configuration"],
+                    "attachment_ids": context["attachment_ids"],
+                })
+                metadata = parse_legacy_text_turn_metadata(
+                    metadata,
+                ).to_message_metadata()
+
         return MessageContext(
             # patient_info 仅首条消息保存
             patient_info=context.get("patient_info") if is_first_message else None,
             conversation_stage=context.get("stage"),
             tool_results=None,  # 用户消息无 tool_results
             citations=None,  # 用户消息无 citations
-            metadata={
-                "agent_type": context.get("agent_type"),
-                "patient_id": context.get("patient_id"),
-            } if context.get("agent_type") else None,
+            metadata=metadata,
         )
 
     def _build_assistant_context(

@@ -10,10 +10,36 @@ from application.services.chat_persistence_service import (
     ChatPersistenceService,
     LegacyBranchSourceInvalidError,
 )
+from application.services.legacy_text_turn_authority import (
+    build_legacy_text_turn_authority,
+)
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from agents.graph.mysql_persistence_adapter import MySQLPersistenceAdapter
+
+
+RESEARCH_TURN_CONFIGURATION = {
+    "protocol_version": 2,
+    "agent_type": "research",
+    "attachment_scope": "research",
+    "research_options": {
+        "enable_institution_data": True,
+        "enable_web_search": True,
+        "types": ["general", "pubmed"],
+    },
+}
+
+
+def research_text_context() -> MessageContext:
+    return MessageContext(
+        metadata={
+            "agent_type": "research",
+            "patient_id": None,
+            "turn_configuration": RESEARCH_TURN_CONFIGURATION,
+            "attachment_ids": [],
+        },
+    )
 
 
 class ChatTreeEntityTest(unittest.TestCase):
@@ -203,9 +229,7 @@ class ChatTreeServiceTest(unittest.TestCase):
             chat_id,
             "原问题",
             "doctor-1",
-            context=MessageContext(
-                metadata={"agent_type": "research", "patient_id": None}
-            ),
+            context=research_text_context(),
         )
         source.parent_id = "foreign-or-missing-parent"
         before_count = len(msg_repo.items)
@@ -227,9 +251,7 @@ class ChatTreeServiceTest(unittest.TestCase):
                 chat_id,
                 "篡改后的问题",
                 "doctor-1",
-                context=MessageContext(
-                    metadata={"agent_type": "research", "patient_id": None}
-                ),
+                context=research_text_context(),
                 source_message_id=source.id,
                 mode="edit",
             )
@@ -243,9 +265,7 @@ class ChatTreeServiceTest(unittest.TestCase):
     def test_edit_authority_accepts_successful_assistant_parent_on_active_path(self):
         service, _, _ = self.make_service()
         chat_id = service.create_conversation("doctor-1", "doctor", "科研对话")
-        context = MessageContext(
-            metadata={"agent_type": "research", "patient_id": None}
-        )
+        context = research_text_context()
         _first_user, first_assistant = service.create_turn(
             chat_id,
             "第一问",
@@ -261,13 +281,169 @@ class ChatTreeServiceTest(unittest.TestCase):
         )
         active_assistant.status = "success"
 
-        service.assert_legacy_branch_authority(
+        configuration = service.assert_legacy_branch_authority(
             chat_id=chat_id,
             source_message_id=source.id,
             branch_mode="edit",
             doctor_id="doctor-1",
             agent_type="research",
             patient_id=None,
+        )
+
+        self.assertEqual(
+            configuration.to_turn_configuration(),
+            RESEARCH_TURN_CONFIGURATION,
+        )
+
+    def test_branch_authority_rejects_research_option_drift(self):
+        service, _, _ = self.make_service()
+        chat_id = service.create_conversation(
+            "doctor-1",
+            "doctor",
+            "科研对话",
+        )
+        source, assistant = service.create_turn(
+            chat_id,
+            "原问题",
+            "doctor-1",
+            context=research_text_context(),
+        )
+        assistant.status = "success"
+        context = json.loads(source.context)
+        metadata = next(
+            item["metadata"]
+            for item in context
+            if "metadata" in item
+        )
+        metadata["turn_configuration"]["research_options"][
+            "types"
+        ] = ["pubmed", "general"]
+        source.context = json.dumps(context)
+
+        with self.assertRaises(LegacyBranchSourceInvalidError):
+            service.assert_legacy_branch_authority(
+                chat_id=chat_id,
+                source_message_id=source.id,
+                branch_mode="edit",
+                doctor_id="doctor-1",
+                agent_type="research",
+                patient_id=None,
+            )
+
+    def test_branch_authority_rejects_empty_text_source(self):
+        service, _, _ = self.make_service()
+        chat_id = service.create_conversation(
+            "doctor-1",
+            "doctor",
+            "科研对话",
+        )
+        source, assistant = service.create_turn(
+            chat_id,
+            "   ",
+            "doctor-1",
+            context=research_text_context(),
+        )
+        assistant.status = "success"
+
+        with self.assertRaises(LegacyBranchSourceInvalidError):
+            service.assert_legacy_branch_authority(
+                chat_id=chat_id,
+                source_message_id=source.id,
+                branch_mode="edit",
+                doctor_id="doctor-1",
+                agent_type="research",
+                patient_id=None,
+            )
+
+    def test_atomic_edit_revalidates_active_path_before_write(self):
+        service, conv_repo, msg_repo = self.make_service()
+        chat_id = service.create_conversation(
+            "doctor-1",
+            "doctor",
+            "科研对话",
+        )
+        root_id = conv_repo.get_by_id(chat_id).active_node_id
+        source, assistant = service.create_turn(
+            chat_id,
+            "原问题",
+            "doctor-1",
+            context=research_text_context(),
+        )
+        assistant.status = "success"
+        authority = service.assert_legacy_branch_authority(
+            chat_id=chat_id,
+            source_message_id=source.id,
+            branch_mode="edit",
+            doctor_id="doctor-1",
+            agent_type="research",
+            patient_id=None,
+        )
+        before_count = len(msg_repo.items)
+
+        conv_repo.get_by_id(chat_id).active_node_id = root_id
+
+        with self.assertRaises(LegacyBranchSourceInvalidError):
+            service.create_legacy_edit_turn(
+                chat_id=chat_id,
+                source_message_id=source.id,
+                content="编辑后的问题",
+                sender_id="doctor-1",
+                context=research_text_context(),
+                expected_authority=authority,
+            )
+
+        self.assertEqual(len(msg_repo.items), before_count)
+        self.assertEqual(
+            conv_repo.get_by_id(chat_id).active_node_id,
+            root_id,
+        )
+
+    def test_atomic_regenerate_rejects_authority_drift_before_write(self):
+        service, conv_repo, msg_repo = self.make_service()
+        chat_id = service.create_conversation(
+            "doctor-1",
+            "doctor",
+            "科研对话",
+        )
+        source, assistant = service.create_turn(
+            chat_id,
+            "原问题",
+            "doctor-1",
+            context=research_text_context(),
+        )
+        assistant.status = "success"
+        authority = service.assert_legacy_branch_authority(
+            chat_id=chat_id,
+            source_message_id=assistant.id,
+            branch_mode="regenerate",
+            doctor_id="doctor-1",
+            agent_type="research",
+            patient_id=None,
+        )
+        source.context = MessageContext(
+            metadata=build_legacy_text_turn_authority(
+                agent_type="research",
+                patient_id=None,
+                enable_institution_data=False,
+                enable_web_search=False,
+                web_search_types=[],
+            ).to_message_metadata(),
+        ).to_json()
+        before_count = len(msg_repo.items)
+        before_active = conv_repo.get_by_id(chat_id).active_node_id
+
+        with self.assertRaises(LegacyBranchSourceInvalidError):
+            service.create_legacy_assistant_regeneration(
+                chat_id=chat_id,
+                source_assistant_id=assistant.id,
+                doctor_id="doctor-1",
+                expected_authority=authority,
+            )
+
+        self.assertEqual(len(msg_repo.items), before_count)
+        self.assertEqual(
+            conv_repo.get_by_id(chat_id).active_node_id,
+            before_active,
         )
 
     def test_regenerate_creates_assistant_sibling_under_same_user(self):
@@ -334,6 +510,23 @@ class FakeTreeService:
             status="streaming",
         )
 
+    def create_legacy_edit_turn(self, **kwargs):
+        return self.create_turn(
+            kwargs["chat_id"],
+            kwargs["content"],
+            kwargs["sender_id"],
+            context=kwargs.get("context"),
+            source_message_id=kwargs["source_message_id"],
+            mode="edit",
+        )
+
+    def create_legacy_assistant_regeneration(self, **kwargs):
+        return self.create_assistant_regeneration(
+            kwargs["chat_id"],
+            kwargs["source_assistant_id"],
+            context=kwargs.get("context"),
+        )
+
     def update_conversation_title(self, chat_id, first_message):
         self.title_updates.append((chat_id, first_message))
         return True
@@ -352,6 +545,8 @@ class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
                 "stage": "research",
                 "agent_type": "research",
                 "patient_id": None,
+                "turn_configuration": RESEARCH_TURN_CONFIGURATION,
+                "attachment_ids": [],
             },
         )
 
@@ -359,7 +554,12 @@ class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
         self.assertIsInstance(context, MessageContext)
         self.assertEqual(
             context.metadata,
-            {"agent_type": "research", "patient_id": None},
+            {
+                "agent_type": "research",
+                "patient_id": None,
+                "turn_configuration": RESEARCH_TURN_CONFIGURATION,
+                "attachment_ids": [],
+            },
         )
 
     def test_empty_first_message_does_not_update_conversation_title(self):
@@ -405,11 +605,17 @@ class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
     def test_prepare_regenerate_turn_passes_context_to_service(self):
         service = FakeTreeService()
         adapter = MySQLPersistenceAdapter(service)
+        authority = build_legacy_text_turn_authority(
+            agent_type="health",
+            patient_id="patient-1",
+        )
 
         ids = adapter.prepare_regenerate_turn(
             "chat-1",
             "assistant-1",
             {"stage": "health", "agent_type": "recommendation"},
+            doctor_id="doctor-1",
+            expected_authority=authority,
         )
 
         self.assertEqual(ids["assistant_message_id"], "assistant-regenerated")

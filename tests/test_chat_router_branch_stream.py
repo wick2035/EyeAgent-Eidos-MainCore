@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agents.graph_manager import GraphManager, PreparedGraphTerminal
+from application.services.legacy_text_turn_authority import (
+    build_legacy_text_turn_authority,
+)
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
 from presentation.routers.conversation_router import get_conversation_detail, switch_active_branch
 from presentation.schemas.conversation_schemas import ActiveBranchRequest
@@ -84,11 +87,13 @@ class FailingPreparePersistence:
 class PreparedPersistence:
     def __init__(self):
         self.updated_success = None
+        self.prepare_kwargs = None
 
     def is_first_message(self, chat_id):
         return False
 
     def prepare_normal_turn(self, **kwargs):
+        self.prepare_kwargs = kwargs
         return {"user_message_id": "u1", "assistant_message_id": "a1"}
 
     def update_assistant_success(self, **kwargs):
@@ -106,6 +111,7 @@ class FakeMessageRepo:
 
 class RegeneratePersistence:
     def __init__(self, assistant_chat_id="c1"):
+        self.prepare_kwargs = None
         self.service = SimpleNamespace(message_repo=FakeMessageRepo({
             "a1": ChatMessageEntity(
                 id="a1",
@@ -129,18 +135,21 @@ class RegeneratePersistence:
         return False
 
     def prepare_regenerate_turn(self, **kwargs):
+        self.prepare_kwargs = kwargs
         return {"assistant_message_id": "a2"}
 
 
 class BranchScopedPersistence:
     def __init__(self):
         self.success = None
+        self.prepare_kwargs = None
         self.service = SimpleNamespace(load_active_path=self.load_active_path)
 
     def is_first_message(self, chat_id):
         return False
 
     def prepare_edit_resend_turn(self, **kwargs):
+        self.prepare_kwargs = kwargs
         return {"user_message_id": "u2", "assistant_message_id": "a2"}
 
     def load_active_path(self, conversation_id):
@@ -509,8 +518,45 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
         self.assertEqual(chunks[1]["type"], "token")
         self.assertTrue(chunks[1]["metadata"]["security_blocked"])
 
+    def test_normal_research_persists_text_turn_authority(self):
+        from utils.role_verification import clear_cache
+
+        clear_cache()
+        persistence = PreparedPersistence()
+        manager = make_graph_manager(persistence)
+
+        chunk = first_async(manager.chat_stream_async(
+            patient_id=None,
+            doctor_id="660e8400-e29b-41d4-a716-446655440001",
+            session_id="s1",
+            message="科研问题",
+            role="doctor",
+            conversation_id="c1",
+            agent_type="research",
+            enable_institution_data=True,
+            enable_web_search=True,
+            web_search_types=["general", "pubmed"],
+        ))
+
+        authority = build_legacy_text_turn_authority(
+            agent_type="research",
+            patient_id=None,
+            enable_institution_data=True,
+            enable_web_search=True,
+            web_search_types=["general", "pubmed"],
+        )
+        self.assertEqual(chunk["type"], "start")
+        self.assertEqual(
+            persistence.prepare_kwargs["context"],
+            {"stage": None, **authority.to_message_metadata()},
+        )
+
     def test_regenerate_start_metadata_includes_parent_user_message_id(self):
         manager = make_graph_manager(RegeneratePersistence())
+        authority = build_legacy_text_turn_authority(
+            agent_type="health",
+            patient_id="550e8400-e29b-41d4-a716-446655440000",
+        )
 
         chunk = first_async(manager.chat_stream_async(
             patient_id="550e8400-e29b-41d4-a716-446655440000",
@@ -521,11 +567,67 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
             conversation_id="c1",
             branch_mode="regenerate",
             source_message_id="a1",
+            _legacy_text_turn_authority=authority,
         ))
 
         self.assertEqual(chunk["type"], "start")
         self.assertEqual(chunk["metadata"]["user_message_id"], "u1")
         self.assertEqual(chunk["metadata"]["assistant_message_id"], "a2")
+
+    def test_research_regenerate_executes_with_source_options(self):
+        from utils.role_verification import clear_cache
+
+        clear_cache()
+        persistence = RegeneratePersistence()
+        manager = object.__new__(GraphManager)
+        manager.persistence = persistence
+        manager.checkpointer = FakeCheckpointer()
+        manager._get_state_message_count = lambda graph, config: 0
+        manager._extract_token_used_from_result = (
+            lambda result, previous_message_count: None
+        )
+        graph = FakeStreamingGraph()
+        authority = build_legacy_text_turn_authority(
+            agent_type="research",
+            patient_id=None,
+            enable_institution_data=True,
+            enable_web_search=True,
+            web_search_types=["pubmed", "scholar"],
+        )
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=graph,
+        ):
+            chunks = collect_async(manager.chat_stream_async(
+                patient_id=None,
+                doctor_id="660e8400-e29b-41d4-a716-446655440001",
+                session_id="s1",
+                message="",
+                role="doctor",
+                conversation_id="c1",
+                agent_type="research",
+                branch_mode="regenerate",
+                source_message_id="a1",
+                _legacy_text_turn_authority=authority,
+            ))
+
+        self.assertEqual(chunks[0]["type"], "start")
+        state = graph.seen[0]["input_state"]
+        self.assertTrue(state["enable_institution_data"])
+        self.assertTrue(state["enable_web_search"])
+        self.assertEqual(
+            state["web_search_types"],
+            ["pubmed", "scholar"],
+        )
+        self.assertEqual(
+            persistence.prepare_kwargs["context"],
+            {
+                "stage": None,
+                "agent_type": "research",
+                "patient_id": None,
+            },
+        )
 
     def test_regenerate_prompt_rejects_cross_conversation_assistant(self):
         manager = make_graph_manager(RegeneratePersistence(assistant_chat_id="other"))
@@ -556,6 +658,10 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
         manager._get_state_message_count = lambda graph, config: 0
         manager._extract_token_used_from_result = lambda result, previous_message_count: None
         graph = FakeStreamingGraph()
+        authority = build_legacy_text_turn_authority(
+            agent_type="health",
+            patient_id="550e8400-e29b-41d4-a716-446655440000",
+        )
 
         with patch(
             "agents.graph.graph_builder.get_streaming_medical_graph",
@@ -571,6 +677,7 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
                     conversation_id="c1",
                     branch_mode="edit",
                     source_message_id="u1",
+                    _legacy_text_turn_authority=authority,
                 )
             )
 
@@ -596,6 +703,13 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
         manager._extract_token_used_from_result = lambda result, previous_message_count: None
         graph = FakeStreamingGraph()
         doctor_id = "660e8400-e29b-41d4-a716-446655440001"
+        authority = build_legacy_text_turn_authority(
+            agent_type="research",
+            patient_id=None,
+            enable_institution_data=True,
+            enable_web_search=True,
+            web_search_types=["general", "pubmed"],
+        )
 
         with patch(
             "agents.graph.graph_builder.get_streaming_medical_graph",
@@ -612,11 +726,29 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
                     agent_type="research",
                     branch_mode="edit",
                     source_message_id="u1",
+                    _legacy_text_turn_authority=authority,
                 )
             )
 
         self.assertEqual(chunks[0]["type"], "start")
         self.assertEqual(graph.seen[0]["input_state"]["current_agent"], "research")
+        self.assertTrue(
+            graph.seen[0]["input_state"]["enable_institution_data"],
+        )
+        self.assertTrue(
+            graph.seen[0]["input_state"]["enable_web_search"],
+        )
+        self.assertEqual(
+            graph.seen[0]["input_state"]["web_search_types"],
+            ["general", "pubmed"],
+        )
+        self.assertEqual(
+            persistence.prepare_kwargs["context"],
+            {
+                "stage": None,
+                **authority.to_message_metadata(),
+            },
+        )
 
     def test_normal_turn_after_edit_resend_uses_active_branch_history(self):
         persistence = NormalAfterBranchPersistence()

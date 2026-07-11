@@ -70,6 +70,16 @@ class ResearchChatRequest(BaseModel):
     def validate_no_patient_binding(self):
         if self.patient_id is not None:
             raise ValueError("科研模式不得绑定患者")
+        canonical_types = [
+            item
+            for item in ("general", "pubmed", "scholar")
+            if item in self.web_search_types
+        ]
+        if (
+            self.web_search_types != canonical_types
+            or self.enable_web_search != bool(canonical_types)
+        ):
+            raise ValueError("科研检索配置必须使用 canonical 顺序与开关")
         return self
 
 

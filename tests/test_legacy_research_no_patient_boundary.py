@@ -7,6 +7,9 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from domain.security.principal import CurrentPrincipal
+from application.services.legacy_text_turn_authority import (
+    build_legacy_text_turn_authority,
+)
 from presentation.dependencies.security import LegacyRouteError
 from presentation.routers import chat_router, research_router
 from presentation.schemas.chat_schemas import (
@@ -141,6 +144,27 @@ class LegacyResearchSchemaBoundaryTest(unittest.TestCase):
                 source_message_id="user-1",
             )
 
+    def test_research_options_require_exact_canonical_web_contract(self):
+        invalid_options = (
+            (True, []),
+            (False, ["general"]),
+            (True, ["pubmed", "general"]),
+            (True, ["general", "general"]),
+        )
+
+        for enable_web_search, web_search_types in invalid_options:
+            with self.subTest(
+                enable_web_search=enable_web_search,
+                web_search_types=web_search_types,
+            ):
+                with self.assertRaises(ValidationError):
+                    ResearchChatRequest(
+                        message="科研问题",
+                        doctor_id=DOCTOR_ID,
+                        enable_web_search=enable_web_search,
+                        web_search_types=web_search_types,
+                    )
+
 
 class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -189,6 +213,13 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_branch_routes_accept_matching_research_principal(self):
         sentinel = object()
+        authority = build_legacy_text_turn_authority(
+            agent_type="research",
+            patient_id=None,
+            enable_institution_data=True,
+            enable_web_search=True,
+            web_search_types=["general", "pubmed"],
+        )
         cases = (
             (chat_router.chat_edit_resend_stream, self._edit_request()),
             (chat_router.chat_regenerate_stream, self._regenerate_request()),
@@ -200,7 +231,7 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
         ) as streaming, patch.object(
             chat_router,
             "_assert_legacy_branch_authority",
-            return_value=None,
+            return_value=authority,
         ):
             for route, body in cases:
                 with self.subTest(route=route.__name__):
@@ -210,6 +241,11 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertIs(result, sentinel)
         self.assertEqual(streaming.call_count, 2)
+        for call in streaming.call_args_list:
+            self.assertIs(
+                call.kwargs["legacy_text_turn_authority"],
+                authority,
+            )
 
     async def test_health_edit_route_keeps_patient_and_ai_chat_scope(self):
         body = EditResendRequest(
@@ -222,6 +258,10 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             source_message_id="user-1",
         )
         sentinel = object()
+        authority = build_legacy_text_turn_authority(
+            agent_type="health",
+            patient_id=PATIENT_ID,
+        )
         with patch.object(
             chat_router,
             "_streaming_response_for_request",
@@ -229,7 +269,7 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             chat_router,
             "_assert_legacy_branch_authority",
-            return_value=None,
+            return_value=authority,
         ):
             result = await chat_router.chat_edit_resend_stream(
                 body,

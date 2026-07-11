@@ -22,6 +22,9 @@ from application.services.chat_persistence_service import (
     LegacyBranchSourceInvalidError,
     get_chat_persistence_service,
 )
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+)
 from utils.ui_element_parser import parse_options_only
 from utils.attachment_analyzer import analyze_attachments
 from presentation.dependencies.security import (
@@ -378,6 +381,9 @@ def _streaming_response_for_request(
     request,
     branch_mode: str = "normal",
     source_message_id: Optional[str] = None,
+    legacy_text_turn_authority: Optional[
+        LegacyTextTurnAuthority
+    ] = None,
 ) -> StreamingResponse:
     async def generate_sse() -> AsyncGenerator[str, None]:
         """生成 SSE 事件流"""
@@ -443,6 +449,9 @@ def _streaming_response_for_request(
                 branch_mode=branch_mode,
                 attachments=attachments_raw,
                 attachment_analysis=attachment_analysis,
+                _legacy_text_turn_authority=(
+                    legacy_text_turn_authority
+                ),
             ):
                 event_type = chunk.get("type", "")
                 content = chunk.get("content", "")
@@ -574,11 +583,12 @@ async def chat_edit_resend_stream(
         request.doctor_id or "",
         request.agent_type,
     )
-    _assert_legacy_branch_authority(request, "edit")
+    authority = _assert_legacy_branch_authority(request, "edit")
     return _streaming_response_for_request(
         request,
         branch_mode="edit",
         source_message_id=request.source_message_id,
+        legacy_text_turn_authority=authority,
     )
 
 
@@ -592,17 +602,24 @@ async def chat_regenerate_stream(
         request.doctor_id or "",
         request.agent_type,
     )
-    _assert_legacy_branch_authority(request, "regenerate")
+    authority = _assert_legacy_branch_authority(
+        request,
+        "regenerate",
+    )
     return _streaming_response_for_request(
         request,
         branch_mode="regenerate",
         source_message_id=request.source_message_id,
+        legacy_text_turn_authority=authority,
     )
 
 
-def _assert_legacy_branch_authority(request, branch_mode: str) -> None:
+def _assert_legacy_branch_authority(
+    request,
+    branch_mode: str,
+) -> LegacyTextTurnAuthority:
     try:
-        get_chat_persistence_service().assert_legacy_branch_authority(
+        return get_chat_persistence_service().assert_legacy_branch_authority(
             chat_id=request.conversation_id,
             source_message_id=request.source_message_id,
             branch_mode=branch_mode,

@@ -38,6 +38,10 @@ from agents.graph.attachment_citations import (
     build_attachment_citation_fallback,
     extract_attachment_citations_from_tool_output,
 )
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+    build_legacy_text_turn_authority,
+)
 from utils.transient_attachment_context import (
     get_attachment_analysis,
     get_research_document_context,
@@ -98,13 +102,78 @@ def _validate_prepared_research_options(
         for item in ("general", "pubmed", "scholar")
         if item in search_types
     ]
-    if search_types != canonical_types or (not web and search_types):
+    if search_types != canonical_types or web != bool(search_types):
         raise ValueError("RESEARCH_OPTIONS_CONFLICT")
     return {
         "enable_institution_data": institution,
         "enable_web_search": web,
         "types": list(search_types),
     }
+
+
+def _resolve_legacy_text_turn_authority(
+    *,
+    agent_type: str,
+    patient_id: Optional[str],
+    role: str,
+    branch_mode: str,
+    prepared_mode: bool,
+    kwargs: Dict[str, Any],
+) -> Optional[LegacyTextTurnAuthority]:
+    supplied = kwargs.pop("_legacy_text_turn_authority", None)
+    if prepared_mode:
+        if supplied is not None:
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        return None
+    if role != "doctor" or agent_type not in {"health", "research"}:
+        if supplied is not None:
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        return None
+    if branch_mode == "normal":
+        if supplied is not None:
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        authority = build_legacy_text_turn_authority(
+            agent_type=agent_type,
+            patient_id=patient_id,
+            enable_institution_data=kwargs.get(
+                "enable_institution_data",
+                False,
+            ),
+            enable_web_search=kwargs.get("enable_web_search", False),
+            web_search_types=kwargs.get("web_search_types", []),
+        )
+    else:
+        if not isinstance(supplied, LegacyTextTurnAuthority):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        authority = supplied
+        if (
+            authority.agent_type != agent_type
+            or authority.patient_id != patient_id
+        ):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+    kwargs.update(authority.graph_research_options())
+    return authority
+
+
+def _legacy_user_context(
+    *,
+    stage: Optional[str],
+    agent_type: str,
+    patient_id: Optional[str],
+    authority: Optional[LegacyTextTurnAuthority],
+) -> Dict[str, Any]:
+    context = {
+        "stage": stage,
+        "agent_type": agent_type,
+        "patient_id": patient_id,
+    }
+    if authority is not None:
+        metadata = authority.to_message_metadata()
+        context.update({
+            "turn_configuration": metadata["turn_configuration"],
+            "attachment_ids": metadata["attachment_ids"],
+        })
+    return context
 
 
 class GraphManager:
@@ -235,6 +304,25 @@ class GraphManager:
             if agent_type in ("compliance", "research"):
                 agent_type = "health"
 
+        try:
+            legacy_authority = _resolve_legacy_text_turn_authority(
+                agent_type=agent_type,
+                patient_id=patient_id,
+                role=role,
+                branch_mode="normal",
+                prepared_mode=False,
+                kwargs=kwargs,
+            )
+        except ValueError:
+            return {
+                "response": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "agent_type": agent_type,
+                "stage": "error",
+                "is_completed": False,
+                "thread_id": thread_id,
+                "error_code": _CHAT_SOURCE_INVALID,
+            }
+
         guard_result = check_input_safety(message, context={
             "role": role, "agent_type": agent_type, "patient_id": patient_id,
         })
@@ -264,11 +352,12 @@ class GraphManager:
                 sender_id = doctor_id if role == "doctor" else patient_id
 
                 # 构建用户消息上下文
-                user_context = {
-                    "stage": "greeting" if is_first else None,
-                    "agent_type": agent_type,
-                    "patient_id": patient_id,
-                }
+                user_context = _legacy_user_context(
+                    stage="greeting" if is_first else None,
+                    agent_type=agent_type,
+                    patient_id=patient_id,
+                    authority=legacy_authority,
+                )
 
                 # 保存用户消息
                 self.persistence.save_user_message(
@@ -470,6 +559,23 @@ class GraphManager:
             if agent_type in ("compliance", "research"):
                 agent_type = "health"
 
+        try:
+            legacy_authority = _resolve_legacy_text_turn_authority(
+                agent_type=agent_type,
+                patient_id=patient_id,
+                role=role,
+                branch_mode="normal",
+                prepared_mode=False,
+                kwargs=kwargs,
+            )
+        except ValueError:
+            yield {
+                "type": "error",
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_SOURCE_INVALID},
+            }
+            return
+
         guard_result = check_input_safety(message, context={
             "role": role, "agent_type": agent_type, "patient_id": patient_id,
         })
@@ -498,11 +604,12 @@ class GraphManager:
                 is_first = self.persistence.is_first_message(conversation_id)
                 sender_id = doctor_id if role == "doctor" else patient_id
 
-                user_context = {
-                    "stage": "greeting" if is_first else None,
-                    "agent_type": agent_type,
-                    "patient_id": patient_id,
-                }
+                user_context = _legacy_user_context(
+                    stage="greeting" if is_first else None,
+                    agent_type=agent_type,
+                    patient_id=patient_id,
+                    authority=legacy_authority,
+                )
 
                 self.persistence.save_user_message(
                     chat_id=conversation_id,
@@ -853,6 +960,23 @@ class GraphManager:
             if agent_type in ("compliance", "research"):
                 agent_type = "health"
 
+        try:
+            legacy_authority = _resolve_legacy_text_turn_authority(
+                agent_type=agent_type,
+                patient_id=patient_id,
+                role=role,
+                branch_mode=branch_mode,
+                prepared_mode=prepared_mode,
+                kwargs=kwargs,
+            )
+        except ValueError:
+            yield {
+                "type": "error",
+                "content": _PUBLIC_CHAT_ERROR_MESSAGE,
+                "metadata": {"error_code": _CHAT_SOURCE_INVALID},
+            }
+            return
+
         # === 运行时状态：用于 finally 中统一终态落库 ===
         assistant_message_id = None
         full_response = ""
@@ -900,11 +1024,13 @@ class GraphManager:
                         source_message_id=source_message_id,
                         content=message,
                         sender_id=sender_id,
-                        context={
-                            "stage": None,
-                            "agent_type": agent_type,
-                            "patient_id": patient_id,
-                        },
+                        context=_legacy_user_context(
+                            stage=None,
+                            agent_type=agent_type,
+                            patient_id=patient_id,
+                            authority=legacy_authority,
+                        ),
+                        expected_authority=legacy_authority,
                     )
                 elif branch_mode == "regenerate":
                     prepared_message_ids = self.persistence.prepare_regenerate_turn(
@@ -915,6 +1041,8 @@ class GraphManager:
                             "agent_type": agent_type,
                             "patient_id": patient_id,
                         },
+                        doctor_id=doctor_id,
+                        expected_authority=legacy_authority,
                     )
                     prepared_message_ids.setdefault("user_message_id", regenerate_user_message_id)
                 else:
@@ -922,11 +1050,12 @@ class GraphManager:
                         chat_id=conversation_id,
                         content=message,
                         sender_id=sender_id,
-                        context={
-                            "stage": "greeting" if is_first else None,
-                            "agent_type": agent_type,
-                            "patient_id": patient_id,
-                        },
+                        context=_legacy_user_context(
+                            stage="greeting" if is_first else None,
+                            agent_type=agent_type,
+                            patient_id=patient_id,
+                            authority=legacy_authority,
+                        ),
                         is_first_message=is_first,
                     )
                 assistant_message_id = prepared_message_ids.get("assistant_message_id")

@@ -52,6 +52,7 @@ class ResearchOptionsV2(BaseModel):
             for search_type in ("general", "pubmed", "scholar")
             if search_type in selected
         ]
+        self.enable_web_search = bool(self.types)
         return self
 
 

@@ -9,6 +9,9 @@ import httpx
 from fastapi import FastAPI
 
 from application.services.chat_persistence_service import ChatPersistenceService
+from application.services.legacy_text_turn_authority import (
+    build_legacy_text_turn_authority,
+)
 from domain.models.chat_entity import (
     ChatConversationEntity,
     ChatMessageEntity,
@@ -86,11 +89,12 @@ def _source_context(
     agent_type: str = "research",
     patient_id=None,
 ) -> str:
+    authority = build_legacy_text_turn_authority(
+        agent_type=agent_type,
+        patient_id=patient_id,
+    )
     return MessageContext(
-        metadata={
-            "agent_type": agent_type,
-            "patient_id": patient_id,
-        }
+        metadata=authority.to_message_metadata(),
     ).to_json()
 
 
@@ -474,6 +478,12 @@ class LegacyBranchSourceAuthorityTest(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_edit_rejects_missing_malformed_or_conflicting_source_context(self):
+        research_patient_context = json.loads(_source_context())
+        next(
+            item["metadata"]
+            for item in research_patient_context
+            if "metadata" in item
+        )["patient_id"] = PATIENT_ID
         invalid_contexts = (
             "",
             "{broken",
@@ -486,7 +496,7 @@ class LegacyBranchSourceAuthorityTest(unittest.IsolatedAsyncioTestCase):
                 }
             ).to_json(),
             _source_context(agent_type="health", patient_id=PATIENT_ID),
-            _source_context(agent_type="research", patient_id=PATIENT_ID),
+            json.dumps(research_patient_context),
         )
         for user_context in invalid_contexts:
             with self.subTest(user_context=user_context):

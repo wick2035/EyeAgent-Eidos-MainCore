@@ -14,6 +14,10 @@ from domain.models.chat_entity import (
     ChatMessageEntity,
     MessageContext
 )
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+    parse_legacy_text_turn_metadata,
+)
 from infrastructure.repositories.chat_repository_impl import (
     get_conversation_repository,
     get_message_repository,
@@ -248,6 +252,41 @@ class ChatPersistenceService:
                 conversation=conversation,
             )
 
+    def create_legacy_edit_turn(
+        self,
+        *,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[MessageContext],
+        expected_authority: LegacyTextTurnAuthority,
+    ) -> Tuple[ChatMessageEntity, ChatMessageEntity]:
+        """在同一会话锁事务内复核旧文本源权威并创建编辑分支。"""
+
+        with self._transaction_context():
+            conversation = self._lock_conversation_and_assert_idle(chat_id)
+            authority = self._assert_legacy_branch_authority_locked(
+                conversation=conversation,
+                chat_id=chat_id,
+                source_message_id=source_message_id,
+                branch_mode="edit",
+                doctor_id=sender_id,
+                agent_type=expected_authority.agent_type,
+                patient_id=expected_authority.patient_id,
+            )
+            if authority != expected_authority:
+                raise LegacyBranchSourceInvalidError()
+            return self._create_turn_locked(
+                chat_id,
+                content,
+                sender_id,
+                context=context,
+                source_message_id=source_message_id,
+                mode="edit",
+                conversation=conversation,
+            )
+
     def _create_turn_locked(
         self,
         chat_id: str,
@@ -330,6 +369,36 @@ class ChatPersistenceService:
     ) -> ChatMessageEntity:
         with self._transaction_context():
             self._lock_conversation_and_assert_idle(chat_id)
+            return self._create_assistant_regeneration_locked(
+                chat_id,
+                source_assistant_id,
+                context=context,
+            )
+
+    def create_legacy_assistant_regeneration(
+        self,
+        *,
+        chat_id: str,
+        source_assistant_id: str,
+        doctor_id: str,
+        expected_authority: LegacyTextTurnAuthority,
+        context: Optional[MessageContext] = None,
+    ) -> ChatMessageEntity:
+        """在同一会话锁事务内复核旧文本源权威并创建重生分支。"""
+
+        with self._transaction_context():
+            conversation = self._lock_conversation_and_assert_idle(chat_id)
+            authority = self._assert_legacy_branch_authority_locked(
+                conversation=conversation,
+                chat_id=chat_id,
+                source_message_id=source_assistant_id,
+                branch_mode="regenerate",
+                doctor_id=doctor_id,
+                agent_type=expected_authority.agent_type,
+                patient_id=expected_authority.patient_id,
+            )
+            if authority != expected_authority:
+                raise LegacyBranchSourceInvalidError()
             return self._create_assistant_regeneration_locked(
                 chat_id,
                 source_assistant_id,
@@ -559,7 +628,7 @@ class ChatPersistenceService:
         doctor_id: str,
         agent_type: str,
         patient_id: Optional[str],
-    ) -> None:
+    ) -> LegacyTextTurnAuthority:
         """在旧 edit/regenerate 创建任何节点前验证 owner 与源回合配置。"""
 
         try:
@@ -570,60 +639,82 @@ class ChatPersistenceService:
                     if lock_by_id is not None
                     else self.conversation_repo.get_by_id(chat_id)
                 )
-                if conversation is None:
-                    raise LegacyBranchSourceInvalidError()
-                if (
-                    conversation.user_type != "doctor"
-                    or conversation.host_id != doctor_id
-                ):
-                    raise LegacyBranchForbiddenError()
-
-                source = self.message_repo.get_by_id(source_message_id)
-                if (
-                    source is None
-                    or source.chat_id != chat_id
-                    or source.deleted
-                    or source.status != "success"
-                ):
-                    raise LegacyBranchSourceInvalidError()
-
-                if branch_mode == "edit":
-                    if source.message_type != "user":
-                        raise LegacyBranchSourceInvalidError()
-                    source_user = source
-                elif branch_mode == "regenerate":
-                    if source.message_type != "assistant" or not source.parent_id:
-                        raise LegacyBranchSourceInvalidError()
-                    source_user = self.message_repo.get_by_id(source.parent_id)
-                    if (
-                        source_user is None
-                        or source_user.chat_id != chat_id
-                        or source_user.message_type != "user"
-                        or source_user.deleted
-                        or source_user.status != "success"
-                    ):
-                        raise LegacyBranchSourceInvalidError()
-                else:
-                    raise LegacyBranchSourceInvalidError()
-
-                self._assert_legacy_source_on_active_path(
-                    conversation,
-                    source,
+                return self._assert_legacy_branch_authority_locked(
+                    conversation=conversation,
+                    chat_id=chat_id,
+                    source_message_id=source_message_id,
+                    branch_mode=branch_mode,
+                    doctor_id=doctor_id,
+                    agent_type=agent_type,
+                    patient_id=patient_id,
                 )
-                if source_user.sender_id != doctor_id:
-                    raise LegacyBranchForbiddenError()
-                canonical_agent, canonical_patient = (
-                    self._legacy_source_configuration(source_user.context)
-                )
-                if (
-                    canonical_agent != agent_type
-                    or canonical_patient != patient_id
-                ):
-                    raise LegacyBranchSourceInvalidError()
         except (LegacyBranchSourceInvalidError, LegacyBranchForbiddenError):
             raise
         except Exception:
             raise LegacyBranchSourceInvalidError() from None
+
+    def _assert_legacy_branch_authority_locked(
+        self,
+        *,
+        conversation: Optional[ChatConversationEntity],
+        chat_id: str,
+        source_message_id: str,
+        branch_mode: str,
+        doctor_id: str,
+        agent_type: str,
+        patient_id: Optional[str],
+    ) -> LegacyTextTurnAuthority:
+        if conversation is None:
+            raise LegacyBranchSourceInvalidError()
+        if (
+            conversation.user_type != "doctor"
+            or conversation.host_id != doctor_id
+        ):
+            raise LegacyBranchForbiddenError()
+
+        source = self.message_repo.get_by_id(source_message_id)
+        if (
+            source is None
+            or source.chat_id != chat_id
+            or source.deleted
+            or source.status != "success"
+        ):
+            raise LegacyBranchSourceInvalidError()
+
+        if branch_mode == "edit":
+            if source.message_type != "user":
+                raise LegacyBranchSourceInvalidError()
+            source_user = source
+        elif branch_mode == "regenerate":
+            if source.message_type != "assistant" or not source.parent_id:
+                raise LegacyBranchSourceInvalidError()
+            source_user = self.message_repo.get_by_id(source.parent_id)
+            if (
+                source_user is None
+                or source_user.chat_id != chat_id
+                or source_user.message_type != "user"
+                or source_user.deleted
+                or source_user.status != "success"
+            ):
+                raise LegacyBranchSourceInvalidError()
+        else:
+            raise LegacyBranchSourceInvalidError()
+
+        self._assert_legacy_source_on_active_path(conversation, source)
+        if source_user.sender_id != doctor_id:
+            raise LegacyBranchForbiddenError()
+        if (
+            not isinstance(source_user.message_content, str)
+            or not source_user.message_content.strip()
+        ):
+            raise LegacyBranchSourceInvalidError()
+        authority = self._legacy_source_configuration(source_user.context)
+        if (
+            authority.agent_type != agent_type
+            or authority.patient_id != patient_id
+        ):
+            raise LegacyBranchSourceInvalidError()
+        return authority
 
     def _assert_legacy_source_on_active_path(
         self,
@@ -696,7 +787,7 @@ class ChatPersistenceService:
     @staticmethod
     def _legacy_source_configuration(
         raw_context: Optional[str],
-    ) -> tuple[str, Optional[str]]:
+    ) -> LegacyTextTurnAuthority:
         if not isinstance(raw_context, str) or not raw_context:
             raise LegacyBranchSourceInvalidError()
         try:
@@ -739,19 +830,10 @@ class ChatPersistenceService:
         ):
             raise LegacyBranchSourceInvalidError()
         metadata = metadata_entries[0]
-        if set(metadata) != {"agent_type", "patient_id"}:
+        try:
+            return parse_legacy_text_turn_metadata(metadata)
+        except (TypeError, ValueError):
             raise LegacyBranchSourceInvalidError()
-        canonical_agent = metadata["agent_type"]
-        canonical_patient = metadata["patient_id"]
-        if canonical_agent == "research":
-            if canonical_patient is not None:
-                raise LegacyBranchSourceInvalidError()
-        elif canonical_agent == "health":
-            if not isinstance(canonical_patient, str) or not canonical_patient:
-                raise LegacyBranchSourceInvalidError()
-        else:
-            raise LegacyBranchSourceInvalidError()
-        return canonical_agent, canonical_patient
 
     def list_conversations(
         self,
