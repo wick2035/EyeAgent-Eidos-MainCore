@@ -197,6 +197,11 @@ class MySQLConnectionPool:
 
         self._init_pool()
 
+    @property
+    def in_transaction(self) -> bool:
+        """当前执行上下文是否已处于外层数据库事务。"""
+        return self._transaction_cursor.get() is not None
+
     def _init_pool(self):
         """初始化连接池"""
         try:

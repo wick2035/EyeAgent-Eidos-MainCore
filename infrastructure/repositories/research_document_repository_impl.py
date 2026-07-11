@@ -19,6 +19,10 @@ class ResearchDocumentFencingError(RuntimeError):
     """锁定后发布 ready 失败；调用方必须回滚整个事务。"""
 
 
+class ResearchDocumentClaimTransactionBoundaryError(RuntimeError):
+    """claim 必须拥有顶层事务，才能安全重启完整工作单元。"""
+
+
 class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
     _CLAIM_MAX_TRANSACTION_ATTEMPTS = 3
 
@@ -64,6 +68,10 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         now: datetime,
         lease_until: datetime,
     ) -> ResearchDocumentIngestionEntity:
+        if getattr(self.db, "in_transaction", False):
+            raise ResearchDocumentClaimTransactionBoundaryError(
+                "claim 不能在已有数据库事务中执行"
+            )
         if lease_until <= now:
             raise ValueError("lease_until 必须晚于 now")
 
