@@ -8,6 +8,7 @@ from application.repositories.research_document_repository import (
 )
 from domain.models.research_document import (
     IngestionIdentity,
+    ResearchDocumentClaimResult,
     ResearchDocumentIngestionEntity,
     ResearchDocumentSegmentEntity,
     build_research_document_ingestion_id,
@@ -67,7 +68,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         identity: IngestionIdentity,
         now: datetime,
         lease_until: datetime,
-    ) -> ResearchDocumentIngestionEntity:
+    ) -> ResearchDocumentClaimResult:
         if getattr(self.db, "in_transaction", False):
             raise ResearchDocumentClaimTransactionBoundaryError(
                 "claim 不能在已有数据库事务中执行"
@@ -92,10 +93,11 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         identity: IngestionIdentity,
         now: datetime,
         lease_until: datetime,
-    ) -> ResearchDocumentIngestionEntity:
+    ) -> ResearchDocumentClaimResult:
         with self.db.transaction():
             try:
-                return self._insert_claim(identity, now, lease_until)
+                entity = self._insert_claim(identity, now, lease_until)
+                return ResearchDocumentClaimResult(entity=entity, acquired=True)
             except Exception as error:
                 if not self._is_duplicate_error(error):
                     raise
@@ -339,16 +341,16 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         row: dict,
         now: datetime,
         lease_until: datetime,
-    ) -> ResearchDocumentIngestionEntity:
+    ) -> ResearchDocumentClaimResult:
         entity = self._row_to_ingestion(row)
         if entity.status == "ready":
-            return entity
+            return ResearchDocumentClaimResult(entity=entity, acquired=False)
         if (
             entity.status == "processing"
             and entity.lease_expires_at is not None
             and entity.lease_expires_at > now
         ):
-            return entity
+            return ResearchDocumentClaimResult(entity=entity, acquired=False)
 
         next_attempt = entity.attempt_count + 1
         affected = self.db.execute(
@@ -385,8 +387,11 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             latest = self._select_identity_for_update(entity.identity)
             if latest is None:
                 raise RuntimeError("claim CAS 后摄取记录不存在")
-            return self._row_to_ingestion(latest)
-        return entity.model_copy(
+            return ResearchDocumentClaimResult(
+                entity=self._row_to_ingestion(latest),
+                acquired=False,
+            )
+        claimed = entity.model_copy(
             update={
                 "status": "processing",
                 "attempt_count": next_attempt,
@@ -398,6 +403,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 "update_time": now,
             }
         )
+        return ResearchDocumentClaimResult(entity=claimed, acquired=True)
 
     @staticmethod
     def _identity_params(identity: IngestionIdentity) -> tuple:

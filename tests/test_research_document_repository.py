@@ -8,6 +8,7 @@ import pymysql
 
 from domain.models.research_document import (
     IngestionIdentity,
+    ResearchDocumentClaimResult,
     ResearchDocumentSegmentEntity,
 )
 from infrastructure.repositories.chat_turn_request_repository_impl import (
@@ -218,9 +219,11 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             lease_until=datetime(2026, 7, 11, 9, 6, 0),
         )
 
-        self.assertEqual(claimed.id, existing["id"])
-        self.assertEqual(claimed.attempt_count, 1)
-        self.assertEqual(claimed.lease_expires_at, lease_until)
+        self.assertIsInstance(claimed, ResearchDocumentClaimResult)
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.id, existing["id"])
+        self.assertEqual(claimed.entity.attempt_count, 1)
+        self.assertEqual(claimed.entity.lease_expires_at, lease_until)
         self.assertEqual(db.transaction_events, ["begin", "commit"])
         self.assertEqual(db.operations[0][0], "execute")
         insert = next(op for op in db.operations if "INSERT INTO" in op[1])
@@ -250,7 +253,8 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
                     lease_until=datetime(2026, 7, 11, 9, 5, 0),
                 )
 
-                self.assertEqual(claimed.attempt_count, 1)
+                self.assertTrue(claimed.acquired)
+                self.assertEqual(claimed.entity.attempt_count, 1)
                 self.assertEqual(
                     db.transaction_events,
                     ["begin", "rollback", "begin", "commit"],
@@ -301,8 +305,9 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             lease_until=now + timedelta(minutes=5),
         )
 
-        self.assertEqual(claimed.status, "processing")
-        self.assertEqual(claimed.attempt_count, 5)
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        self.assertEqual(claimed.entity.attempt_count, 5)
         update = next(
             op
             for op in db.operations
@@ -363,7 +368,8 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             lease_until=datetime(2026, 7, 11, 10, 5, 0),
         )
 
-        self.assertEqual(claimed.status, "ready")
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "ready")
         self.assertFalse(
             any(
                 op[0] == "execute"
@@ -380,6 +386,83 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         )
         fail_sql = " ".join(fail_db.operations[0][1].split()).lower()
         self.assertIn("status = 'processing'", fail_sql)
+
+    def test_insert_claim_is_owned_and_result_is_frozen(self):
+        db = ScriptedDB(execute_results=[1])
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=datetime(2026, 7, 11, 9, 0, 0),
+            lease_until=datetime(2026, 7, 11, 9, 5, 0),
+        )
+
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        with self.assertRaises((AttributeError, TypeError)):
+            claimed.acquired = False
+
+    def test_failed_ingestion_takeover_is_owned(self):
+        now = datetime(2026, 7, 11, 9, 10, 0)
+        db = ScriptedDB(
+            fetch_one_results=[
+                _ingestion_row(
+                    status="failed",
+                    attempt_count=2,
+                    lease_expires_at=None,
+                )
+            ],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                1,
+            ],
+        )
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=now,
+            lease_until=now + timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        self.assertEqual(claimed.entity.attempt_count, 3)
+
+    def test_takeover_cas_miss_rereads_as_observer(self):
+        now = datetime(2026, 7, 11, 9, 10, 0)
+        expired = _ingestion_row(
+            attempt_count=2,
+            lease_expires_at=now - timedelta(seconds=1),
+        )
+        latest = _ingestion_row(
+            attempt_count=3,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        db = ScriptedDB(
+            fetch_one_results=[expired, latest],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                0,
+            ],
+        )
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=now,
+            lease_until=now + timedelta(minutes=5),
+        )
+
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.attempt_count, 3)
+
+    def test_claim_result_rejects_acquired_non_processing_entity(self):
+        from domain.models.research_document import ResearchDocumentIngestionEntity
+
+        ready = ResearchDocumentIngestionEntity.model_validate(
+            _ingestion_row(status="ready")
+        )
+
+        with self.assertRaises(ValueError):
+            ResearchDocumentClaimResult(entity=ready, acquired=True)
 
     def test_complete_replaces_segments_and_ready_state_in_one_transaction(self):
         processing = _ingestion_row(attempt_count=2)

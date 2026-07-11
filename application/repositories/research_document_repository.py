@@ -3,6 +3,7 @@ from typing import Optional, Protocol
 
 from domain.models.research_document import (
     IngestionIdentity,
+    ResearchDocumentClaimResult,
     ResearchDocumentIngestionEntity,
     ResearchDocumentSegmentEntity,
 )
@@ -19,7 +20,7 @@ class ResearchDocumentRepository(Protocol):
         identity: IngestionIdentity,
         now: datetime,
         lease_until: datetime,
-    ) -> ResearchDocumentIngestionEntity: ...
+    ) -> ResearchDocumentClaimResult: ...
 
     def renew_lease(
         self,

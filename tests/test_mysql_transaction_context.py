@@ -202,7 +202,8 @@ class MySQLTransactionContextTest(unittest.TestCase):
                     lease_until=datetime(2026, 7, 11, 9, 5, 0),
                 )
 
-                self.assertEqual(claimed.attempt_count, 1)
+                self.assertTrue(claimed.acquired)
+                self.assertEqual(claimed.entity.attempt_count, 1)
                 self.assertEqual(db.connection_calls, 2)
                 self.assertEqual(failed.commit_calls, 0)
                 self.assertEqual(failed.rollback_calls, 1)

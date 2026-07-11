@@ -1,6 +1,7 @@
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
 
@@ -101,6 +102,20 @@ class ResearchDocumentIngestionEntity(BaseModel):
             extractor_version=self.extractor_version,
             segment_schema_version=self.segment_schema_version,
         )
+
+
+@dataclass(frozen=True)
+class ResearchDocumentClaimResult:
+    entity: ResearchDocumentIngestionEntity
+    acquired: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entity, ResearchDocumentIngestionEntity):
+            raise TypeError("entity 必须是科研文档摄取实体")
+        if type(self.acquired) is not bool:
+            raise TypeError("acquired 必须是布尔值")
+        if self.acquired and self.entity.status != "processing":
+            raise ValueError("只有 processing ingestion 可以被取得")
 
 
 class ResearchDocumentSegmentEntity(BaseModel):
