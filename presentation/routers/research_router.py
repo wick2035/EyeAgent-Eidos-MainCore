@@ -52,7 +52,10 @@ def verify_doctor_role(doctor_id: str, patient_id: str = "") -> bool:
 
 
 @router.post("/chat", response_model=ResearchChatResponse)
-async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
+async def research_chat(
+    request: ResearchChatRequest,
+    http_request: Request,
+) -> ResearchChatResponse:
     """
     科研对话接口（非流式）
 
@@ -62,6 +65,11 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
     Returns:
         ResearchChatResponse: 对话响应
     """
+    require_platform_doctor(
+        http_request,
+        request.doctor_id,
+        "research",
+    )
     try:
         logger.info(
             f"[ResearchRouter] 收到请求: doctor={request.doctor_id}, "

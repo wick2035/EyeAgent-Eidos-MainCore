@@ -34,6 +34,7 @@ _ENFORCED_EXACT_ROUTES = frozenset(
         ("POST", "/api/chat/regenerate/stream"),
         ("POST", "/api/platform/chat/turns/execute"),
         ("POST", "/api/platform/chat/turns/prepare"),
+        ("POST", "/api/research/chat"),
         ("POST", "/api/research/chat/stream"),
     }
 )

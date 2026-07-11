@@ -34,6 +34,14 @@ graph_manager = get_graph_manager()
 _AGENTS_WITH_OPTIONS = {"health", "reminder", "report"}
 
 
+def _reject_research_on_generic_route(request) -> None:
+    if request.agent_type == "research":
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "PLATFORM_RESEARCH_ROUTE_REQUIRED"},
+        )
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """
@@ -50,6 +58,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     Returns:
         ChatResponse: 聊天响应
     """
+    _reject_research_on_generic_route(request)
     try:
         logger.info(
             f"[ChatRouter] 收到聊天请求: patient={request.patient_id}, "
@@ -532,6 +541,7 @@ async def chat_stream(request: ChatRequest):
     Returns:
         StreamingResponse: SSE 流式响应
     """
+    _reject_research_on_generic_route(request)
     return _streaming_response_for_request(request)
 
 

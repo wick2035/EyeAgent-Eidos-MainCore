@@ -40,6 +40,7 @@ PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
         ("GET", "/api/conversations/{conversation_id}"),
         ("POST", "/api/chat/edit-resend/stream"),
         ("POST", "/api/chat/regenerate/stream"),
+        ("POST", "/api/research/chat"),
         ("POST", "/api/research/chat/stream"),
         ("PUT", "/api/conversations/{conversation_id}/active-branch"),
         ("POST", "/api/platform/chat/turns/prepare"),

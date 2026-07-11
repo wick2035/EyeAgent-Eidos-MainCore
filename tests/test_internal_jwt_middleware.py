@@ -41,6 +41,7 @@ _ENFORCED_REQUESTS = (
     ("POST", "/api/platform/chat/turns/execute"),
     ("POST", "/api/platform/chat/turns/prepare"),
     ("POST", "/api/platform/chat/turns/turn-request-7/abort"),
+    ("POST", "/api/research/chat"),
     ("POST", "/api/research/chat/stream"),
     ("PUT", "/api/conversations/conversation-7/active-branch"),
 )

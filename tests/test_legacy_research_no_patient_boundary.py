@@ -8,7 +8,11 @@ from starlette.requests import Request
 
 from domain.security.principal import CurrentPrincipal
 from presentation.routers import chat_router, research_router
-from presentation.schemas.chat_schemas import EditResendRequest, RegenerateRequest
+from presentation.schemas.chat_schemas import (
+    ChatRequest,
+    EditResendRequest,
+    RegenerateRequest,
+)
 from presentation.schemas.research_schemas import ResearchChatRequest
 
 
@@ -240,6 +244,75 @@ class LegacyResearchRouteSecurityTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(raised.exception.status_code, 403)
+
+    async def test_generic_chat_routes_reject_research_agent(self):
+        body = ChatRequest(
+            message="科研问题",
+            patient_id=None,
+            doctor_id=DOCTOR_ID,
+            agent_type="research",
+            role="doctor",
+            conversation_id="conversation-1",
+        )
+
+        for route in (chat_router.chat, chat_router.chat_stream):
+            with self.subTest(route=route.__name__):
+                with self.assertRaises(HTTPException) as raised:
+                    await route(body)
+                self.assertEqual(raised.exception.status_code, 403)
+                self.assertEqual(
+                    raised.exception.detail,
+                    {"error_code": "PLATFORM_RESEARCH_ROUTE_REQUIRED"},
+                )
+
+    async def test_non_stream_research_route_requires_scope_and_keeps_null_patient(self):
+        body = ResearchChatRequest(
+            message="科研问题",
+            patient_id=None,
+            doctor_id=DOCTOR_ID,
+            session_id="session-1",
+            conversation_id="conversation-1",
+        )
+        with self.assertRaises(HTTPException) as raised:
+            await research_router.research_chat(
+                body,
+                starlette_request(principal(scopes={"ai:chat"})),
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+
+        captured = {}
+
+        def chat(**kwargs):
+            captured.update(kwargs)
+            return {
+                "response": "完成",
+                "is_completed": True,
+                "stage": "research",
+                "thread_id": "thread-1",
+                "citations": [],
+            }
+
+        with (
+            patch.object(
+                research_router,
+                "graph_manager",
+                SimpleNamespace(chat=chat),
+            ),
+            patch.object(research_router, "verify_doctor_role", return_value=True),
+            patch.object(
+                research_router,
+                "get_chat_persistence_service",
+                return_value=SimpleNamespace(),
+            ),
+        ):
+            result = await research_router.research_chat(
+                body,
+                starlette_request(principal()),
+            )
+
+        self.assertEqual(result.response, "完成")
+        self.assertIsNone(captured["patient_id"])
+        self.assertEqual(captured["doctor_id"], DOCTOR_ID)
 
     async def test_research_stream_passes_null_patient_to_graph(self):
         body = ResearchChatRequest(
