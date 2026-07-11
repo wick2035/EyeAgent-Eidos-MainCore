@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 _ERROR_CODE = "INVALID_PLATFORM_REQUEST"
 _PLATFORM_ROUTE_TEMPLATES = frozenset(
     {
+        ("DELETE", "/api/platform/research-documents/{attachment_id}"),
         ("POST", "/api/platform/chat/turns/prepare"),
         ("POST", "/api/platform/chat/turns/execute"),
         ("GET", "/api/platform/chat/turns/{request_id}"),

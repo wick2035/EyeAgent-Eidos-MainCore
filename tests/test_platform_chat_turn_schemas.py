@@ -541,6 +541,23 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     model.model_validate({**payload, field: "sensitive text"})
 
+    def test_done_event_accepts_canonical_attachment_citations(self):
+        fixture = load_fixture("platform_chat_turn_internal_wire_v1.json")
+        citation = {
+            "source_type": "attachment",
+            "attachment_id": "attachment-1",
+            "document_version": 1,
+            "segment_id": "segment-1",
+            "locator": {"type": "file"},
+            "excerpt": "受控引用片段",
+        }
+
+        event = PlatformChatTurnDoneEvent.model_validate(
+            {**fixture["done"], "citations": [citation]}
+        )
+
+        self.assertEqual(event.citations, [citation])
+
 
 if __name__ == "__main__":
     unittest.main()

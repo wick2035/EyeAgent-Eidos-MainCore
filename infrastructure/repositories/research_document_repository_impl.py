@@ -241,8 +241,8 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         )
         return [self._row_to_segment(row) for row in rows]
 
-    def purge(self, doctor_id: str, attachment_id: str) -> None:
-        self.db.execute(
+    def purge(self, doctor_id: str, attachment_id: str) -> int:
+        return self.db.execute(
             """
                 DELETE FROM research_document_ingestion
                 WHERE doctor_id = %s AND attachment_id = %s

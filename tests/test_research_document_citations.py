@@ -1,0 +1,328 @@
+import json
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from pydantic import ValidationError
+
+from agents.graph.attachment_citations import (
+    CITATION_TOOL_NAME,
+    AttachmentCitationSelection,
+    build_attachment_citation_tool,
+    build_attachment_citations,
+)
+from agents.graph.citation_extractor import merge_citations
+from agents.graph_manager import GraphManager, PreparedGraphTerminal
+from application.services.research_document_context_selector import (
+    ResearchCitationCandidate,
+    ResearchContextBlock,
+    ResearchDocumentContextSelection,
+)
+from domain.models.chat_entity import MessageContext
+from utils.transient_attachment_context import (
+    TransientResearchDocumentContext,
+    bind_research_document_context,
+    reset_research_document_context,
+)
+
+
+def _candidate(
+    segment_id: str,
+    *,
+    attachment_id: str = "attachment-1",
+    document_version: int = 3,
+    page_start: int | None = 1,
+    page_end: int | None = 1,
+    content: str = "  第一段\n\t科研   证据  ",
+) -> ResearchCitationCandidate:
+    return ResearchCitationCandidate(
+        segment_id=segment_id,
+        ingestion_id=f"ingestion-{segment_id}",
+        attachment_id=attachment_id,
+        document_version=document_version,
+        page_start=page_start,
+        page_end=page_end,
+        content=content,
+        token_count=12,
+        score=0.9,
+    )
+
+
+class AttachmentCitationBuilderTest(unittest.TestCase):
+    def test_page_file_mapping_excerpt_cap_and_stable_selected_order(self):
+        long_content = "  " + "证 据\n" * 100 + "尾部"
+        candidates = (
+            _candidate("segment-page", content=long_content),
+            _candidate(
+                "segment-file",
+                attachment_id="attachment-2",
+                document_version=7,
+                page_start=None,
+                page_end=None,
+                content="  图片   视觉结论  ",
+            ),
+        )
+
+        citations = build_attachment_citations(
+            ["segment-file", "segment-page"],
+            candidates,
+        )
+
+        self.assertEqual(
+            [item["segment_id"] for item in citations],
+            ["segment-file", "segment-page"],
+        )
+        self.assertEqual(citations[0]["locator"], {"type": "file"})
+        self.assertEqual(
+            citations[1]["locator"],
+            {"type": "page", "page_start": 1, "page_end": 1},
+        )
+        self.assertEqual(citations[0]["excerpt"], "图片 视觉结论")
+        self.assertEqual(len(citations[1]["excerpt"]), 300)
+        self.assertEqual(
+            set(citations[0]),
+            {
+                "source_type",
+                "attachment_id",
+                "document_version",
+                "segment_id",
+                "locator",
+                "excerpt",
+            },
+        )
+        serialized = json.dumps(citations, ensure_ascii=False)
+        for forbidden in (
+            "ingestion-",
+            "token_count",
+            "score",
+            "filename",
+            "url",
+        ):
+            self.assertNotIn(forbidden, serialized.lower())
+
+    def test_selection_rejects_unknown_duplicate_non_string_bool_and_over_ten(self):
+        candidates = tuple(_candidate(f"segment-{index}") for index in range(11))
+        invalid = (
+            ["unknown"],
+            ["segment-1", "segment-1"],
+            [1],
+            [True],
+            [f"segment-{index}" for index in range(11)],
+        )
+
+        for segment_ids in invalid:
+            with self.subTest(segment_ids=segment_ids):
+                with self.assertRaises((ValidationError, ValueError)):
+                    build_attachment_citations(segment_ids, candidates)
+
+    def test_excerpt_must_remain_non_empty_after_whitespace_normalization(self):
+        for content in ("", "   \n\t  "):
+            with self.subTest(content=content):
+                with self.assertRaises(ValidationError):
+                    build_attachment_citations(
+                        ["segment-empty"],
+                        (_candidate("segment-empty", content=content),),
+                    )
+
+    def test_tool_accepts_only_segment_ids_and_rejects_forged_fields(self):
+        candidates = (_candidate("segment-1"),)
+        tool = build_attachment_citation_tool(candidates)
+
+        self.assertEqual(tool.name, CITATION_TOOL_NAME)
+        self.assertEqual(
+            set(tool.args_schema.model_json_schema()["properties"]),
+            {"segment_ids"},
+        )
+        self.assertEqual(
+            tool.invoke({"segment_ids": ["segment-1"]}),
+            {"segment_ids": ["segment-1"]},
+        )
+        forged = (
+            {"segment_ids": ["segment-1"], "locator": {"type": "page"}},
+            {"segment_ids": ["segment-1"], "url": "https://secret"},
+            {"segment_ids": ["segment-1"], "filename": "secret.pdf"},
+        )
+        for payload in forged:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError):
+                    tool.invoke(payload)
+
+    def test_selection_model_is_strict_extra_forbid_and_unique(self):
+        valid = AttachmentCitationSelection(segment_ids=["segment-1"])
+        self.assertEqual(valid.segment_ids, ["segment-1"])
+        for payload in (
+            {"segment_ids": ("segment-1",)},
+            {"segment_ids": [False]},
+            {"segment_ids": ["segment-1"], "url": "https://secret"},
+            {"segment_ids": ["segment-1", "segment-1"]},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError):
+                    AttachmentCitationSelection.model_validate(payload)
+
+
+class CitationMergeAndHistoryTest(unittest.TestCase):
+    def test_web_and_attachment_dedupe_independently_then_merge(self):
+        web = [
+            {
+                "id": f"old-{index}",
+                "title": f"来源 {index}",
+                "sourceType": "web",
+                "url": f"https://example.com/{index}",
+            }
+            for index in range(11)
+        ]
+        web.insert(1, dict(web[0]))
+        attachment = [
+            build_attachment_citations(
+                [f"segment-{index}"],
+                (
+                    _candidate(
+                        f"segment-{index}",
+                        attachment_id=f"attachment-{index}",
+                    ),
+                ),
+            )[0]
+            for index in range(11)
+        ]
+        attachment.insert(1, dict(attachment[0]))
+
+        merged = merge_citations(web, attachment)
+
+        self.assertEqual(len(merged), 20)
+        self.assertTrue(all("sourceType" in item for item in merged[:10]))
+        self.assertTrue(
+            all(item.get("source_type") == "attachment" for item in merged[10:])
+        )
+        self.assertEqual(merged[10]["segment_id"], "segment-0")
+
+    def test_attachment_history_round_trip_keeps_exact_shape(self):
+        citation = build_attachment_citations(
+            ["segment-1"],
+            (_candidate("segment-1"),),
+        )[0]
+
+        encoded = MessageContext(citations=[citation]).to_context_list()
+        restored = MessageContext.from_context_list(encoded)
+
+        self.assertEqual(encoded, [{"citations": [citation]}])
+        self.assertEqual(restored.citations, [citation])
+
+    def test_legacy_web_history_keeps_optional_source_type_compatible(self):
+        citation = {
+            "id": "legacy-1",
+            "title": "既有网页来源",
+            "url": "https://example.com/source",
+        }
+
+        encoded = MessageContext(citations=[citation]).to_context_list()
+        restored = MessageContext.from_context_list(encoded)
+
+        self.assertEqual(encoded, [{"citations": [citation]}])
+        self.assertEqual(restored.citations, [citation])
+
+
+class GraphManagerAttachmentCitationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_exact_tool_maps_current_transient_candidates(self):
+        page = _candidate("segment-page")
+        file = _candidate(
+            "segment-file",
+            page_start=None,
+            page_end=None,
+        )
+        context = TransientResearchDocumentContext(
+            implicit_prompt_id=None,
+            selection=ResearchDocumentContextSelection(
+                context_blocks=(
+                    ResearchContextBlock(
+                        content="PRIVATE_RESEARCH_CONTEXT",
+                        supporting_segment_ids=("segment-page", "segment-file"),
+                        estimated_tokens=10,
+                    ),
+                ),
+                citation_candidates=(page, file),
+                mode="focused",
+                estimated_tokens=10,
+            ),
+        )
+
+        class Checkpointer:
+            @staticmethod
+            def save_thread_mapping(**_kwargs):
+                return True
+
+        class StreamingGraph:
+            async def astream_events(self, _state, config, version):
+                yield {
+                    "event": "on_tool_end",
+                    "name": "similar_but_untrusted_tool",
+                    "data": {"output": {"segment_ids": ["segment-file"]}},
+                }
+                yield {
+                    "event": "on_tool_end",
+                    "name": CITATION_TOOL_NAME,
+                    "data": {"output": {"segment_ids": ["segment-page"]}},
+                }
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="安全回答")},
+                }
+
+            @staticmethod
+            def get_state(_config):
+                return SimpleNamespace(values={})
+
+        manager = object.__new__(GraphManager)
+        manager.checkpointer = Checkpointer()
+        manager._build_branch_history_messages = lambda **_kwargs: []
+        manager._get_state_message_count = lambda *_args: 0
+        config = {"configurable": {}}
+        binding = bind_research_document_context(context, config)
+        try:
+            with patch(
+                "agents.graph.graph_builder.get_streaming_medical_graph",
+                return_value=StreamingGraph(),
+            ):
+                events = [
+                    event
+                    async for event in manager.chat_stream_prepared_async(
+                        patient_id=None,
+                        doctor_id="11111111-1111-4111-8111-111111111111",
+                        session_id="session-1",
+                        conversation_id="conversation-1",
+                        message="请分析",
+                        user_message_id="user-1",
+                        assistant_message_id="assistant-1",
+                        safe_attachment_refs=[
+                            {
+                                "attachment_id": "attachment-1",
+                                "document_version": 3,
+                                "content_sha256": "a" * 64,
+                                "page_count": 1,
+                            }
+                        ],
+                        agent_type="research",
+                        research_options={
+                            "enable_institution_data": False,
+                            "enable_web_search": False,
+                            "types": [],
+                        },
+                        health_handle=None,
+                        research_handle=binding.handle,
+                        runnable_config=config,
+                    )
+                ]
+        finally:
+            reset_research_document_context(binding, config)
+
+        terminal = events[-1]
+        self.assertIsInstance(terminal, PreparedGraphTerminal)
+        self.assertEqual(
+            [item["segment_id"] for item in terminal.citations],
+            ["segment-page"],
+        )
+        self.assertNotIn("segment-file", json.dumps(terminal.citations))
+
+
+if __name__ == "__main__":
+    unittest.main()

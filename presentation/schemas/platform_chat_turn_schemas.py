@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -6,6 +6,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     StrictBool,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -14,6 +15,7 @@ from application.services.chat_turn_fingerprint import (
     fingerprint_turn_from_request,
     normalize_message,
 )
+from domain.models.chat_entity import canonicalize_citations
 
 
 TurnStatus = Literal[
@@ -335,6 +337,12 @@ class PlatformChatTurnDoneEvent(BaseModel):
     request_id: str
     user_message_id: str
     assistant_message_id: str
+    citations: list[dict[str, Any]]
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def validate_citations(cls, value):
+        return canonicalize_citations(value)
 
 
 class PlatformChatTurnErrorEvent(BaseModel):

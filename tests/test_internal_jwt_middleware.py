@@ -30,6 +30,10 @@ from presentation.middleware.internal_jwt_auth import (
 _JWKS_URL = "https://backend.example/internal/auth/jwks"
 _LOGGER_NAME = "presentation.middleware.internal_jwt_auth"
 _ENFORCED_REQUESTS = (
+    (
+        "DELETE",
+        "/api/platform/research-documents/33333333-3333-4333-8333-333333333333",
+    ),
     ("GET", "/api/conversations/conversation-7"),
     ("GET", "/api/platform/chat/turns/turn-request-7"),
     ("POST", "/api/chat/edit-resend/stream"),
@@ -801,6 +805,11 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
     def test_platform_dynamic_routes_have_stable_telemetry_templates(self):
         cases = (
+            (
+                "DELETE",
+                "/api/platform/research-documents/33333333-3333-4333-8333-333333333333",
+                "/api/platform/research-documents/{attachment_id}",
+            ),
             (
                 "GET",
                 "/api/platform/chat/turns/turn-request-7",

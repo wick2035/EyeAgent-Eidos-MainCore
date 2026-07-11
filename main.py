@@ -15,6 +15,7 @@ from presentation.routers import chat_router, conversation_router, research_rout
 from presentation.routers import asr_router
 from presentation.routers import file_router
 from presentation.routers import platform_chat_turn_router
+from presentation.routers import research_document_router
 from infrastructure.api.backend_client import get_api_client, APIError, NetworkError
 from infrastructure.database.mysql_connection import get_db_connection, close_db_connection
 from presentation.exception_handlers.platform_validation_handler import (
@@ -117,6 +118,7 @@ app.include_router(recommendation_router.router)
 app.include_router(asr_router.router)
 app.include_router(file_router.router)
 app.include_router(platform_chat_turn_router.router)
+app.include_router(research_document_router.router)
 
 logger.info("=" * 80)
 logger.info("智能医疗咨询系统启动")

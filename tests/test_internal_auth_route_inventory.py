@@ -32,6 +32,7 @@ _ROUTE_SOURCES = {
     "presentation/routers/recommendation_router.py": "/api/recommendation",
     "presentation/routers/research_router.py": "/api/research",
     "presentation/routers/platform_chat_turn_router.py": "/api/platform/chat/turns",
+    "presentation/routers/research_document_router.py": "/api/platform/research-documents",
 }
 
 PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
@@ -45,6 +46,7 @@ PLATFORM_EXCLUSIVE_ROUTE_TEMPLATES = frozenset(
         ("POST", "/api/platform/chat/turns/execute"),
         ("GET", "/api/platform/chat/turns/{request_id}"),
         ("POST", "/api/platform/chat/turns/{request_id}/abort"),
+        ("DELETE", "/api/platform/research-documents/{attachment_id}"),
     }
 )
 
@@ -95,6 +97,7 @@ CURRENT_HTTP_API_ROUTES = frozenset(
         ("POST", "/api/platform/chat/turns/execute"),
         ("GET", "/api/platform/chat/turns/{request_id}"),
         ("POST", "/api/platform/chat/turns/{request_id}/abort"),
+        ("DELETE", "/api/platform/research-documents/{attachment_id}"),
     }
 )
 
@@ -140,6 +143,7 @@ def _concrete_path(path: str) -> str:
     return (
         path.replace("{conversation_id}", "conversation-7")
         .replace("{session_id}", "session-7")
+        .replace("{attachment_id}", "33333333-3333-4333-8333-333333333333")
     )
 
 

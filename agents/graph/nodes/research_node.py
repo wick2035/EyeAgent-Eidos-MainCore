@@ -24,6 +24,7 @@ from agents.prompts.research_prompts import (
     detect_research_intent,
 )
 from agents.tools.research_tools import RESEARCH_AGENT_TOOLS
+from agents.graph.attachment_citations import build_attachment_citation_tool
 from utils.transient_attachment_context import (
     get_research_document_context,
     inject_untrusted_research_documents,
@@ -103,6 +104,15 @@ def _prepare_research(state: MedicalState, config: RunnableConfig | None = None)
         enable_web_search,
         patient_id=state.get("patient_id"),
     )
+    research_document_context = None
+    if state.get("platform_prepared"):
+        research_document_context = get_research_document_context()
+        candidates = research_document_context.selection.citation_candidates
+        if candidates:
+            available_tools = [
+                *available_tools,
+                build_attachment_citation_tool(candidates),
+            ]
 
     # 创建 ReAct Agent
     agent = create_react_agent(
@@ -126,10 +136,9 @@ def _prepare_research(state: MedicalState, config: RunnableConfig | None = None)
                 input_messages.append(AIMessage(content=content))
 
     if state.get("platform_prepared"):
-        context = get_research_document_context()
         input_messages = inject_untrusted_research_documents(
             input_messages,
-            context,
+            research_document_context,
         )
 
     return agent, input_messages

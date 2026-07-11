@@ -27,6 +27,7 @@ from application.services.platform_chat_turn_execution_service import (
 )
 from domain.models.chat_turn_request import ChatTurnRequestEntity
 from domain.security.principal import CurrentPrincipal
+from domain.models.chat_entity import MessageContext
 from infrastructure.attachments.config import (
     AllowedAttachmentEndpoint,
     AttachmentDownloadSettings,
@@ -1240,6 +1241,112 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
             "https://secret",
         ):
             self.assertNotIn(forbidden, persisted)
+
+    async def test_done_and_assistant_history_share_canonical_attachment_citations(self):
+        request = execute_request(
+            "research-citations",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+        )
+        citation = {
+            "source_type": "attachment",
+            "attachment_id": "attachment-research-citations",
+            "document_version": 2,
+            "segment_id": "segment-1",
+            "locator": {
+                "type": "page",
+                "page_start": 4,
+                "page_end": 4,
+            },
+            "excerpt": "受控引用片段",
+        }
+        graph = FakeGraphManager(citations=[citation])
+        service, _, messages, _, _ = make_service([request], graph=graph)
+
+        events = await collect(
+            service.stream(request, principal(scopes={"ai:research"}))
+        )
+
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(events[-1]["citations"], [citation])
+        persisted = json.loads(
+            messages.get_by_id(request.assistant_message_id).context
+        )
+        history = MessageContext.from_context_list(persisted)
+        self.assertEqual(history.citations, events[-1]["citations"])
+        serialized = json.dumps(persisted, ensure_ascii=False).lower()
+        self.assertNotIn("filename", serialized)
+        self.assertNotIn("url", serialized)
+
+    async def test_finalize_race_restores_citations_from_persisted_assistant(self):
+        persisted_citation = {
+            "source_type": "attachment",
+            "attachment_id": "attachment-persisted",
+            "document_version": 1,
+            "segment_id": "segment-persisted",
+            "locator": {"type": "file"},
+            "excerpt": "已落库引用",
+        }
+        incoming_citation = {
+            "source_type": "attachment",
+            "attachment_id": "attachment-incoming",
+            "document_version": 2,
+            "segment_id": "segment-incoming",
+            "locator": {"type": "file"},
+            "excerpt": "竞态失败 worker 的引用",
+        }
+
+        for mode in ("already_terminal", "cas_lost"):
+            with self.subTest(mode=mode):
+                request = execute_request(f"citation-race-{mode}")
+                service, turns, messages, _, _ = make_service([request])
+                turn = turns.get("doctor-1", request.request_id)
+                assistant = messages.get_by_id(request.assistant_message_id)
+                assistant.context = MessageContext(
+                    citations=[persisted_citation]
+                ).to_json()
+                service._active_doctors[
+                    (request.request_id, request.assistant_message_id)
+                ] = "doctor-1"
+
+                if mode == "already_terminal":
+                    turn.status = "completed"
+                else:
+                    turn.status = "streaming"
+
+                    def lose_cas(*_args, **_kwargs):
+                        turn.status = "completed"
+                        return False
+
+                    turns.compare_and_set_status = lose_cas
+
+                result = await service.finalize_platform_turn_success(
+                    request.request_id,
+                    request.assistant_message_id,
+                    PreparedGraphTerminal(
+                        content="竞态回答",
+                        token_used=1,
+                        tool_results=[],
+                        citations=[incoming_citation],
+                        agent_type="research",
+                        stage="research_init",
+                    ),
+                )
+
+                done = service.build_public_terminal_event(result)
+                history = MessageContext.from_context_list(
+                    json.loads(assistant.context)
+                )
+                self.assertEqual(done["citations"], [persisted_citation])
+                self.assertEqual(done["citations"], history.citations)
+                self.assertNotEqual(done["citations"], [incoming_citation])
 
 
 class ChatTurnExecutionRegistryContractTest(unittest.IsolatedAsyncioTestCase):

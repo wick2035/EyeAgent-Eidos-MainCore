@@ -13,6 +13,7 @@ from agents.graph.nodes.research_node import (
 )
 from agents.graph.nodes.router_node import router_node
 from application.services.research_document_context_selector import (
+    ResearchCitationCandidate,
     ResearchContextBlock,
     ResearchDocumentContextSelection,
 )
@@ -44,7 +45,18 @@ class ResearchNodeDocumentContextTest(unittest.TestCase):
                         estimated_tokens=10,
                     ),
                 ),
-                citation_candidates=(),
+                citation_candidates=(
+                    ResearchCitationCandidate(
+                        segment_id="segment-1",
+                        ingestion_id="ingestion-1",
+                        attachment_id="attachment-1",
+                        document_version=1,
+                        page_start=1,
+                        page_end=1,
+                        content=content,
+                        token_count=10,
+                    ),
+                ),
                 mode="focused",
                 estimated_tokens=10,
             ),
@@ -101,6 +113,10 @@ class ResearchNodeDocumentContextTest(unittest.TestCase):
                 {getattr(tool, "name", "") for tool in captured["tools"]}
             )
         )
+        self.assertIn(
+            "cite_research_document_segments",
+            {getattr(tool, "name", "") for tool in captured["tools"]},
+        )
 
     def test_null_patient_removes_exact_patient_bound_tools(self):
         patient_tools = [_Tool(name) for name in sorted(_PATIENT_BOUND_TOOL_NAMES)]
@@ -120,6 +136,43 @@ class ResearchNodeDocumentContextTest(unittest.TestCase):
         self.assertEqual(
             [tool.name for tool in result],
             ["get_current_time", "statistical_analysis"],
+        )
+
+    def test_legacy_research_does_not_expose_attachment_citation_tool(self):
+        captured = {}
+
+        def create_agent(*, model, tools):
+            captured["tools"] = tools
+            return _Agent()
+
+        with (
+            patch(
+                "agents.graph.nodes.research_node.get_streaming_llm",
+                return_value=object(),
+            ),
+            patch(
+                "agents.graph.nodes.research_node.create_react_agent",
+                side_effect=create_agent,
+            ),
+        ):
+            _prepare_research(
+                {
+                    "role": "doctor",
+                    "stage": "research_init",
+                    "messages": [HumanMessage(content="请分析")],
+                    "doctor_id": "doctor-1",
+                    "patient_id": None,
+                    "enable_institution_data": False,
+                    "enable_web_search": False,
+                    "web_search_types": [],
+                    "is_streaming": True,
+                    "platform_prepared": False,
+                }
+            )
+
+        self.assertNotIn(
+            "cite_research_document_segments",
+            {getattr(tool, "name", "") for tool in captured["tools"]},
         )
 
     def test_patient_bound_filter_keeps_permission_control_separate(self):

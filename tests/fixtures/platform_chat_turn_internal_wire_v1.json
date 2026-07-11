@@ -98,7 +98,8 @@
     "event": "done",
     "request_id": "turn-request-1",
     "user_message_id": "message-user-1",
-    "assistant_message_id": "message-assistant-1"
+    "assistant_message_id": "message-assistant-1",
+    "citations": []
   },
   "error": {
     "event": "error",

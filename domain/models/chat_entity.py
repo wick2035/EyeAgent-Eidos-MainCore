@@ -2,10 +2,103 @@
 对话持久化实体模型
 映射到数据库表 chat_conversation 和 chat_message
 """
-from typing import Optional, List, Any, Dict
+from typing import Annotated, Literal, Optional, List, Any, Dict, Union
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 import json
+
+
+class AttachmentPageLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["page"]
+    page_start: int = Field(strict=True, ge=1)
+    page_end: int = Field(strict=True, ge=1)
+
+    @model_validator(mode="after")
+    def require_ordered_pages(self) -> "AttachmentPageLocator":
+        if self.page_end < self.page_start:
+            raise ValueError("page_end 不得小于 page_start")
+        return self
+
+
+class AttachmentFileLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["file"]
+
+
+AttachmentLocator = Annotated[
+    Union[AttachmentPageLocator, AttachmentFileLocator],
+    Field(discriminator="type"),
+]
+
+
+class AttachmentCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_type: Literal["attachment"]
+    attachment_id: StrictStr = Field(min_length=1)
+    document_version: int = Field(strict=True, ge=1)
+    segment_id: StrictStr = Field(min_length=1)
+    locator: AttachmentLocator
+    excerpt: StrictStr = Field(min_length=1, max_length=300)
+
+
+class LegacyWebCitation(BaseModel):
+    """现有 CitationBlock 的 web citation 结构。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: StrictStr = Field(min_length=1)
+    title: StrictStr = Field(min_length=1)
+    sourceType: Literal[
+        "web",
+        "pubmed",
+        "scholar",
+        "local",
+        "record",
+        "unknown",
+    ] | None = None
+    url: StrictStr | None = None
+    snippet: StrictStr | None = Field(default=None, max_length=300)
+
+
+def canonicalize_citations(
+    citations: Any,
+    *,
+    drop_invalid: bool = False,
+) -> list[dict[str, Any]]:
+    """严格校验 citation 联合类型并只保留协议字段。"""
+
+    if citations is None:
+        return []
+    if not isinstance(citations, list):
+        raise ValueError("citations 必须是列表")
+    if len(citations) > 20:
+        raise ValueError("citations 最多 20 条")
+
+    canonical: list[dict[str, Any]] = []
+    for raw in citations:
+        try:
+            if isinstance(raw, dict) and raw.get("source_type") == "attachment":
+                model = AttachmentCitation.model_validate(raw, strict=True)
+            else:
+                model = LegacyWebCitation.model_validate(raw, strict=True)
+        except (TypeError, ValueError, ValidationError):
+            if drop_invalid:
+                continue
+            raise
+        canonical.append(model.model_dump(mode="json", exclude_none=True))
+    return canonical
 
 
 class ChatConversationEntity(BaseModel):
@@ -120,6 +213,13 @@ class MessageContext(BaseModel):
     tool_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="统一结构的工具调用结果")
     citations: Optional[List[Dict[str, Any]]] = Field(default=None, description="前端 CitationBlock 引用来源")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="其他元数据")
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def validate_citations(cls, value):
+        if value is None:
+            return None
+        return canonicalize_citations(value)
 
     def to_context_list(self) -> List[Dict[str, Any]]:
         """

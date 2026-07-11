@@ -31,6 +31,11 @@ from agents.graph.tool_result_normalizer import (
 from agents.graph.citation_extractor import (
     deduplicate_citations,
     extract_citations_from_search_results,
+    merge_citations,
+)
+from agents.graph.attachment_citations import (
+    CITATION_TOOL_NAME,
+    extract_attachment_citations_from_tool_output,
 )
 from utils.transient_attachment_context import (
     get_attachment_analysis,
@@ -987,6 +992,7 @@ class GraphManager:
         collected_tool_calls: List[Dict[str, Any]] = []
         # 收集搜索工具来源，流结束后持久化到 context.citations
         collected_citations: List[Dict[str, Any]] = []
+        collected_attachment_citations: List[Dict[str, Any]] = []
         redact_research_tool_payload = (
             prepared_mode and agent_type == "research"
         )
@@ -1078,7 +1084,18 @@ class GraphManager:
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name", "unknown")
                     raw_tool_output = event.get("data", {}).get("output", "")
-                    if self._is_search_tool(tool_name) or self._looks_like_search_results(raw_tool_output):
+                    if (
+                        redact_research_tool_payload
+                        and tool_name == CITATION_TOOL_NAME
+                    ):
+                        research_context = get_research_document_context()
+                        collected_attachment_citations.extend(
+                            extract_attachment_citations_from_tool_output(
+                                raw_tool_output,
+                                research_context.selection.citation_candidates,
+                            )
+                        )
+                    elif self._is_search_tool(tool_name) or self._looks_like_search_results(raw_tool_output):
                         collected_citations.extend(
                             extract_citations_from_search_results(raw_tool_output)
                         )
@@ -1268,7 +1285,10 @@ class GraphManager:
             except Exception as e:
                 logger.error(f"[GraphManager] 流式 - 保存 AI 回复失败: {e}", exc_info=True)
 
-        final_citations = deduplicate_citations(collected_citations) if collected_citations else []
+        final_citations = merge_citations(
+            collected_citations,
+            collected_attachment_citations,
+        )
         if prepared_mode:
             yield PreparedGraphTerminal(
                 content=full_response,

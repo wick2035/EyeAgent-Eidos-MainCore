@@ -7,6 +7,8 @@ CitationSource 结构，失败时返回空数组，不影响主流程。
 import json
 from typing import Any, Dict, List, Optional
 
+from domain.models.chat_entity import AttachmentCitation
+
 
 MAX_CITATIONS = 10
 MAX_SNIPPET_LENGTH = 300
@@ -114,6 +116,40 @@ def deduplicate_citations(citations) -> List[Dict[str, Any]]:
             break
 
     return deduped
+
+
+def deduplicate_attachment_citations(citations) -> List[Dict[str, Any]]:
+    """按附件版本与 segment 去重，保留服务端 canonical 形状。"""
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for citation in citations if isinstance(citations, list) else []:
+        try:
+            canonical = AttachmentCitation.model_validate(
+                citation,
+                strict=True,
+            ).model_dump(mode="json")
+        except (TypeError, ValueError):
+            continue
+        key = (
+            canonical["attachment_id"],
+            canonical["document_version"],
+            canonical["segment_id"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(canonical)
+        if len(deduped) >= MAX_CITATIONS:
+            break
+    return deduped
+
+
+def merge_citations(web_citations, attachment_citations) -> List[Dict[str, Any]]:
+    """web 与 attachment 各自去重及 cap 后按来源顺序合并。"""
+    return [
+        *deduplicate_citations(web_citations),
+        *deduplicate_attachment_citations(attachment_citations),
+    ]
 
 
 def _parse_search_results(value: Any) -> Any:

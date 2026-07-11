@@ -1,7 +1,8 @@
 import asyncio
+import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Callable
 
@@ -25,7 +26,7 @@ from application.services.research_document_ingestion_service import (
 from application.services.research_document_processor import (
     ResearchDocumentProcessor,
 )
-from domain.models.chat_entity import MessageContext
+from domain.models.chat_entity import MessageContext, canonicalize_citations
 from domain.security.principal import CurrentPrincipal
 from infrastructure.attachments.config import (
     AttachmentConfigurationError,
@@ -93,6 +94,7 @@ class PlatformTurnFinalizeResult:
     assistant_message_id: str
     status: str
     error_code: str | None = None
+    citations: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PlatformChatTurnExecutionService:
@@ -592,6 +594,10 @@ class PlatformChatTurnExecutionService:
         assistant_message_id: str,
         terminal: PreparedGraphTerminal,
     ) -> PlatformTurnFinalizeResult:
+        canonical_citations = canonicalize_citations(
+            terminal.citations,
+            drop_invalid=True,
+        )
         return self._finalize(
             request_id,
             assistant_message_id,
@@ -603,11 +609,10 @@ class PlatformChatTurnExecutionService:
                 tool_results=self._sanitize_persisted_metadata(
                     terminal.tool_results
                 ) or None,
-                citations=self._sanitize_persisted_metadata(
-                    terminal.citations
-                ) or None,
+                citations=canonical_citations or None,
                 metadata={"agent_type": terminal.agent_type},
             ),
+            citations=canonical_citations,
         )
 
     async def finalize_platform_turn_failure(
@@ -644,6 +649,7 @@ class PlatformChatTurnExecutionService:
         token_used: int | None = None,
         context: MessageContext | None = None,
         error_code: str | None = None,
+        citations: list[dict[str, Any]] | None = None,
     ) -> PlatformTurnFinalizeResult:
         doctor_id = self._active_doctors.get((request_id, assistant_message_id))
         if not doctor_id:
@@ -653,7 +659,12 @@ class PlatformChatTurnExecutionService:
             if entity is None or entity.assistant_message_id != assistant_message_id:
                 raise RuntimeError(_TURN_NOT_FOUND)
             if entity.status in _TERMINAL:
-                return self._finalize_result(entity)
+                return self._finalize_result(
+                    entity,
+                    self._persisted_assistant_citations(
+                        entity.assistant_message_id
+                    ),
+                )
             if entity.status != "streaming":
                 raise RuntimeError("INVALID_TURN_STATE")
             changed = self.turn_repo.compare_and_set_status(
@@ -667,7 +678,12 @@ class PlatformChatTurnExecutionService:
                 latest = self.turn_repo.get_for_update(doctor_id, request_id)
                 if latest is None:
                     raise RuntimeError(_TURN_NOT_FOUND)
-                return self._finalize_result(latest)
+                return self._finalize_result(
+                    latest,
+                    self._persisted_assistant_citations(
+                        latest.assistant_message_id
+                    ),
+                )
             if context is not None:
                 context = self._completion_context(entity, context)
             if not self.chat_persistence_service.finalize_platform_assistant(
@@ -682,7 +698,7 @@ class PlatformChatTurnExecutionService:
             latest = self.turn_repo.get_for_update(doctor_id, request_id) or entity
             latest.status = status
             latest.error_code = error_code
-            return self._finalize_result(latest)
+            return self._finalize_result(latest, citations)
 
     def _claim_prepared_turn(self, request, doctor_id):
         prefetched = self._get_turn(doctor_id, request.request_id)
@@ -924,6 +940,8 @@ class PlatformChatTurnExecutionService:
             event["error_code"] = result.error_code or (
                 "TURN_CANCELLED" if result.status == "cancelled" else "ATTACHMENT_ANALYSIS_FAILED"
             )
+        else:
+            event["citations"] = result.citations
         return event
 
     @staticmethod
@@ -947,13 +965,17 @@ class PlatformChatTurnExecutionService:
         return value if isinstance(value, str) and _SAFE_ERROR.fullmatch(value) else "ATTACHMENT_ANALYSIS_FAILED"
 
     @staticmethod
-    def _finalize_result(entity) -> PlatformTurnFinalizeResult:
+    def _finalize_result(
+        entity,
+        citations: list[dict[str, Any]] | None = None,
+    ) -> PlatformTurnFinalizeResult:
         return PlatformTurnFinalizeResult(
             request_id=entity.request_id,
             user_message_id=entity.user_message_id,
             assistant_message_id=entity.assistant_message_id,
             status=entity.status,
             error_code=entity.error_code,
+            citations=list(citations or []),
         )
 
     @staticmethod
@@ -980,6 +1002,23 @@ class PlatformChatTurnExecutionService:
                 }
             )
         return context.model_copy(update={"metadata": metadata})
+
+    def _persisted_assistant_citations(
+        self,
+        assistant_message_id: str,
+    ) -> list[dict[str, Any]]:
+        """竞态失败时只从已落库 assistant context 恢复引用。"""
+        try:
+            message = self.message_repo.get_by_id(assistant_message_id)
+            raw_context = getattr(message, "context", None)
+            if isinstance(raw_context, str):
+                raw_context = json.loads(raw_context)
+            if not isinstance(raw_context, list):
+                return []
+            context = MessageContext.from_context_list(raw_context)
+            return list(context.citations or [])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
 
     @staticmethod
     def _sanitize_persisted_metadata(value: Any) -> Any:
