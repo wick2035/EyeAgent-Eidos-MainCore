@@ -16,6 +16,10 @@ from application.services.legacy_text_turn_authority import (
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
+    from agents.graph.persistence_adapter import (
+        InMemoryPersistenceAdapter,
+        NullPersistenceAdapter,
+    )
     from agents.graph.mysql_persistence_adapter import MySQLPersistenceAdapter
 
 
@@ -533,6 +537,25 @@ class FakeTreeService:
 
 
 class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
+    def test_non_mysql_adapters_explicitly_reject_legacy_branches(self):
+        authority = build_legacy_text_turn_authority(
+            agent_type="health",
+            patient_id="patient-1",
+        )
+        for adapter in (NullPersistenceAdapter(), InMemoryPersistenceAdapter()):
+            with self.subTest(adapter=type(adapter).__name__):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED",
+                ):
+                    adapter.prepare_edit_resend_turn(
+                        "chat-1",
+                        "user-1",
+                        "编辑问题",
+                        "doctor-1",
+                        expected_authority=authority,
+                    )
+
     def test_user_context_persists_canonical_agent_and_patient_binding(self):
         service = FakeTreeService()
         adapter = MySQLPersistenceAdapter(service)

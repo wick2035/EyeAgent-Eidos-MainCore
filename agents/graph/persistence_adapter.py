@@ -7,8 +7,13 @@
 - InMemoryPersistenceAdapter: 内存存储（单元测试）
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from application.services.legacy_text_turn_authority import (
+        LegacyTextTurnAuthority,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,7 @@ class PersistenceAdapter(ABC):
         content: str,
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
         """创建编辑重发的用户消息和助手占位。"""
         pass
@@ -97,6 +103,8 @@ class PersistenceAdapter(ABC):
         chat_id: str,
         source_assistant_id: str,
         context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
         """创建重新生成的助手占位。"""
         pass
@@ -243,18 +251,19 @@ class NullPersistenceAdapter(PersistenceAdapter):
         content: str,
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
-        logger.debug(f"[NullAdapter] prepare_edit_resend_turn: chat_id={chat_id}")
-        return {"user_message_id": "null-msg-id", "assistant_message_id": "null-assistant-id"}
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
 
     def prepare_regenerate_turn(
         self,
         chat_id: str,
         source_assistant_id: str,
         context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
-        logger.debug(f"[NullAdapter] prepare_regenerate_turn: chat_id={chat_id}")
-        return {"assistant_message_id": "null-assistant-id"}
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
 
     def update_assistant_success(
         self,
@@ -389,17 +398,19 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
         content: str,
         sender_id: str,
         context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
-        return self.prepare_normal_turn(chat_id, content, sender_id, context, False)
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
 
     def prepare_regenerate_turn(
         self,
         chat_id: str,
         source_assistant_id: str,
         context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
     ) -> Dict[str, str]:
-        assistant_message_id = self.create_assistant_placeholder(chat_id=chat_id, context=context)
-        return {"assistant_message_id": assistant_message_id}
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
 
     def update_assistant_success(
         self,
