@@ -37,6 +37,7 @@
       "agent_type": "research",
       "attachment_scope": "research",
       "research_options": {
+        "enable_institution_data": true,
         "enable_web_search": true,
         "types": [
           "general",
@@ -45,7 +46,7 @@
         ]
       }
     },
-    "canonical_json": "{\"agent_type\":\"research\",\"attachment_ids\":[\"att-2\",\"att-1\"],\"attachment_scope\":\"research\",\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":\"research-document-analysis-v1\",\"message\":\"\",\"operation\":\"normal\",\"patient_id\":null,\"research_options\":{\"enable_web_search\":true,\"types\":[\"general\",\"pubmed\",\"scholar\"]},\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":2}",
-    "sha256": "243074dc191c8f71d0973ef099fb032e8f052c9a7574892f8a56dd33cf75e3e5"
+    "canonical_json": "{\"agent_type\":\"research\",\"attachment_ids\":[\"att-2\",\"att-1\"],\"attachment_scope\":\"research\",\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":\"research-document-analysis-v1\",\"message\":\"\",\"operation\":\"normal\",\"patient_id\":null,\"research_options\":{\"enable_institution_data\":true,\"enable_web_search\":true,\"types\":[\"general\",\"pubmed\",\"scholar\"]},\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":2}",
+    "sha256": "34eb09276620ee581a75d4fa5654d2d03b5369a650dc3160808302591bdedbc1"
   }
 }

@@ -118,20 +118,45 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
                     vector["sha256"],
                 )
 
-    def test_research_options_normalize_types_and_disable_clears_them(self):
+    def test_research_options_are_exact_strict_and_keep_institution_setting(self):
         options_type = getattr(turn_schemas, "ResearchOptionsV2", None)
         self.assertIsNotNone(options_type)
         enabled = options_type(
+            enable_institution_data=True,
             enable_web_search=True,
             types=["scholar", "general", "pubmed", "general"],
         )
         disabled = options_type(
+            enable_institution_data=True,
             enable_web_search=False,
             types=["pubmed"],
         )
 
+        self.assertTrue(enabled.enable_institution_data)
+        self.assertTrue(disabled.enable_institution_data)
         self.assertEqual(enabled.types, ["general", "pubmed", "scholar"])
         self.assertEqual(disabled.types, [])
+
+        valid = {
+            "enable_institution_data": False,
+            "enable_web_search": True,
+            "types": ["general"],
+        }
+        for field in valid:
+            with self.subTest(missing=field):
+                payload = dict(valid)
+                payload.pop(field)
+                with self.assertRaises(ValidationError):
+                    options_type(**payload)
+        for field in ("enable_institution_data", "enable_web_search"):
+            for invalid_boolean in (0, 1, "true"):
+                with self.subTest(field=field, invalid_boolean=invalid_boolean):
+                    payload = dict(valid)
+                    payload[field] = invalid_boolean
+                    with self.assertRaises(ValidationError):
+                        options_type(**payload)
+        with self.assertRaises(ValidationError):
+            options_type(**valid, unknown=True)
 
     def test_v2_prepare_requires_and_validates_agent_contract(self):
         self.assertIn(
@@ -175,12 +200,14 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
             agent_type="research",
             attachment_scope="research",
             research_options={
+                "enable_institution_data": True,
                 "enable_web_search": True,
                 "types": ["scholar", "general", "general"],
             },
         )
 
         research = ExecutePlatformChatTurnRequest(**base)
+        self.assertTrue(research.research_options.enable_institution_data)
         self.assertEqual(research.research_options.types, ["general", "scholar"])
         for field in (
             "patient_id",
@@ -368,6 +395,7 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
             "agent_type": "research",
             "attachment_scope": "research",
             "research_options": {
+                "enable_institution_data": False,
                 "enable_web_search": False,
                 "types": [],
             },

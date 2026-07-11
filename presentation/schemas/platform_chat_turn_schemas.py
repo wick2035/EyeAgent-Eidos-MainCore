@@ -5,6 +5,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    StrictBool,
     model_serializer,
     model_validator,
 )
@@ -34,8 +35,9 @@ ResearchType = Literal["general", "pubmed", "scholar"]
 class ResearchOptionsV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enable_web_search: bool
-    types: list[ResearchType] = Field(default_factory=list)
+    enable_institution_data: StrictBool
+    enable_web_search: StrictBool
+    types: list[ResearchType]
 
     @model_validator(mode="after")
     def normalize_types(self) -> "ResearchOptionsV2":

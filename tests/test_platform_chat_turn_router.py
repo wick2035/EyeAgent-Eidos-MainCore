@@ -140,6 +140,7 @@ def research_prepare_request():
         "agent_type": "research",
         "attachment_scope": "research",
         "research_options": {
+            "enable_institution_data": True,
             "enable_web_search": False,
             "types": [],
         },
@@ -177,6 +178,7 @@ def research_execute_request():
         agent_type="research",
         attachment_scope="research",
         research_options={
+            "enable_institution_data": True,
             "enable_web_search": False,
             "types": [],
         },

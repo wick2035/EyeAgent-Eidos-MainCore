@@ -381,6 +381,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
 
     def _research_request(self):
         research_options = ResearchOptionsV2(
+            enable_institution_data=True,
             enable_web_search=True,
             types=["scholar", "general", "general"],
         )
@@ -452,6 +453,7 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(
             turn.research_options,
             {
+                "enable_institution_data": True,
                 "enable_web_search": True,
                 "types": ["general", "scholar"],
             },
@@ -876,7 +878,8 @@ class ChatTurnRequestRepositoryTest(unittest.TestCase):
             agent_type="research",
             attachment_scope="research",
             research_options_json=(
-                '{"enable_web_search":true,"types":["general"]}'
+                '{"enable_institution_data":true,'
+                '"enable_web_search":true,"types":["general"]}'
             ),
             operation="normal",
             conversation_id="conversation-1",

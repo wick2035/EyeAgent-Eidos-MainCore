@@ -386,6 +386,7 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
             agent_type="research",
             attachment_scope="research",
             research_options={
+                "enable_institution_data": True,
                 "enable_web_search": False,
                 "types": [],
             },
@@ -427,6 +428,7 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
             agent_type="research",
             attachment_scope="research",
             research_options={
+                "enable_institution_data": True,
                 "enable_web_search": True,
                 "types": ["general", "pubmed"],
             },
@@ -436,7 +438,9 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
             "agent_type": "health",
             "attachment_scope": "patient",
             "research_options_json": (
-                '{"enable_web_search":true,"types":["scholar"]}'
+                '{"enable_institution_data":false,'
+                '"enable_web_search":true,'
+                '"types":["general","pubmed"]}'
             ),
         }
 
