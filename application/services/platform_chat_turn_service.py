@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -61,6 +62,9 @@ class SourceTurnAuthorityError(ValueError):
 
     def __init__(self):
         super().__init__(self.code)
+
+
+_SAFE_SOURCE_TURN_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 
 
 @dataclass(frozen=True)
@@ -481,7 +485,14 @@ class PlatformChatTurnService:
             research_options=context_snapshot.research_options,
             attachment_ids=context_snapshot.attachment_ids,
         )
-        if not self._source_turn_matches_snapshot(source_turn, authoritative):
+        if not self._source_turn_matches_snapshot(
+            source_turn,
+            authoritative,
+            allow_failed=(
+                request.operation == "regenerate"
+                and source_turn.status == "failed"
+            ),
+        ):
             raise SourceTurnAuthorityError()
         if authoritative != requested:
             raise SourceTurnAuthorityError()
@@ -489,13 +500,13 @@ class PlatformChatTurnService:
 
     def _resolve_source_user_and_turn(self, request):
         source = self.message_repo.get_by_id(request.source_message_id)
-        if not self._is_visible_success_message(
-            source,
-            request.conversation_id,
-        ):
-            raise SourceTurnAuthorityError()
 
         if request.operation == "edit_resend":
+            if not self._is_visible_success_message(
+                source,
+                request.conversation_id,
+            ):
+                raise SourceTurnAuthorityError()
             if (
                 source.message_type != "user"
                 or source.sender_id != request.doctor_id
@@ -529,7 +540,13 @@ class PlatformChatTurnService:
                 raise SourceTurnAuthorityError()
             return source_user, source_turn
 
-        if source.message_type != "assistant" or not source.parent_id:
+        if (
+            source is None
+            or source.chat_id != request.conversation_id
+            or source.deleted
+            or source.message_type != "assistant"
+            or not source.parent_id
+        ):
             raise SourceTurnAuthorityError()
         source_user = self.message_repo.get_by_id(source.parent_id)
         if not self._is_visible_success_message(
@@ -543,10 +560,34 @@ class PlatformChatTurnService:
             request.conversation_id,
             source.id,
         )
-        if source_turn is not None and (
-            source_turn.user_message_id != source_user.id
-            or source_turn.status != "completed"
+        if (
+            source_turn is None
+            or source_turn.doctor_id != request.doctor_id
+            or source_turn.conversation_id != request.conversation_id
+            or source_turn.user_message_id != source_user.id
+            or source_turn.assistant_message_id != source.id
+            or source_turn.operation
+            not in {"normal", "edit_resend", "regenerate"}
         ):
+            raise SourceTurnAuthorityError()
+
+        if source_turn.status == "completed":
+            if (
+                source.status != "success"
+                or source_turn.error_code is not None
+                or source.error_message is not None
+            ):
+                raise SourceTurnAuthorityError()
+        elif source_turn.status == "failed":
+            if (
+                source.status != "failed"
+                or not self._is_safe_source_turn_error_code(
+                    source_turn.error_code
+                )
+                or source.error_message != source_turn.error_code
+            ):
+                raise SourceTurnAuthorityError()
+        else:
             raise SourceTurnAuthorityError()
         return source_user, source_turn
 
@@ -562,6 +603,13 @@ class PlatformChatTurnService:
             and message.status == "success"
             and not message.deleted
             and (doctor_id is None or message.sender_id == doctor_id)
+        )
+
+    @staticmethod
+    def _is_safe_source_turn_error_code(value: Any) -> bool:
+        return bool(
+            isinstance(value, str)
+            and _SAFE_SOURCE_TURN_ERROR_CODE.fullmatch(value)
         )
 
     @classmethod
@@ -717,10 +765,24 @@ class PlatformChatTurnService:
     def _source_turn_matches_snapshot(
         source_turn,
         snapshot: _TurnAuthoritySnapshot,
+        *,
+        allow_failed: bool = False,
     ) -> bool:
         try:
             return bool(
-                source_turn.status == "completed"
+                (
+                    (
+                        source_turn.status == "completed"
+                        and source_turn.error_code is None
+                    )
+                    or (
+                        allow_failed
+                        and source_turn.status == "failed"
+                        and PlatformChatTurnService._is_safe_source_turn_error_code(
+                            source_turn.error_code
+                        )
+                    )
+                )
                 and source_turn.protocol_version == snapshot.protocol_version
                 and source_turn.agent_type == snapshot.agent_type
                 and source_turn.attachment_scope == snapshot.attachment_scope

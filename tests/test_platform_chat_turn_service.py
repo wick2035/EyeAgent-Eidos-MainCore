@@ -18,6 +18,7 @@ from application.services.platform_chat_turn_service import (
     ChatTurnNotFoundError,
     PlatformChatTurnService,
     RequestIdempotencyConflictError,
+    SourceTurnAuthorityError,
     TurnAlreadyCompletedError,
 )
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
@@ -532,6 +533,49 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         )
         return turn
 
+    def _fail_source_turn(
+        self,
+        request,
+        error_code="RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE",
+    ):
+        self.service.prepare(request)
+        turn = self._stored_turn(request.request_id)
+        self.turn_repo.compare_and_set_status(
+            "doctor-1",
+            turn.request_id,
+            "prepared",
+            "failed",
+            error_code=error_code,
+        )
+        self.message_repo.update(
+            turn.assistant_message_id,
+            {"status": "failed", "error_message": error_code},
+        )
+        return turn
+
+    def _assert_prepare_rejected_without_mutation(
+        self,
+        request,
+        expected_error=SourceTurnAuthorityError,
+    ):
+        turn_items = copy.deepcopy(self.turn_repo.items)
+        message_items = copy.deepcopy(self.message_repo.items)
+        active_node_id = self.conversation_repo.get_by_id(
+            request.conversation_id
+        ).active_node_id
+
+        with self.assertRaises(expected_error):
+            self.service.prepare(request)
+
+        self.assertEqual(self.turn_repo.items, turn_items)
+        self.assertEqual(self.message_repo.items, message_items)
+        self.assertEqual(
+            self.conversation_repo.get_by_id(
+                request.conversation_id
+            ).active_node_id,
+            active_node_id,
+        )
+
     def _seed_completed_legacy_turn(self):
         user, assistant = self.chat_service.create_turn(
             "conversation-1",
@@ -751,6 +795,164 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
                 "PRIVATE_RESEARCH_CONTEXT",
             ):
                 self.assertNotIn(forbidden, serialized)
+
+    def test_failed_attachment_only_research_turn_can_prepare_regenerate(self):
+        options = ResearchOptionsV2(
+            enable_institution_data=True,
+            enable_web_search=True,
+            types=["pubmed", "general"],
+        )
+        source_request = self._research_request(
+            request_id="request-research-failed-source",
+            attachment_ids=["attachment-b", "attachment-a"],
+            research_options=options,
+        )
+        source = self._fail_source_turn(source_request)
+        regenerate = self._research_request(
+            request_id="request-research-failed-regenerate",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+            attachment_ids=["attachment-b", "attachment-a"],
+            research_options=options,
+        )
+
+        response = self.service.prepare(regenerate)
+
+        self.assertEqual(response.status, "prepared")
+        self.assertTrue(response.attachment_only)
+        self.assertEqual(
+            response.implicit_prompt_id,
+            "research-document-analysis-v1",
+        )
+        regenerated = self._stored_turn(regenerate.request_id)
+        self.assertIsNone(regenerated.patient_id)
+        self.assertEqual(
+            regenerated.attachment_ids,
+            ["attachment-b", "attachment-a"],
+        )
+        self.assertEqual(
+            regenerated.research_options,
+            {
+                "enable_institution_data": True,
+                "enable_web_search": True,
+                "types": ["general", "pubmed"],
+            },
+        )
+        self.assertEqual(
+            regenerated.implicit_prompt_id,
+            "research-document-analysis-v1",
+        )
+
+    def test_failed_regenerate_requires_exact_message_turn_pair(self):
+        def isolated_failed_assistant(source):
+            self.turn_repo.items.pop(("doctor-1", source.request_id))
+
+        def completed_turn_failed_message(source):
+            source.status = "completed"
+            source.error_code = None
+
+        def failed_turn_success_message(source):
+            assistant = self.message_repo.get_by_id(source.assistant_message_id)
+            assistant.status = "success"
+            assistant.error_message = None
+
+        def wrong_parent(source):
+            self.message_repo.get_by_id(
+                source.assistant_message_id
+            ).parent_id = self.root_ids["conversation-1"]
+
+        def wrong_user_owner(source):
+            self.message_repo.get_by_id(source.user_message_id).sender_id = (
+                "doctor-2"
+            )
+
+        def wrong_conversation(source):
+            self.message_repo.get_by_id(source.assistant_message_id).chat_id = (
+                "conversation-foreign"
+            )
+
+        def cancelled_pair(source):
+            source.status = "cancelled"
+            assistant = self.message_repo.get_by_id(source.assistant_message_id)
+            assistant.status = "cancelled"
+            assistant.error_message = None
+
+        def empty_error_code(source):
+            source.error_code = ""
+            self.message_repo.get_by_id(
+                source.assistant_message_id
+            ).error_message = ""
+
+        def unsafe_error_code(source):
+            source.error_code = "private provider detail"
+            self.message_repo.get_by_id(
+                source.assistant_message_id
+            ).error_message = "private provider detail"
+
+        def mismatched_error_code(source):
+            self.message_repo.get_by_id(
+                source.assistant_message_id
+            ).error_message = "ATTACHMENT_ANALYSIS_FAILED"
+
+        cases = (
+            isolated_failed_assistant,
+            completed_turn_failed_message,
+            failed_turn_success_message,
+            wrong_parent,
+            wrong_user_owner,
+            wrong_conversation,
+            cancelled_pair,
+            empty_error_code,
+            unsafe_error_code,
+            mismatched_error_code,
+        )
+        for index, mutate in enumerate(cases):
+            with self.subTest(case=mutate.__name__):
+                self.setUp()
+                source = self._fail_source_turn(
+                    self._research_request(
+                        request_id=f"request-failed-source-{index}"
+                    )
+                )
+                mutate(source)
+                branch = self._research_request(
+                    request_id=f"request-failed-branch-{index}",
+                    operation="regenerate",
+                    source_message_id=source.assistant_message_id,
+                )
+                self._assert_prepare_rejected_without_mutation(branch)
+
+    def test_streaming_failed_source_remains_busy_and_does_not_mutate(self):
+        source = self._fail_source_turn(
+            self._research_request(request_id="request-streaming-source")
+        )
+        self.message_repo.get_by_id(source.assistant_message_id).status = (
+            "streaming"
+        )
+        branch = self._research_request(
+            request_id="request-streaming-branch",
+            operation="regenerate",
+            source_message_id=source.assistant_message_id,
+        )
+
+        self._assert_prepare_rejected_without_mutation(
+            branch,
+            ConversationBusyError,
+        )
+
+    def test_edit_does_not_accept_failed_source_turn(self):
+        source = self._fail_source_turn(
+            self._research_request(request_id="request-failed-edit-source")
+        )
+        branch = self._research_request(
+            request_id="request-failed-edit-branch",
+            operation="edit_resend",
+            source_message_id=source.user_message_id,
+            message="改写问题",
+            implicit_prompt_id=None,
+        )
+
+        self._assert_prepare_rejected_without_mutation(branch)
 
     def test_research_regenerate_rejects_health_patient_redeclaration(self):
         source = self._complete_source_turn(self._research_request())
