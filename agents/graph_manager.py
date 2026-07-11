@@ -32,6 +32,10 @@ from agents.graph.citation_extractor import (
     deduplicate_citations,
     extract_citations_from_search_results,
 )
+from utils.transient_attachment_context import (
+    get_attachment_analysis,
+    get_research_document_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,44 @@ class PreparedGraphTerminal:
 
 
 PreparedGraphEvent: TypeAlias = PublicGraphChunk | PreparedGraphTerminal
+
+
+def _validate_prepared_research_options(
+    value: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "enable_institution_data",
+        "enable_web_search",
+        "types",
+    }:
+        raise ValueError("RESEARCH_OPTIONS_CONFLICT")
+    institution = value["enable_institution_data"]
+    web = value["enable_web_search"]
+    search_types = value["types"]
+    if (
+        type(institution) is not bool
+        or type(web) is not bool
+        or not isinstance(search_types, list)
+        or not all(
+            isinstance(item, str)
+            and item in {"general", "pubmed", "scholar"}
+            for item in search_types
+        )
+        or len(set(search_types)) != len(search_types)
+    ):
+        raise ValueError("RESEARCH_OPTIONS_CONFLICT")
+    canonical_types = [
+        item
+        for item in ("general", "pubmed", "scholar")
+        if item in search_types
+    ]
+    if search_types != canonical_types or (not web and search_types):
+        raise ValueError("RESEARCH_OPTIONS_CONFLICT")
+    return {
+        "enable_institution_data": institution,
+        "enable_web_search": web,
+        "types": list(search_types),
+    }
 
 
 class GraphManager:
@@ -120,7 +162,7 @@ class GraphManager:
 
     def chat(
         self,
-        patient_id: str,
+        patient_id: Optional[str],
         session_id: str,
         message: str,
         role: str = "patient",
@@ -562,7 +604,7 @@ class GraphManager:
     async def chat_stream_prepared_async(
         self,
         *,
-        patient_id: str,
+        patient_id: Optional[str],
         doctor_id: str,
         session_id: str,
         conversation_id: str,
@@ -570,12 +612,13 @@ class GraphManager:
         user_message_id: str,
         assistant_message_id: str,
         safe_attachment_refs: List[Dict[str, Any]],
-        transient_attachment_handle: str,
+        agent_type: str,
+        research_options: Optional[Dict[str, Any]],
+        health_handle: Optional[str] = None,
+        research_handle: Optional[str] = None,
         runnable_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[PreparedGraphEvent, None]:
         """复用模型流，但只消费 prepare 已创建的节点并返回内部终态。"""
-        if not transient_attachment_handle:
-            raise ValueError("ATTACHMENT_CONTEXT_UNAVAILABLE")
         allowed_ref_fields = {
             "attachment_id",
             "document_version",
@@ -595,12 +638,50 @@ class GraphManager:
             raise ValueError("ATTACHMENT_SAFE_REF_INVALID")
         config = runnable_config or {}
         configurable = config.setdefault("configurable", {})
-        configurable["attachment_analysis_handle"] = transient_attachment_handle
+        if not isinstance(configurable, dict):
+            raise ValueError("ATTACHMENT_CONTEXT_UNAVAILABLE")
+
+        prepared_options: Dict[str, Any] = {}
+        if agent_type == "health":
+            if (
+                not isinstance(patient_id, str)
+                or not patient_id
+                or research_options is not None
+                or not isinstance(health_handle, str)
+                or not health_handle
+                or research_handle is not None
+                or configurable.get("attachment_analysis_handle")
+                != health_handle
+            ):
+                raise ValueError("ATTACHMENT_CONTEXT_INCONSISTENT")
+            get_attachment_analysis(config)
+            transient_config_key = "attachment_analysis_handle"
+            transient_handle = health_handle
+        elif agent_type == "research":
+            prepared_options = _validate_prepared_research_options(
+                research_options
+            )
+            if (
+                patient_id is not None
+                or health_handle is not None
+                or not isinstance(research_handle, str)
+                or not research_handle
+                or configurable.get("research_document_context_handle")
+                != research_handle
+            ):
+                raise ValueError("RESEARCH_DOCUMENT_CONTEXT_INCONSISTENT")
+            get_research_document_context(config)
+            transient_config_key = None
+            transient_handle = None
+        else:
+            raise ValueError("PREPARED_AGENT_TYPE_INVALID")
+
         prepared_context = {
             "user_message_id": user_message_id,
             "assistant_message_id": assistant_message_id,
             "safe_attachment_refs": list(safe_attachment_refs),
-            "transient_attachment_handle": transient_attachment_handle,
+            "transient_config_key": transient_config_key,
+            "transient_handle": transient_handle,
         }
         async for event in self.chat_stream_async(
             patient_id=patient_id,
@@ -609,14 +690,23 @@ class GraphManager:
             role="doctor",
             doctor_id=doctor_id,
             conversation_id=conversation_id,
-            agent_type="health",
+            agent_type=agent_type,
+            enable_institution_data=prepared_options.get(
+                "enable_institution_data",
+                False,
+            ),
+            enable_web_search=prepared_options.get(
+                "enable_web_search",
+                False,
+            ),
+            web_search_types=prepared_options.get("types", []),
             _prepared_context=prepared_context,
         ):
             yield event
 
     async def chat_stream_async(
         self,
-        patient_id: str,
+        patient_id: Optional[str],
         session_id: str,
         message: str,
         role: str = "patient",
@@ -706,6 +796,8 @@ class GraphManager:
             allow_same_identity=agent_type == "research",
         )
         if was_downgraded:
+            if prepared_mode:
+                raise ValueError("PREPARED_ROLE_INVALID")
             logger.warning(
                 f"[GraphManager] 角色降级: {role} -> {verified_role}, "
                 f"patient_id={patient_id}, doctor_id={doctor_id}"
@@ -740,9 +832,10 @@ class GraphManager:
                 conversation_id,
                 assistant_message_id,
             )
-            thread_config["configurable"]["attachment_analysis_handle"] = (
-                prepared_context["transient_attachment_handle"]
-            )
+            transient_key = prepared_context.get("transient_config_key")
+            transient_handle = prepared_context.get("transient_handle")
+            if transient_key is not None and transient_handle is not None:
+                thread_config["configurable"][transient_key] = transient_handle
             thread_id = thread_config["configurable"]["thread_id"]
             branch_history_messages = self._build_branch_history_messages(
                 conversation_id=conversation_id,
@@ -894,6 +987,9 @@ class GraphManager:
         collected_tool_calls: List[Dict[str, Any]] = []
         # 收集搜索工具来源，流结束后持久化到 context.citations
         collected_citations: List[Dict[str, Any]] = []
+        redact_research_tool_payload = (
+            prepared_mode and agent_type == "research"
+        )
 
         try:
             streaming_graph = get_streaming_medical_graph()
@@ -958,10 +1054,13 @@ class GraphManager:
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "unknown")
                     tool_input = event.get("data", {}).get("input", {})
+                    retained_tool_input = (
+                        {} if redact_research_tool_payload else tool_input
+                    )
                     collected_tool_calls.append({
                         "tool": tool_name,
                         "status": "start",
-                        "input": tool_input,
+                        "input": retained_tool_input,
                         "text_offset": len(full_response),
                     })
                     yield {
@@ -969,7 +1068,7 @@ class GraphManager:
                         "content": "",
                         "metadata": {
                             "tool": tool_name,
-                            "input": tool_input,
+                            "input": retained_tool_input,
                         },
                     }
 
@@ -983,7 +1082,11 @@ class GraphManager:
                         collected_citations.extend(
                             extract_citations_from_search_results(raw_tool_output)
                         )
-                    tool_output = str(raw_tool_output)[:500]
+                    tool_output = (
+                        ""
+                        if redact_research_tool_payload
+                        else str(raw_tool_output)[:500]
+                    )
                     for tc in reversed(collected_tool_calls):
                         if tc.get("tool") == tool_name and tc.get("status") == "start":
                             tc["status"] = "end"
@@ -1006,7 +1109,7 @@ class GraphManager:
                     }
 
             # 保存线程映射
-            self.checkpointer.save_thread_mapping(
+            mapping_saved = self.checkpointer.save_thread_mapping(
                 thread_id=thread_id,
                 patient_id=patient_id,
                 conversation_id=conversation_id,
@@ -1014,6 +1117,10 @@ class GraphManager:
                 doctor_id=doctor_id,
                 agent_type=current_agent,
             )
+            if prepared_mode and mapping_saved is not True:
+                error = RuntimeError("PREPARED_THREAD_MAPPING_FAILED")
+                error.error_code = "PREPARED_THREAD_MAPPING_FAILED"
+                raise error
 
         except (asyncio.CancelledError, GeneratorExit) as e:
             cancelled = True
@@ -1394,7 +1501,7 @@ class GraphManager:
 
     def _prepare_input_state(
         self,
-        patient_id: str,
+        patient_id: Optional[str],
         session_id: str,
         message: str,
         role: str = "patient",
@@ -1427,8 +1534,10 @@ class GraphManager:
         # 添加用户消息
         state["messages"] = [*history_messages, HumanMessage(content=message)]
 
-        # 加载患者综合画像（每轮注入；agent 处理前必须持有真实患者数据用于个性化）
+        # 科研 prepared 路径无患者；有患者时每轮加载综合画像供个性化。
         try:
+            if patient_id is None:
+                return state
             from infrastructure.api.backend_client import get_api_client
             client = get_api_client()
             profile = client.get_patient_comprehensive_profile(patient_id)

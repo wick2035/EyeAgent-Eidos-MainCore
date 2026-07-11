@@ -15,6 +15,16 @@ from application.services.platform_attachment_analyzer import (
     AttachmentStatusUpdate,
     PlatformAttachmentAnalyzer,
 )
+from application.services.research_document_context_selector import (
+    ResearchDocumentContextSelection,
+    ResearchDocumentContextSelector,
+)
+from application.services.research_document_ingestion_service import (
+    ResearchDocumentIngestionService,
+)
+from application.services.research_document_processor import (
+    ResearchDocumentProcessor,
+)
 from domain.models.chat_entity import MessageContext
 from domain.security.principal import CurrentPrincipal
 from infrastructure.attachments.config import (
@@ -31,14 +41,20 @@ from infrastructure.repositories.chat_repository_impl import (
 from infrastructure.repositories.chat_turn_request_repository_impl import (
     get_chat_turn_request_repository,
 )
+from infrastructure.repositories.research_document_repository_impl import (
+    get_research_document_repository,
+)
 from presentation.dependencies.security import scope_for_platform_agent
 from presentation.schemas.platform_chat_turn_schemas import (
     ExecutePlatformChatTurnRequest,
 )
 from utils.transient_attachment_context import (
     TransientAttachmentContext,
+    TransientResearchDocumentContext,
     bind_attachment_analysis,
+    bind_research_document_context,
     reset_attachment_analysis,
+    reset_research_document_context,
 )
 
 
@@ -92,6 +108,8 @@ class PlatformChatTurnExecutionService:
         chat_persistence_service=None,
         downloader=None,
         analyzer=None,
+        research_ingestion_service=None,
+        research_context_selector=None,
         graph_manager=None,
         registry: ChatTurnExecutionRegistry | None = None,
         download_settings: AttachmentDownloadSettings | None = None,
@@ -122,6 +140,25 @@ class PlatformChatTurnExecutionService:
         self.downloader = downloader
         self.analyzer = analyzer or PlatformAttachmentAnalyzer(
             AttachmentParserSandbox()
+        )
+        research_repository = (
+            get_research_document_repository()
+            if research_ingestion_service is None
+            or research_context_selector is None
+            else None
+        )
+        self.research_ingestion_service = (
+            research_ingestion_service
+            or ResearchDocumentIngestionService(
+                repository=research_repository,
+                processor=ResearchDocumentProcessor(
+                    AttachmentParserSandbox()
+                ),
+            )
+        )
+        self.research_context_selector = (
+            research_context_selector
+            or ResearchDocumentContextSelector(research_repository)
         )
         self.graph_manager = graph_manager or get_graph_manager()
         self.registry = registry or get_chat_turn_execution_registry()
@@ -201,64 +238,51 @@ class PlatformChatTurnExecutionService:
                         "error_code": None,
                     }
 
-                analysis_task = asyncio.create_task(
-                    self.analyzer.analyze_all(downloaded, on_status)
-                )
-                terminal_attachments: set[str] = set()
-                while not analysis_task.done() or not queue.empty():
-                    heartbeat_due = False
-                    if queue.empty():
-                        heartbeat_due = await self._wait_until_activity(
-                            analysis_task,
-                            queue,
-                            cancel_event,
+                if turn.agent_type == "research":
+                    analysis_task = asyncio.create_task(
+                        self._prepare_research_documents(
+                            principal.subject,
+                            downloaded,
+                            user_message.message_content,
                             deadline,
                         )
-                    while not queue.empty():
-                        update = queue.get_nowait()
-                        self._ensure_before_deadline(deadline)
-                        if (
-                            update.attachment_id not in descriptors
-                            or update.status not in {"ready", "failed"}
-                        ):
-                            error = RuntimeError("ATTACHMENT_CONTEXT_INCONSISTENT")
-                            error.error_code = "ATTACHMENT_CONTEXT_INCONSISTENT"
-                            raise error
-                        await self._ensure_running(
-                            principal.subject,
-                            request.request_id,
-                            cancel_event,
-                        )
-                        descriptor = descriptors[update.attachment_id]
-                        if update.status in {"ready", "failed"}:
-                            terminal_attachments.add(update.attachment_id)
-                        error_code = (
-                            self.safe_error_code_value(update.error_code)
-                            if update.status == "failed"
-                            else None
-                        )
-                        sequence[update.attachment_id] += 1
-                        yield {
-                            "event": "attachment_status",
-                            "request_id": request.request_id,
-                            "user_message_id": request.user_message_id,
-                            "assistant_message_id": request.assistant_message_id,
-                            "attachment_id": update.attachment_id,
-                            "analysis_attempt_id": descriptor.analysis_attempt_id,
-                            "sequence": sequence[update.attachment_id],
-                            "status": update.status,
-                            "error_code": error_code,
-                        }
-                    if heartbeat_due:
-                        for descriptor in request.attachments:
-                            if descriptor.attachment_id in terminal_attachments:
-                                continue
-                            self._ensure_before_deadline(deadline)
-                            await self._ensure_running(
-                                principal.subject,
-                                request.request_id,
+                    )
+                    try:
+                        while not analysis_task.done():
+                            heartbeat_due = await self._wait_until_activity(
+                                analysis_task,
+                                queue,
                                 cancel_event,
+                                deadline,
                             )
+                            if heartbeat_due:
+                                for descriptor in request.attachments:
+                                    self._ensure_before_deadline(deadline)
+                                    await self._ensure_running(
+                                        principal.subject,
+                                        request.request_id,
+                                        cancel_event,
+                                    )
+                                    sequence[descriptor.attachment_id] += 1
+                                    yield {
+                                        "event": "attachment_status",
+                                        "request_id": request.request_id,
+                                        "user_message_id": request.user_message_id,
+                                        "assistant_message_id": request.assistant_message_id,
+                                        "attachment_id": descriptor.attachment_id,
+                                        "analysis_attempt_id": descriptor.analysis_attempt_id,
+                                        "sequence": sequence[descriptor.attachment_id],
+                                        "status": "processing",
+                                        "error_code": None,
+                                    }
+                        ingestion_ids, entities, selection = (
+                            await self._await_deadline(analysis_task, deadline)
+                        )
+                    except (_ExecutionStopped, asyncio.TimeoutError, TimeoutError):
+                        raise
+                    except Exception as error:
+                        error_code = self.safe_error_code(error)
+                        for descriptor in request.attachments:
                             sequence[descriptor.attachment_id] += 1
                             yield {
                                 "event": "attachment_status",
@@ -268,24 +292,139 @@ class PlatformChatTurnExecutionService:
                                 "attachment_id": descriptor.attachment_id,
                                 "analysis_attempt_id": descriptor.analysis_attempt_id,
                                 "sequence": sequence[descriptor.attachment_id],
-                                "status": "processing",
-                                "error_code": None,
+                                "status": "failed",
+                                "error_code": error_code,
                             }
-                analyses = await self._await_deadline(analysis_task, deadline)
+                        raise
+                    for descriptor in request.attachments:
+                        sequence[descriptor.attachment_id] += 1
+                        yield {
+                            "event": "attachment_status",
+                            "request_id": request.request_id,
+                            "user_message_id": request.user_message_id,
+                            "assistant_message_id": request.assistant_message_id,
+                            "attachment_id": descriptor.attachment_id,
+                            "analysis_attempt_id": descriptor.analysis_attempt_id,
+                            "sequence": sequence[descriptor.attachment_id],
+                            "status": "ready",
+                            "error_code": None,
+                        }
+                    if not self.turn_repo.compare_and_set_ingestion_ids(
+                        principal.subject,
+                        request.request_id,
+                        "streaming",
+                        ingestion_ids,
+                    ):
+                        error = RuntimeError(
+                            "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+                        )
+                        error.error_code = (
+                            "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+                        )
+                        raise error
+                    context = TransientResearchDocumentContext(
+                        implicit_prompt_id=turn.implicit_prompt_id,
+                        selection=selection,
+                    )
+                else:
+                    analysis_task = asyncio.create_task(
+                        self.analyzer.analyze_all(downloaded, on_status)
+                    )
+                    terminal_attachments: set[str] = set()
+                    while not analysis_task.done() or not queue.empty():
+                        heartbeat_due = False
+                        if queue.empty():
+                            heartbeat_due = await self._wait_until_activity(
+                                analysis_task,
+                                queue,
+                                cancel_event,
+                                deadline,
+                            )
+                        while not queue.empty():
+                            update = queue.get_nowait()
+                            self._ensure_before_deadline(deadline)
+                            if (
+                                update.attachment_id not in descriptors
+                                or update.status not in {"ready", "failed"}
+                            ):
+                                error = RuntimeError(
+                                    "ATTACHMENT_CONTEXT_INCONSISTENT"
+                                )
+                                error.error_code = (
+                                    "ATTACHMENT_CONTEXT_INCONSISTENT"
+                                )
+                                raise error
+                            await self._ensure_running(
+                                principal.subject,
+                                request.request_id,
+                                cancel_event,
+                            )
+                            descriptor = descriptors[update.attachment_id]
+                            terminal_attachments.add(update.attachment_id)
+                            error_code = (
+                                self.safe_error_code_value(update.error_code)
+                                if update.status == "failed"
+                                else None
+                            )
+                            sequence[update.attachment_id] += 1
+                            yield {
+                                "event": "attachment_status",
+                                "request_id": request.request_id,
+                                "user_message_id": request.user_message_id,
+                                "assistant_message_id": request.assistant_message_id,
+                                "attachment_id": update.attachment_id,
+                                "analysis_attempt_id": descriptor.analysis_attempt_id,
+                                "sequence": sequence[update.attachment_id],
+                                "status": update.status,
+                                "error_code": error_code,
+                            }
+                        if heartbeat_due:
+                            for descriptor in request.attachments:
+                                if descriptor.attachment_id in terminal_attachments:
+                                    continue
+                                self._ensure_before_deadline(deadline)
+                                await self._ensure_running(
+                                    principal.subject,
+                                    request.request_id,
+                                    cancel_event,
+                                )
+                                sequence[descriptor.attachment_id] += 1
+                                yield {
+                                    "event": "attachment_status",
+                                    "request_id": request.request_id,
+                                    "user_message_id": request.user_message_id,
+                                    "assistant_message_id": request.assistant_message_id,
+                                    "attachment_id": descriptor.attachment_id,
+                                    "analysis_attempt_id": descriptor.analysis_attempt_id,
+                                    "sequence": sequence[descriptor.attachment_id],
+                                    "status": "processing",
+                                    "error_code": None,
+                                }
+                    analyses = await self._await_deadline(
+                        analysis_task,
+                        deadline,
+                    )
+                    if [item.attachment_id for item in analyses] != [
+                        item.attachment_id for item in request.attachments
+                    ]:
+                        error = RuntimeError(
+                            "ATTACHMENT_CONTEXT_INCONSISTENT"
+                        )
+                        error.error_code = "ATTACHMENT_CONTEXT_INCONSISTENT"
+                        raise error
+                    context = TransientAttachmentContext(
+                        implicit_prompt_id=turn.implicit_prompt_id,
+                        analyses=tuple(analyses),
+                    )
 
-            if [item.attachment_id for item in analyses] != [
-                item.attachment_id for item in request.attachments
-            ]:
-                error = RuntimeError("ATTACHMENT_CONTEXT_INCONSISTENT")
-                error.error_code = "ATTACHMENT_CONTEXT_INCONSISTENT"
-                raise error
-
-            context = TransientAttachmentContext(
-                implicit_prompt_id=turn.implicit_prompt_id,
-                analyses=tuple(analyses),
-            )
             runnable_config: dict[str, Any] = {}
-            binding = bind_attachment_analysis(context, runnable_config)
+            if turn.agent_type == "research":
+                binding = bind_research_document_context(
+                    context,
+                    runnable_config,
+                )
+            else:
+                binding = bind_attachment_analysis(context, runnable_config)
             terminal: PreparedGraphTerminal | None = None
             safe_refs = [
                 {
@@ -305,7 +444,14 @@ class PlatformChatTurnExecutionService:
                 user_message_id=request.user_message_id,
                 assistant_message_id=request.assistant_message_id,
                 safe_attachment_refs=safe_refs,
-                transient_attachment_handle=binding.handle,
+                agent_type=turn.agent_type,
+                research_options=turn.research_options,
+                health_handle=(
+                    binding.handle if turn.agent_type == "health" else None
+                ),
+                research_handle=(
+                    binding.handle if turn.agent_type == "research" else None
+                ),
                 runnable_config=runnable_config,
             )
             while True:
@@ -377,17 +523,68 @@ class PlatformChatTurnExecutionService:
                     await graph_stream.aclose()
                 except BaseException:
                     pass
-            if analysis_task is not None and not analysis_task.done():
-                analysis_task.cancel()
+            if analysis_task is not None:
+                if not analysis_task.done():
+                    analysis_task.cancel()
                 await asyncio.gather(analysis_task, return_exceptions=True)
             if binding is not None:
-                reset_attachment_analysis(binding)
+                if turn.agent_type == "research":
+                    reset_research_document_context(binding)
+                else:
+                    reset_attachment_analysis(binding)
             self.registry.unregister(
                 principal.subject,
                 request.request_id,
                 cancel_event,
             )
             self._active_doctors.pop(active_key, None)
+
+    async def _prepare_research_documents(
+        self,
+        doctor_id: str,
+        downloaded,
+        question: str,
+        deadline: float,
+    ):
+        result = await self.research_ingestion_service.ingest(
+            doctor_id,
+            downloaded,
+            deadline=deadline,
+        )
+        try:
+            entities = tuple(result.entities)
+            ingestion_ids = tuple(result.ingestion_ids)
+            exact = (
+                1 <= len(ingestion_ids) <= 4
+                and len(entities) == len(ingestion_ids)
+                and len(set(ingestion_ids)) == len(ingestion_ids)
+                and all(
+                    isinstance(ingestion_id, str)
+                    and ingestion_id
+                    and getattr(entity, "id", None) == ingestion_id
+                    for ingestion_id, entity in zip(ingestion_ids, entities)
+                )
+            )
+        except Exception:
+            exact = False
+        if not exact:
+            error = RuntimeError("RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE")
+            error.error_code = "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+            raise error
+        ready_map = {
+            ingestion_id: entity
+            for ingestion_id, entity in zip(ingestion_ids, entities)
+        }
+        selection = await self.research_context_selector.select(
+            ingestion_ids,
+            ready_map,
+            question,
+        )
+        if not isinstance(selection, ResearchDocumentContextSelection):
+            error = RuntimeError("RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE")
+            error.error_code = "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+            raise error
+        return ingestion_ids, entities, selection
 
     async def finalize_platform_turn_success(
         self,
@@ -471,6 +668,8 @@ class PlatformChatTurnExecutionService:
                 if latest is None:
                     raise RuntimeError(_TURN_NOT_FOUND)
                 return self._finalize_result(latest)
+            if context is not None:
+                context = self._completion_context(entity, context)
             if not self.chat_persistence_service.finalize_platform_assistant(
                 assistant_message_id,
                 status="success" if status == "completed" else status,
@@ -611,6 +810,8 @@ class PlatformChatTurnExecutionService:
                 deadline,
             )
             if cancel_task in done and cancel_task.result():
+                if task.done():
+                    await asyncio.gather(task, return_exceptions=True)
                 raise _ExecutionStopped()
             if queue_task in done:
                 queue.put_nowait(queue_task.result())
@@ -640,7 +841,7 @@ class PlatformChatTurnExecutionService:
             if cancel_task in done and cancel_task.result():
                 if not next_task.done():
                     next_task.cancel()
-                    await asyncio.gather(next_task, return_exceptions=True)
+                await asyncio.gather(next_task, return_exceptions=True)
                 raise _ExecutionStopped()
             return next_task.result()
         finally:
@@ -754,6 +955,31 @@ class PlatformChatTurnExecutionService:
             status=entity.status,
             error_code=entity.error_code,
         )
+
+    @staticmethod
+    def _completion_context(entity, context: MessageContext) -> MessageContext:
+        if entity.operation != "regenerate":
+            return context
+        metadata = dict(context.metadata or {})
+        metadata.update(
+            {
+                "attachment_ids": list(entity.attachment_ids),
+                "turn_configuration": {
+                    "protocol_version": entity.protocol_version,
+                    "agent_type": entity.agent_type,
+                    "attachment_scope": entity.attachment_scope,
+                    "research_options": entity.research_options,
+                },
+            }
+        )
+        if entity.attachment_only:
+            metadata.update(
+                {
+                    "attachment_only": True,
+                    "implicit_prompt_id": entity.implicit_prompt_id,
+                }
+            )
+        return context.model_copy(update={"metadata": metadata})
 
     @staticmethod
     def _sanitize_persisted_metadata(value: Any) -> Any:

@@ -17,18 +17,45 @@ except ImportError:
 
 from agents.graph.state import MedicalState
 from agents.prompts.research_prompts import (
+    PREPARED_RESEARCH_DOCUMENT_SECURITY_DIRECTIVE,
     get_research_system_prompt,
     get_research_stage_prompt,
     build_research_context,
     detect_research_intent,
 )
 from agents.tools.research_tools import RESEARCH_AGENT_TOOLS
+from utils.transient_attachment_context import (
+    get_research_document_context,
+    inject_untrusted_research_documents,
+)
 from utils.llm_config import get_llm, get_streaming_llm
 
 logger = logging.getLogger(__name__)
 
+_PATIENT_BOUND_TOOL_NAMES = frozenset(
+    {
+        "get_patient_prescription",
+        "get_doctor_free_time",
+        "reserve_doctor",
+        "get_patient_prescription_limit",
+        "get_patient_prescription_detail",
+        "get_patient_scan_data",
+        "get_patient_reminder",
+        "get_patient_reminder_config",
+        "init_patient_reminder_config",
+        "modify_patient_reminder_config",
+        "create_reminder",
+    }
+)
 
-def _prepare_research(state: MedicalState):
+
+class PreparedResearchAgentError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("RESEARCH_AGENT_FAILED")
+        self.error_code = "RESEARCH_AGENT_FAILED"
+
+
+def _prepare_research(state: MedicalState, config: RunnableConfig | None = None):
     """构建 ResearchAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "doctor")  # 科研模式通常是医生
     stage = state.get("stage", "greeting")
@@ -46,9 +73,16 @@ def _prepare_research(state: MedicalState):
 
     # 添加权限限制提示
     permission_note = _build_permission_note(enable_institution_data, enable_web_search)
+    document_security_note = (
+        PREPARED_RESEARCH_DOCUMENT_SECURITY_DIRECTIVE
+        if state.get("platform_prepared")
+        else ""
+    )
 
     # 组合完整提示词
     full_system_prompt = f"""{system_prompt}
+
+{document_security_note}
 
 【当前阶段】{stage_prompt}
 
@@ -67,6 +101,7 @@ def _prepare_research(state: MedicalState):
         RESEARCH_AGENT_TOOLS,
         enable_institution_data,
         enable_web_search,
+        patient_id=state.get("patient_id"),
     )
 
     # 创建 ReAct Agent
@@ -89,6 +124,13 @@ def _prepare_research(state: MedicalState):
                 input_messages.append(HumanMessage(content=content))
             elif msg_type == "ai":
                 input_messages.append(AIMessage(content=content))
+
+    if state.get("platform_prepared"):
+        context = get_research_document_context()
+        input_messages = inject_untrusted_research_documents(
+            input_messages,
+            context,
+        )
 
     return agent, input_messages
 
@@ -123,12 +165,15 @@ def _finalize_research(state: MedicalState, result: Dict[str, Any], input_messag
 
 def _research_error(e: Exception) -> Dict[str, Any]:
     """ResearchAgent 异常兜底（sync/async 共用）"""
-    logger.error(f"[ResearchNode] 处理失败: {e}", exc_info=True)
+    logger.error(
+        "[ResearchNode] 处理失败, error_type=%s",
+        type(e).__name__,
+    )
     error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
     return {
         "messages": [AIMessage(content=error_response)],
         "last_response": error_response,
-        "error": str(e),
+        "error": "RESEARCH_AGENT_FAILED",
     }
 
 
@@ -164,10 +209,16 @@ async def research_agent_node_async(state: MedicalState, config: RunnableConfig)
         状态更新字典
     """
     try:
-        agent, input_messages = _prepare_research(state)
+        agent, input_messages = _prepare_research(state, config)
         result = await agent.ainvoke({"messages": input_messages}, config=config)
         return _finalize_research(state, result, input_messages)
     except Exception as e:
+        if state.get("platform_prepared"):
+            logger.error(
+                "[ResearchNode] prepared 处理失败, error_type=%s",
+                type(e).__name__,
+            )
+            raise PreparedResearchAgentError() from None
         return _research_error(e)
 
 
@@ -192,6 +243,7 @@ def _filter_tools_by_permission(
     tools: list,
     enable_institution_data: bool,
     enable_web_search: bool,
+    patient_id: str | None = None,
 ) -> list:
     """
     根据权限过滤工具
@@ -208,6 +260,9 @@ def _filter_tools_by_permission(
 
     for tool in tools:
         tool_name = getattr(tool, "name", "")
+
+        if patient_id is None and tool_name in _PATIENT_BOUND_TOOL_NAMES:
+            continue
 
         # 过滤机构数据工具
         if tool_name == "get_institution_research_data" and not enable_institution_data:

@@ -42,6 +42,16 @@ class ChatTurnRequestRepository(ABC):
         pass
 
     @abstractmethod
+    def compare_and_set_ingestion_ids(
+        self,
+        doctor_id: str,
+        request_id: str,
+        expected_status: str,
+        ingestion_ids: Sequence[str],
+    ) -> bool:
+        pass
+
+    @abstractmethod
     def get_active_for_conversation(
         self,
         conversation_id: str,

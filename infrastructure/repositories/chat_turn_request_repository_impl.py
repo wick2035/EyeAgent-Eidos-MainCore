@@ -159,6 +159,44 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
         )
         return affected > 0
 
+    def compare_and_set_ingestion_ids(
+        self,
+        doctor_id: str,
+        request_id: str,
+        expected_status: str,
+        ingestion_ids: Sequence[str],
+    ) -> bool:
+        ids = list(ingestion_ids)
+        if (
+            not isinstance(doctor_id, str)
+            or not doctor_id
+            or not isinstance(request_id, str)
+            or not request_id
+            or expected_status != "streaming"
+            or not 1 <= len(ids) <= 4
+            or not all(isinstance(item, str) and item for item in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise ValueError("ingestion IDs CAS 参数无效")
+        canonical = json.dumps(
+            ids,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        affected = self.db.execute(
+            """
+                UPDATE chat_turn_request
+                SET ingestion_ids_json = %s,
+                    update_time = CURRENT_TIMESTAMP(6)
+                WHERE doctor_id = %s
+                  AND request_id = %s
+                  AND status = %s
+                  AND ingestion_ids_json IS NULL
+            """,
+            (canonical, doctor_id, request_id, expected_status),
+        )
+        return affected == 1
+
     def get_active_for_conversation(
         self,
         conversation_id: str,

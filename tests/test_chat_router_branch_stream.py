@@ -10,6 +10,12 @@ from presentation.routers.conversation_router import get_conversation_detail, sw
 from presentation.schemas.conversation_schemas import ActiveBranchRequest
 from presentation.schemas.chat_schemas import EditResendRequest, RegenerateRequest
 from utils.input_guard import GuardResult, RiskLevel, ThreatCategory
+from utils.transient_attachment_context import (
+    AttachmentAnalysis,
+    TransientAttachmentContext,
+    bind_attachment_analysis,
+    reset_attachment_analysis,
+)
 
 
 def collect_async(async_iterable):
@@ -294,15 +300,28 @@ class BranchStreamSchemaTest(unittest.TestCase):
 
 
 class BranchStreamGraphManagerTest(unittest.TestCase):
+    @staticmethod
+    def _health_binding():
+        config = {"configurable": {}}
+        binding = bind_attachment_analysis(
+            TransientAttachmentContext(
+                implicit_prompt_id=None,
+                analyses=(AttachmentAnalysis("attachment-1", "safe"),),
+            ),
+            config,
+        )
+        return binding, config
+
     def test_prepared_graph_exception_log_does_not_include_sensitive_detail(self):
         manager = make_graph_manager(PreparedPersistence())
-
-        with patch(
-            "agents.graph.graph_builder.get_streaming_medical_graph",
-            return_value=SensitiveFailingStreamingGraph(),
-        ), self.assertLogs("agents.graph_manager", level="ERROR") as captured:
-            with self.assertRaises(RuntimeError):
-                collect_async(manager.chat_stream_prepared_async(
+        binding, config = self._health_binding()
+        try:
+            with patch(
+                "agents.graph.graph_builder.get_streaming_medical_graph",
+                return_value=SensitiveFailingStreamingGraph(),
+            ), self.assertLogs("agents.graph_manager", level="ERROR") as captured:
+                with self.assertRaises(RuntimeError):
+                    collect_async(manager.chat_stream_prepared_async(
                     patient_id="550e8400-e29b-41d4-a716-446655440000",
                     doctor_id="660e8400-e29b-41d4-a716-446655440001",
                     session_id="s1",
@@ -316,8 +335,14 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
                         "content_sha256": "a" * 64,
                         "page_count": None,
                     }],
-                    transient_attachment_handle="opaque-handle",
-                ))
+                        agent_type="health",
+                        research_options=None,
+                        health_handle=binding.handle,
+                        research_handle=None,
+                        runnable_config=config,
+                    ))
+        finally:
+            reset_attachment_analysis(binding, config)
 
         self.assertNotIn(
             "UNTRUSTED_SENTINEL_FROM_ATTACHMENT",
@@ -353,11 +378,13 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
             "page_count": None,
         }]
 
-        with patch(
-            "agents.graph.graph_builder.get_streaming_medical_graph",
-            return_value=graph,
-        ):
-            chunks = collect_async(manager.chat_stream_prepared_async(
+        binding, config = self._health_binding()
+        try:
+            with patch(
+                "agents.graph.graph_builder.get_streaming_medical_graph",
+                return_value=graph,
+            ):
+                chunks = collect_async(manager.chat_stream_prepared_async(
                 patient_id="550e8400-e29b-41d4-a716-446655440000",
                 doctor_id="660e8400-e29b-41d4-a716-446655440001",
                 session_id="s1",
@@ -366,8 +393,14 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
                 user_message_id="u2",
                 assistant_message_id="a2",
                 safe_attachment_refs=safe_refs,
-                transient_attachment_handle="opaque-handle",
-            ))
+                    agent_type="health",
+                    research_options=None,
+                    health_handle=binding.handle,
+                    research_handle=None,
+                    runnable_config=config,
+                ))
+        finally:
+            reset_attachment_analysis(binding, config)
 
         self.assertEqual(chunks[0]["type"], "token")
         self.assertIsInstance(chunks[-1], PreparedGraphTerminal)

@@ -379,7 +379,15 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             attachment_ids=attachment_ids,
         )
 
-    def _research_request(self):
+    def _research_request(
+        self,
+        *,
+        request_id="request-research",
+        operation="normal",
+        source_message_id=None,
+        message="",
+        implicit_prompt_id="research-document-analysis-v1",
+    ):
         research_options = ResearchOptionsV2(
             enable_institution_data=True,
             enable_web_search=True,
@@ -387,8 +395,8 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         )
         payload = {
             "version": 2,
-            "request_id": "request-research",
-            "operation": "normal",
+            "request_id": request_id,
+            "operation": operation,
             "conversation_id": "conversation-1",
             "session_id": "session-conversation-1",
             "patient_id": None,
@@ -396,9 +404,9 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             "agent_type": "research",
             "attachment_scope": "research",
             "research_options": research_options,
-            "message": "",
-            "source_message_id": None,
-            "implicit_prompt_id": "research-document-analysis-v1",
+            "message": message,
+            "source_message_id": source_message_id,
+            "implicit_prompt_id": implicit_prompt_id,
             "attachment_ids": ["attachment-1"],
         }
         payload["request_fingerprint"] = fingerprint_turn(
@@ -458,6 +466,25 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
                 "types": ["general", "scholar"],
             },
         )
+        user = self.message_repo.get_by_id(turn.user_message_id)
+        metadata = next(
+            item["metadata"]
+            for item in json.loads(user.context)
+            if "metadata" in item
+        )
+        self.assertEqual(
+            metadata["turn_configuration"],
+            {
+                "protocol_version": 2,
+                "agent_type": "research",
+                "attachment_scope": "research",
+                "research_options": {
+                    "enable_institution_data": True,
+                    "enable_web_search": True,
+                    "types": ["general", "scholar"],
+                },
+            },
+        )
 
     def test_prepare_maps_v1_to_health_patient_snapshot(self):
         self.service.prepare(self._request())
@@ -467,6 +494,21 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(turn.agent_type, "health")
         self.assertEqual(turn.attachment_scope, "patient")
         self.assertIsNone(turn.research_options)
+        user = self.message_repo.get_by_id(turn.user_message_id)
+        metadata = next(
+            item["metadata"]
+            for item in json.loads(user.context)
+            if "metadata" in item
+        )
+        self.assertEqual(
+            metadata["turn_configuration"],
+            {
+                "protocol_version": 1,
+                "agent_type": "health",
+                "attachment_scope": "patient",
+                "research_options": None,
+            },
+        )
 
     def test_prepare_rejects_same_request_with_different_fingerprint(self):
         self.service.prepare(self._request(message="第一次"))
@@ -523,6 +565,12 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(edited_user.parent_id, original_user.parent_id)
         self.assertEqual(edited_user.siblings_group_id, original_user.siblings_group_id)
         self.assertEqual(edited_assistant.parent_id, edited_user.id)
+        metadata = next(
+            item["metadata"]
+            for item in json.loads(edited_user.context)
+            if "metadata" in item
+        )
+        self.assertEqual(metadata["turn_configuration"]["agent_type"], "health")
 
     def test_prepare_regenerate_reuses_parent_user_and_only_creates_assistant(self):
         original_user, original_assistant = self._seed_completed_legacy_turn()
@@ -544,6 +592,66 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(turn.user_message_id, original_user.id)
         self.assertEqual(regenerated.parent_id, original_user.id)
         self.assertEqual(user_count_after, user_count_before)
+        metadata = next(
+            item["metadata"]
+            for item in json.loads(regenerated.context)
+            if "metadata" in item
+        )
+        self.assertEqual(metadata["turn_configuration"]["agent_type"], "health")
+
+    def test_research_regenerate_round_trips_source_turn_configuration(self):
+        source_request = self._research_request()
+        self.service.prepare(source_request)
+        source_turn = self._stored_turn("request-research")
+        self.turn_repo.compare_and_set_status(
+            "doctor-1",
+            source_turn.request_id,
+            "prepared",
+            "completed",
+        )
+        self.message_repo.update(
+            source_turn.assistant_message_id,
+            {"status": "success"},
+        )
+
+        regenerate = self._research_request(
+            request_id="request-research-regenerate",
+            operation="regenerate",
+            source_message_id=source_turn.assistant_message_id,
+        )
+        self.service.prepare(regenerate)
+
+        regenerated_turn = self._stored_turn("request-research-regenerate")
+        source_user = self.message_repo.get_by_id(source_turn.user_message_id)
+        regenerated_assistant = self.message_repo.get_by_id(
+            regenerated_turn.assistant_message_id
+        )
+        expected = {
+            "protocol_version": 2,
+            "agent_type": "research",
+            "attachment_scope": "research",
+            "research_options": {
+                "enable_institution_data": True,
+                "enable_web_search": True,
+                "types": ["general", "scholar"],
+            },
+        }
+        for message in (source_user, regenerated_assistant):
+            metadata = next(
+                item["metadata"]
+                for item in json.loads(message.context)
+                if "metadata" in item
+            )
+            self.assertEqual(metadata["turn_configuration"], expected)
+            self.assertEqual(metadata["attachment_ids"], ["attachment-1"])
+            serialized = json.dumps(metadata, ensure_ascii=False)
+            for forbidden in (
+                "patient_id",
+                "download_url",
+                "handle",
+                "PRIVATE_RESEARCH_CONTEXT",
+            ):
+                self.assertNotIn(forbidden, serialized)
 
     def test_prepare_rejects_when_legacy_text_turn_is_streaming(self):
         _, assistant = self.chat_service.create_turn(

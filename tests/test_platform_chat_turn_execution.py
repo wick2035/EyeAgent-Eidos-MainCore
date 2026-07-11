@@ -5,8 +5,13 @@ import unittest
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agents.graph_manager import PreparedGraphTerminal
+from application.services.research_document_context_selector import (
+    ResearchContextBlock,
+    ResearchDocumentContextSelection,
+)
 from application.services.chat_turn_execution_registry import (
     ChatTurnExecutionRegistry,
 )
@@ -18,6 +23,7 @@ from application.services.platform_chat_turn_execution_service import (
     ATTACHMENT_EXECUTE_MISMATCH,
     PlatformChatTurnExecutionService,
     PlatformPrincipalError,
+    _ExecutionStopped,
 )
 from domain.models.chat_turn_request import ChatTurnRequestEntity
 from domain.security.principal import CurrentPrincipal
@@ -25,12 +31,16 @@ from infrastructure.attachments.config import (
     AllowedAttachmentEndpoint,
     AttachmentDownloadSettings,
 )
+from infrastructure.repositories.chat_turn_request_repository_impl import (
+    ChatTurnRequestRepositoryImpl,
+)
 from presentation.schemas.platform_chat_turn_schemas import (
     ExecutePlatformChatTurnRequest,
 )
 from utils.transient_attachment_context import (
     AttachmentAnalysis,
     get_attachment_analysis,
+    get_research_document_context,
 )
 
 
@@ -54,6 +64,8 @@ class FakeTurnRepository:
     def __init__(self, turns):
         self.items = {(turn.doctor_id, turn.request_id): turn for turn in turns}
         self._lock = threading.Lock()
+        self.ingestion_cas_calls = []
+        self.ingestion_cas_result = True
 
     def get(self, doctor_id, request_id):
         return self.items.get((doctor_id, request_id))
@@ -98,6 +110,30 @@ class FakeTurnRepository:
             turn.deadline_at = deadline_at or turn.deadline_at
             turn.update_time = datetime.now()
             return True
+
+    def compare_and_set_ingestion_ids(
+        self,
+        doctor_id,
+        request_id,
+        expected_status,
+        ingestion_ids,
+    ):
+        self.ingestion_cas_calls.append(
+            (doctor_id, request_id, expected_status, list(ingestion_ids))
+        )
+        turn = self.get(doctor_id, request_id)
+        if (
+            not self.ingestion_cas_result
+            or turn is None
+            or turn.status != expected_status
+        ):
+            return False
+        turn.ingestion_ids_json = json.dumps(
+            list(ingestion_ids),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return True
 
 
 class FakeMessageRepository:
@@ -156,8 +192,10 @@ class FakeDownloader:
 class FakeAnalyzer:
     def __init__(self, *, fail=False):
         self.fail = fail
+        self.calls = []
 
     async def analyze_all(self, downloaded, on_status):
+        self.calls.append(list(downloaded))
         analyses = []
         for item in downloaded:
             await on_status(AttachmentStatusUpdate(item.attachment_id, "processing"))
@@ -190,6 +228,67 @@ class BlockingAnalyzer:
         await asyncio.Event().wait()
 
 
+class FakeResearchIngestion:
+    def __init__(self, *, fail=False, block=False, on_call=None):
+        self.fail = fail
+        self.block = block
+        self.on_call = on_call
+        self.calls = []
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def ingest(self, doctor_id, downloaded, *, deadline=None):
+        self.calls.append((doctor_id, list(downloaded), deadline))
+        self.started.set()
+        if self.on_call is not None:
+            self.on_call()
+        try:
+            if self.block:
+                await asyncio.Event().wait()
+            if self.fail:
+                error = RuntimeError("private ingestion failure")
+                error.error_code = "RESEARCH_DOCUMENT_INGESTION_FAILED"
+                raise error
+            entities = tuple(
+                SimpleNamespace(id=f"ingestion-{item.attachment_id}")
+                for item in downloaded
+            )
+            return SimpleNamespace(
+                entities=entities,
+                ingestion_ids=tuple(entity.id for entity in entities),
+            )
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+class FakeResearchSelector:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    async def select(self, explicit_ingestion_ids, ready_entities, question):
+        self.calls.append(
+            (tuple(explicit_ingestion_ids), dict(ready_entities), question)
+        )
+        if self.fail:
+            error = RuntimeError("private selector failure")
+            error.error_code = "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+            raise error
+        return ResearchDocumentContextSelection(
+            context_blocks=(
+                ResearchContextBlock(
+                    content="PRIVATE_RESEARCH_CONTEXT",
+                    supporting_segment_ids=("segment-1",),
+                    estimated_tokens=10,
+                ),
+            ),
+            citation_candidates=(),
+            mode="focused",
+            estimated_tokens=10,
+        )
+
+
 class FakeGraphManager:
     def __init__(
         self,
@@ -210,7 +309,14 @@ class FakeGraphManager:
     async def chat_stream_prepared_async(self, **kwargs):
         try:
             self.calls.append(kwargs)
-            self.contexts.append(get_attachment_analysis(kwargs["runnable_config"]))
+            if kwargs.get("agent_type") == "research":
+                self.contexts.append(
+                    get_research_document_context(kwargs["runnable_config"])
+                )
+            else:
+                self.contexts.append(
+                    get_attachment_analysis(kwargs["runnable_config"])
+                )
             if self.fail:
                 raise RuntimeError("private graph failure")
             yield {"type": "token", "content": f"answer-{kwargs['user_message_id']}"}
@@ -221,7 +327,7 @@ class FakeGraphManager:
                 token_used=7,
                 tool_results=self.tool_results,
                 citations=self.citations,
-                agent_type="health",
+                agent_type=kwargs.get("agent_type", "health"),
                 stage="collecting_info",
             )
         finally:
@@ -331,6 +437,8 @@ def make_service(
     *,
     analyzer=None,
     graph=None,
+    research_ingestion=None,
+    research_selector=None,
     heartbeat_interval=30.0,
 ):
     turns = [turn_for(item) for item in requests]
@@ -358,13 +466,20 @@ def make_service(
     turn_repo = FakeTurnRepository(turns)
     message_repo = FakeMessageRepository(all_messages)
     graph = graph or FakeGraphManager()
+    analyzer = analyzer or FakeAnalyzer()
     service = PlatformChatTurnExecutionService(
         db=db,
         turn_repo=turn_repo,
         conversation_repo=FakeConversationRepository(conversations),
         message_repo=message_repo,
         downloader=FakeDownloader(settings),
-        analyzer=analyzer or FakeAnalyzer(),
+        analyzer=analyzer,
+        research_ingestion_service=(
+            research_ingestion or FakeResearchIngestion()
+        ),
+        research_context_selector=(
+            research_selector or FakeResearchSelector()
+        ),
         graph_manager=graph,
         registry=ChatTurnExecutionRegistry(),
         download_settings=settings,
@@ -408,6 +523,344 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(events[-1]["event"], "done")
+
+    async def test_research_uses_ingestion_selector_cas_and_prepared_snapshot(self):
+        request = execute_request(
+            "research-pipeline",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": True,
+                "enable_web_search": True,
+                "types": ["pubmed"],
+            },
+        )
+        ingestion = FakeResearchIngestion()
+
+        def mutate_execute_options():
+            request.research_options.enable_institution_data = False
+            request.research_options.enable_web_search = False
+            request.research_options.types = []
+
+        ingestion.on_call = mutate_execute_options
+        selector = FakeResearchSelector()
+        service, turns, _, graph, _ = make_service(
+            [request],
+            research_ingestion=ingestion,
+            research_selector=selector,
+        )
+
+        events = await collect(
+            service.stream(request, principal(scopes={"ai:research"}))
+        )
+
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(service.analyzer.calls, [])
+        self.assertEqual(len(ingestion.calls), 1)
+        ids, ready_map, question = selector.calls[0]
+        self.assertEqual(ids, ("ingestion-attachment-research-pipeline",))
+        self.assertEqual(tuple(ready_map), ids)
+        self.assertEqual(question, "请分析附件")
+        turn = turns.get("doctor-1", request.request_id)
+        self.assertEqual(turn.ingestion_ids, list(ids))
+        self.assertEqual(
+            turns.ingestion_cas_calls,
+            [("doctor-1", request.request_id, "streaming", list(ids))],
+        )
+        call = graph.calls[0]
+        self.assertIsNone(call["patient_id"])
+        self.assertEqual(call["agent_type"], "research")
+        self.assertEqual(
+            call["research_options"],
+            {
+                "enable_institution_data": True,
+                "enable_web_search": True,
+                "types": ["pubmed"],
+            },
+        )
+        self.assertIsNone(call["health_handle"])
+        self.assertIsInstance(call["research_handle"], str)
+        statuses = [
+            event["status"]
+            for event in events
+            if event["event"] == "attachment_status"
+        ]
+        self.assertEqual(statuses, ["processing", "ready"])
+
+    async def test_research_regenerate_keeps_canonical_turn_configuration(self):
+        request = execute_request(
+            "research-regenerate-context",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": True,
+                "enable_web_search": True,
+                "types": ["pubmed"],
+            },
+        )
+        service, turns, messages, _, _ = make_service([request])
+        turn = turns.get("doctor-1", request.request_id)
+        turn.operation = "regenerate"
+        assistant = messages.get_by_id(request.assistant_message_id)
+        assistant.context = json.dumps(
+            [
+                {
+                    "metadata": {
+                        "attachment_ids": [
+                            item.attachment_id for item in request.attachments
+                        ],
+                        "turn_configuration": {
+                            "protocol_version": 2,
+                            "agent_type": "research",
+                            "attachment_scope": "research",
+                            "research_options": {
+                                "enable_institution_data": True,
+                                "enable_web_search": True,
+                                "types": ["pubmed"],
+                            },
+                        },
+                    }
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+        events = await collect(
+            service.stream(request, principal(scopes={"ai:research"}))
+        )
+
+        self.assertEqual(events[-1]["event"], "done")
+        persisted = json.loads(assistant.context)
+        metadata = next(
+            item["metadata"] for item in persisted if "metadata" in item
+        )
+        self.assertEqual(
+            metadata["turn_configuration"],
+            {
+                "protocol_version": 2,
+                "agent_type": "research",
+                "attachment_scope": "research",
+                "research_options": {
+                    "enable_institution_data": True,
+                    "enable_web_search": True,
+                    "types": ["pubmed"],
+                },
+            },
+        )
+        self.assertEqual(
+            metadata["attachment_ids"],
+            [item.attachment_id for item in request.attachments],
+        )
+        serialized = json.dumps(persisted, ensure_ascii=False)
+        for forbidden in (
+            "patient_id",
+            "download_url",
+            "handle",
+            "PRIVATE_RESEARCH_CONTEXT",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    async def test_health_path_keeps_analyzer_and_never_calls_research_services(self):
+        request = execute_request("health-regression")
+        ingestion = FakeResearchIngestion()
+        selector = FakeResearchSelector()
+        analyzer = FakeAnalyzer()
+        service, _, _, graph, _ = make_service(
+            [request],
+            analyzer=analyzer,
+            research_ingestion=ingestion,
+            research_selector=selector,
+        )
+
+        events = await collect(service.stream(request, principal()))
+
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(len(analyzer.calls), 1)
+        self.assertEqual(ingestion.calls, [])
+        self.assertEqual(selector.calls, [])
+        call = graph.calls[0]
+        self.assertEqual(call["patient_id"], request.patient_id)
+        self.assertEqual(call["agent_type"], "health")
+        self.assertIsNone(call["research_options"])
+        self.assertIsInstance(call["health_handle"], str)
+        self.assertIsNone(call["research_handle"])
+
+    async def test_research_ingestion_or_selector_failure_emits_zero_tokens(self):
+        for failure in ("ingestion", "selector"):
+            with self.subTest(failure=failure):
+                request = execute_request(
+                    f"research-{failure}-failure",
+                    version=2,
+                    patient_id=None,
+                    agent_type="research",
+                    attachment_scope="research",
+                    research_options={
+                        "enable_institution_data": False,
+                        "enable_web_search": False,
+                        "types": [],
+                    },
+                )
+                ingestion = FakeResearchIngestion(fail=failure == "ingestion")
+                selector = FakeResearchSelector(fail=failure == "selector")
+                service, turns, _, graph, _ = make_service(
+                    [request],
+                    research_ingestion=ingestion,
+                    research_selector=selector,
+                )
+
+                events = await collect(
+                    service.stream(request, principal(scopes={"ai:research"}))
+                )
+
+                expected = (
+                    "RESEARCH_DOCUMENT_INGESTION_FAILED"
+                    if failure == "ingestion"
+                    else "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE"
+                )
+                self.assertFalse(
+                    any(event["event"] == "token" for event in events)
+                )
+                self.assertEqual(graph.calls, [])
+                self.assertEqual(events[-1]["error_code"], expected)
+                failed = [
+                    event
+                    for event in events
+                    if event["event"] == "attachment_status"
+                    and event["status"] == "failed"
+                ]
+                self.assertEqual(len(failed), len(request.attachments))
+                self.assertTrue(
+                    all(event["error_code"] == expected for event in failed)
+                )
+                self.assertEqual(
+                    turns.get("doctor-1", request.request_id).status,
+                    "failed",
+                )
+
+    async def test_research_abort_cancels_and_joins_ingestion_task(self):
+        request = execute_request(
+            "research-abort",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+        )
+        ingestion = FakeResearchIngestion(block=True)
+        service, turns, _, graph, _ = make_service(
+            [request],
+            research_ingestion=ingestion,
+            heartbeat_interval=0.001,
+        )
+        stream = service.stream(request, principal(scopes={"ai:research"}))
+
+        self.assertEqual((await stream.__anext__())["event"], "execution_started")
+        self.assertEqual((await stream.__anext__())["status"], "processing")
+        pending = asyncio.create_task(stream.__anext__())
+        await asyncio.wait_for(ingestion.started.wait(), timeout=1)
+        service.registry.signal("doctor-1", request.request_id)
+        with self.assertRaises(StopAsyncIteration):
+            await asyncio.wait_for(pending, timeout=1)
+        await stream.aclose()
+
+        self.assertTrue(ingestion.cancelled)
+        self.assertEqual(graph.calls, [])
+        self.assertEqual(
+            turns.get("doctor-1", request.request_id).status,
+            "cancelled",
+        )
+
+    async def test_cancel_race_retrieves_completed_analysis_failure(self):
+        request = execute_request()
+        service, _, _, _, _ = make_service([request])
+
+        async def fail():
+            raise RuntimeError("PRIVATE_ANALYSIS_FAILURE_SENTINEL")
+
+        failed = asyncio.create_task(fail())
+        await asyncio.sleep(0)
+        self.assertTrue(failed.done())
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+
+        with self.assertRaises(_ExecutionStopped):
+            await service._wait_until_activity(
+                failed,
+                asyncio.Queue(),
+                cancel_event,
+                service._clock() + 1,
+            )
+
+        self.assertFalse(getattr(failed, "_log_traceback", True))
+
+    async def test_graph_cancel_race_retrieves_completed_next_failure(self):
+        request = execute_request()
+        service, _, _, _, _ = make_service([request])
+        created = []
+        real_create_task = asyncio.create_task
+
+        class FailingStream:
+            async def __anext__(self):
+                raise RuntimeError("PRIVATE_GRAPH_FAILURE_SENTINEL")
+
+        def capture_task(coroutine):
+            task = real_create_task(coroutine)
+            created.append(task)
+            return task
+
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        with patch(
+            "application.services.platform_chat_turn_execution_service."
+            "asyncio.create_task",
+            side_effect=capture_task,
+        ):
+            with self.assertRaises(_ExecutionStopped):
+                await service._next_graph_event(
+                    FailingStream(),
+                    cancel_event,
+                    service._clock() + 1,
+                )
+
+        self.assertGreaterEqual(len(created), 2)
+        self.assertTrue(created[0].done())
+        self.assertFalse(getattr(created[0], "_log_traceback", True))
+
+    async def test_research_ingestion_id_cas_miss_fails_before_graph(self):
+        request = execute_request(
+            "research-cas-miss",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+        )
+        service, turns, _, graph, _ = make_service([request])
+        turns.ingestion_cas_result = False
+
+        events = await collect(
+            service.stream(request, principal(scopes={"ai:research"}))
+        )
+
+        self.assertFalse(any(event["event"] == "token" for event in events))
+        self.assertEqual(graph.calls, [])
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(
+            events[-1]["error_code"],
+            "RESEARCH_DOCUMENT_CONTEXT_UNAVAILABLE",
+        )
 
     async def test_execute_mismatch_keeps_turn_prepared(self):
         prepared = execute_request()
@@ -810,6 +1263,49 @@ class ChatTurnExecutionRegistryContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(doctor_two.is_set())
         registry.unregister("doctor-1", "shared-request", doctor_one)
         registry.unregister("doctor-2", "shared-request", doctor_two)
+
+
+class ChatTurnRequestIngestionCasTest(unittest.TestCase):
+    class _DB:
+        def __init__(self, affected=1):
+            self.affected = affected
+            self.calls = []
+
+        def execute(self, sql, params):
+            self.calls.append((" ".join(sql.split()), params))
+            return self.affected
+
+    def test_ingestion_ids_cas_uses_canonical_json_and_exact_row_count(self):
+        db = self._DB(affected=1)
+        repository = ChatTurnRequestRepositoryImpl(db=db)
+
+        changed = repository.compare_and_set_ingestion_ids(
+            "doctor-1",
+            "request-1",
+            "streaming",
+            ["ingestion-1", "ingestion-2"],
+        )
+
+        self.assertTrue(changed)
+        sql, params = db.calls[0]
+        self.assertIn("WHERE doctor_id = %s", sql)
+        self.assertIn("request_id = %s", sql)
+        self.assertIn("status = %s", sql)
+        self.assertEqual(params[0], '["ingestion-1","ingestion-2"]')
+        self.assertEqual(
+            params[1:4],
+            ("doctor-1", "request-1", "streaming"),
+        )
+
+        duplicate_rows = ChatTurnRequestRepositoryImpl(db=self._DB(affected=2))
+        self.assertFalse(
+            duplicate_rows.compare_and_set_ingestion_ids(
+                "doctor-1",
+                "request-1",
+                "streaming",
+                ["ingestion-1"],
+            )
+        )
 
 
 if __name__ == "__main__":

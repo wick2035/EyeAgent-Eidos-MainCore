@@ -24,7 +24,7 @@ class MedicalState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
     # ========== 用户身份 ==========
-    patient_id: str                          # 患者UUID
+    patient_id: Optional[str]                # 患者UUID；科研模式为空
     doctor_id: Optional[str]                 # 医生UUID（医生模式/科研模式）
     role: str                                # "patient" | "doctor"
     session_id: str                          # 会话ID
@@ -93,7 +93,7 @@ class MedicalState(TypedDict):
 
 
 def create_initial_state(
-    patient_id: str,
+    patient_id: Optional[str],
     session_id: str,
     role: str = "patient",
     doctor_id: Optional[str] = None,

@@ -383,7 +383,19 @@ class PlatformChatTurnService:
             return self._project_status_response(latest)
 
     def _prepare_tree_nodes(self, request) -> dict[str, str]:
-        metadata = {"attachment_ids": list(request.attachment_ids)}
+        metadata = {
+            "attachment_ids": list(request.attachment_ids),
+            "turn_configuration": {
+                "protocol_version": request.version,
+                "agent_type": request.agent_type or "health",
+                "attachment_scope": request.attachment_scope or "patient",
+                "research_options": (
+                    request.research_options.model_dump(mode="json")
+                    if request.research_options is not None
+                    else None
+                ),
+            },
+        }
         if request.attachment_only:
             metadata.update({
                 "attachment_only": True,

@@ -492,7 +492,7 @@ class MySQLCheckpointSaver(BaseCheckpointSaver):
     def save_thread_mapping(
         self,
         thread_id: str,
-        patient_id: str,
+        patient_id: Optional[str],
         conversation_id: Optional[str] = None,
         session_id: Optional[str] = None,
         doctor_id: Optional[str] = None,
@@ -504,7 +504,7 @@ class MySQLCheckpointSaver(BaseCheckpointSaver):
 
         Args:
             thread_id: LangGraph 线程ID
-            patient_id: 患者UUID
+            patient_id: 患者UUID；科研模式为空
             conversation_id: 数据库会话ID
             session_id: 会话ID
             doctor_id: 医生UUID
