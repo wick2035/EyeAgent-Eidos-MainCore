@@ -106,10 +106,21 @@ def _persistence(
             user_type="doctor",
             host_id=owner,
             title="科研对话",
+            active_node_id="assistant-1",
         )
     )
     message_repo = _MessageRepo(
         [
+            ChatMessageEntity(
+                id="root-1",
+                chat_id="conversation-1",
+                parent_id=None,
+                message_order=0,
+                message_content="",
+                message_type="root",
+                sender_id=None,
+                status="success",
+            ),
             ChatMessageEntity(
                 id="user-1",
                 chat_id="conversation-1",
@@ -428,6 +439,7 @@ class LegacyBranchSourceAuthorityTest(unittest.IsolatedAsyncioTestCase):
         expected_code: str,
     ) -> None:
         graph = _SuccessfulGraph()
+        message_count = len(message_repo.messages)
         response = await _post(
             _app(InternalAuthMode.ENFORCE),
             route,
@@ -441,6 +453,7 @@ class LegacyBranchSourceAuthorityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(graph.stream_calls, 0)
         self.assertEqual(conversation_repo.write_count, 0)
         self.assertEqual(message_repo.write_count, 0)
+        self.assertEqual(len(message_repo.messages), message_count)
 
     async def test_edit_and_regenerate_reject_cross_owner_before_graph(self):
         for route in (
@@ -488,6 +501,80 @@ class LegacyBranchSourceAuthorityTest(unittest.IsolatedAsyncioTestCase):
                     expected_status=409,
                     expected_code="LEGACY_BRANCH_SOURCE_INVALID",
                 )
+
+    async def test_edit_rejects_invalid_parent_or_detached_active_path(self):
+        def parent_none(conversations, messages):
+            messages.messages["user-1"].parent_id = None
+
+        def parent_missing(conversations, messages):
+            messages.messages["user-1"].parent_id = "missing-parent"
+
+        def parent_cross_conversation(conversations, messages):
+            messages.messages["user-1"].parent_id = "foreign-root"
+            messages.messages["foreign-root"] = ChatMessageEntity(
+                id="foreign-root",
+                chat_id="other-conversation",
+                parent_id=None,
+                message_order=0,
+                message_content="",
+                message_type="root",
+                status="success",
+            )
+
+        def parent_deleted(conversations, messages):
+            messages.messages["root-1"].deleted = True
+
+        def parent_failed(conversations, messages):
+            messages.messages["root-1"].status = "failed"
+
+        def parent_wrong_role(conversations, messages):
+            messages.messages["root-1"].message_type = "user"
+
+        def source_not_on_active_path(conversations, messages):
+            conversations.conversation.active_node_id = "root-1"
+
+        cases = (
+            parent_none,
+            parent_missing,
+            parent_cross_conversation,
+            parent_deleted,
+            parent_failed,
+            parent_wrong_role,
+            source_not_on_active_path,
+        )
+        for mutate in cases:
+            with self.subTest(case=mutate.__name__):
+                service, conversations, messages = _persistence()
+                mutate(conversations, messages)
+                await self._assert_rejected_without_mutation(
+                    "/api/chat/edit-resend/stream",
+                    service=service,
+                    conversation_repo=conversations,
+                    message_repo=messages,
+                    expected_status=409,
+                    expected_code="LEGACY_BRANCH_SOURCE_INVALID",
+                )
+
+    async def test_edit_rejects_duplicate_authority_keys_before_graph(self):
+        duplicate_context = (
+            '[{"metadata":{'
+            '"agent_type":"health",'
+            '"agent_type":"research",'
+            f'"patient_id":"{PATIENT_ID}",'
+            '"patient_id":null}}]'
+        )
+        service, conversations, messages = _persistence(
+            user_context=duplicate_context
+        )
+
+        await self._assert_rejected_without_mutation(
+            "/api/chat/edit-resend/stream",
+            service=service,
+            conversation_repo=conversations,
+            message_repo=messages,
+            expected_status=409,
+            expected_code="LEGACY_BRANCH_SOURCE_INVALID",
+        )
 
     async def test_regenerate_rejects_invalid_parent_source_before_graph(self):
         service, conversations, messages = _persistence(

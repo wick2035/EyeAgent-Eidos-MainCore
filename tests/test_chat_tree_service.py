@@ -6,7 +6,10 @@ from contextvars import copy_context
 from datetime import datetime
 
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity, MessageContext
-from application.services.chat_persistence_service import ChatPersistenceService
+from application.services.chat_persistence_service import (
+    ChatPersistenceService,
+    LegacyBranchSourceInvalidError,
+)
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -192,6 +195,80 @@ class ChatTreeServiceTest(unittest.TestCase):
         self.assertEqual(edited_user.siblings_group_id, original_user.siblings_group_id)
         self.assertEqual(edited_assistant.parent_id, edited_user.id)
         self.assertNotEqual(edited_assistant.id, original_assistant.id)
+
+    def test_invalid_edit_parent_never_reaches_real_write_path(self):
+        service, conv_repo, msg_repo = self.make_service()
+        chat_id = service.create_conversation("doctor-1", "doctor", "科研对话")
+        source, _assistant = service.create_turn(
+            chat_id,
+            "原问题",
+            "doctor-1",
+            context=MessageContext(
+                metadata={"agent_type": "research", "patient_id": None}
+            ),
+        )
+        source.parent_id = "foreign-or-missing-parent"
+        before_count = len(msg_repo.items)
+        before_active = conv_repo.get_by_id(chat_id).active_node_id
+
+        try:
+            service.assert_legacy_branch_authority(
+                chat_id=chat_id,
+                source_message_id=source.id,
+                branch_mode="edit",
+                doctor_id="doctor-1",
+                agent_type="research",
+                patient_id=None,
+            )
+        except LegacyBranchSourceInvalidError:
+            pass
+        else:
+            service.create_turn(
+                chat_id,
+                "篡改后的问题",
+                "doctor-1",
+                context=MessageContext(
+                    metadata={"agent_type": "research", "patient_id": None}
+                ),
+                source_message_id=source.id,
+                mode="edit",
+            )
+
+        self.assertEqual(len(msg_repo.items), before_count)
+        self.assertEqual(
+            conv_repo.get_by_id(chat_id).active_node_id,
+            before_active,
+        )
+
+    def test_edit_authority_accepts_successful_assistant_parent_on_active_path(self):
+        service, _, _ = self.make_service()
+        chat_id = service.create_conversation("doctor-1", "doctor", "科研对话")
+        context = MessageContext(
+            metadata={"agent_type": "research", "patient_id": None}
+        )
+        _first_user, first_assistant = service.create_turn(
+            chat_id,
+            "第一问",
+            "doctor-1",
+            context=context,
+        )
+        first_assistant.status = "success"
+        source, active_assistant = service.create_turn(
+            chat_id,
+            "第二问",
+            "doctor-1",
+            context=context,
+        )
+        active_assistant.status = "success"
+
+        service.assert_legacy_branch_authority(
+            chat_id=chat_id,
+            source_message_id=source.id,
+            branch_mode="edit",
+            doctor_id="doctor-1",
+            agent_type="research",
+            patient_id=None,
+        )
 
     def test_regenerate_creates_assistant_sibling_under_same_user(self):
         service, _, _ = self.make_service()

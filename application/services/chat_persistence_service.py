@@ -606,6 +606,10 @@ class ChatPersistenceService:
                 else:
                     raise LegacyBranchSourceInvalidError()
 
+                self._assert_legacy_source_on_active_path(
+                    conversation,
+                    source,
+                )
                 if source_user.sender_id != doctor_id:
                     raise LegacyBranchForbiddenError()
                 canonical_agent, canonical_patient = (
@@ -621,6 +625,74 @@ class ChatPersistenceService:
         except Exception:
             raise LegacyBranchSourceInvalidError() from None
 
+    def _assert_legacy_source_on_active_path(
+        self,
+        conversation: ChatConversationEntity,
+        source: ChatMessageEntity,
+    ) -> None:
+        """验证 source 位于结构完整的 canonical active path。"""
+
+        active_node_id = conversation.active_node_id
+        if not isinstance(active_node_id, str) or not active_node_id:
+            raise LegacyBranchSourceInvalidError()
+
+        current = self.message_repo.get_by_id(active_node_id)
+        seen: set[str] = set()
+        source_seen = False
+        while current is not None:
+            if (
+                current.id in seen
+                or current.chat_id != conversation.id
+                or current.deleted
+                or current.message_type not in {"root", "user", "assistant"}
+            ):
+                raise LegacyBranchSourceInvalidError()
+            seen.add(current.id)
+            source_seen = source_seen or current.id == source.id
+
+            if current.message_type == "root":
+                if current.parent_id is not None or current.status != "success":
+                    raise LegacyBranchSourceInvalidError()
+                if not source_seen:
+                    raise LegacyBranchSourceInvalidError()
+                return
+
+            if not current.parent_id:
+                raise LegacyBranchSourceInvalidError()
+            parent = self.message_repo.get_by_id(current.parent_id)
+            if (
+                parent is None
+                or parent.chat_id != conversation.id
+                or parent.deleted
+                or parent.status != "success"
+                or current.message_order <= parent.message_order
+            ):
+                raise LegacyBranchSourceInvalidError()
+            if (
+                current.message_type == "user"
+                and parent.message_type not in {"root", "assistant"}
+            ):
+                raise LegacyBranchSourceInvalidError()
+            if (
+                current.message_type == "assistant"
+                and parent.message_type != "user"
+            ):
+                raise LegacyBranchSourceInvalidError()
+            current = parent
+
+        raise LegacyBranchSourceInvalidError()
+
+    @staticmethod
+    def _reject_duplicate_json_keys(
+        pairs: List[Tuple[str, Any]],
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise LegacyBranchSourceInvalidError()
+            result[key] = value
+        return result
+
     @staticmethod
     def _legacy_source_configuration(
         raw_context: Optional[str],
@@ -628,7 +700,14 @@ class ChatPersistenceService:
         if not isinstance(raw_context, str) or not raw_context:
             raise LegacyBranchSourceInvalidError()
         try:
-            context_list = json.loads(raw_context)
+            context_list = json.loads(
+                raw_context,
+                object_pairs_hook=(
+                    ChatPersistenceService._reject_duplicate_json_keys
+                ),
+            )
+        except LegacyBranchSourceInvalidError:
+            raise
         except (TypeError, ValueError, json.JSONDecodeError):
             raise LegacyBranchSourceInvalidError() from None
         allowed_context_keys = {
