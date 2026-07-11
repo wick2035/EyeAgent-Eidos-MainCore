@@ -29,7 +29,7 @@ from infrastructure.attachments.parser_sandbox import (
     _run_capture_command,
 )
 from infrastructure.attachments.secure_downloader import DownloadedAttachment
-from utils.pdf_utils import fitz
+from utils.pdf_utils import RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS, fitz
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +47,50 @@ def _jpeg_bytes():
     output = io.BytesIO()
     Image.new("RGB", (8, 8), color=(80, 60, 40)).save(output, format="JPEG")
     return output.getvalue()
+
+
+def _jpeg_bytes_with_size(width, height):
+    output = io.BytesIO()
+    Image.new("L", (width, height), color=80).save(output, format="JPEG")
+    return output.getvalue()
+
+
+def _entropy_corrupted_jpeg_bytes():
+    image = Image.frombytes(
+        "L",
+        (512, 512),
+        bytes(range(256)) * 1024,
+    ).convert("RGB")
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=85)
+    corrupted = bytearray(output.getvalue())
+    scan_offset = corrupted.find(b"\xff\xda")
+    if scan_offset < 0:
+        raise AssertionError("JPEG fixture has no start-of-scan marker")
+    corrupted[scan_offset + 20 : scan_offset + 25] = b"\xff" * 5
+    return bytes(corrupted)
+
+
+def _corrupt_zip_filename_utf8(bundle, *, corrupt_central=True):
+    payload = bytearray(bundle.read_bytes())
+    eocd_offset = payload.rfind(b"PK\x05\x06")
+    if eocd_offset < 0:
+        raise AssertionError("ZIP fixture has no EOCD")
+    central_offset = struct.unpack_from("<I", payload, eocd_offset + 16)[0]
+    local_offset = struct.unpack_from("<I", payload, central_offset + 42)[0]
+    local_flags = struct.unpack_from("<H", payload, local_offset + 6)[0]
+    struct.pack_into("<H", payload, local_offset + 6, local_flags | 0x0800)
+    payload[local_offset + 30] = 0xFF
+    if corrupt_central:
+        central_flags = struct.unpack_from("<H", payload, central_offset + 8)[0]
+        struct.pack_into(
+            "<H",
+            payload,
+            central_offset + 8,
+            central_flags | 0x0800,
+        )
+        payload[central_offset + 46] = 0xFF
+    bundle.write_bytes(payload)
 
 
 class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
@@ -686,6 +730,170 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                     output_bundle,
                     manifest.to_json_bytes(),
                     expected_page_count=21,
+                )
+
+    async def test_host_fully_decodes_jpeg_and_limits_total_ocr_pixels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_bundle = root / "output.bundle"
+            corrupted = _entropy_corrupted_jpeg_bytes()
+            with Image.open(io.BytesIO(corrupted)) as image:
+                image.verify()
+            with self.assertRaises(OSError):
+                with Image.open(io.BytesIO(corrupted)) as image:
+                    image.load()
+
+            empty_hash = hashlib.sha256(b"").hexdigest()
+            corrupted_manifest = ResearchPdfManifest(
+                pages=(
+                    ResearchPdfPageManifest(
+                        page_number=1,
+                        text_relative_path="page-0001.txt",
+                        text_sha256=empty_hash,
+                        ocr_image_relative_path="page-0001-ocr.jpg",
+                        ocr_image_sha256=hashlib.sha256(corrupted).hexdigest(),
+                    ),
+                )
+            )
+            with zipfile.ZipFile(
+                output_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.txt", b"")
+                archive.writestr("page-0001-ocr.jpg", corrupted)
+            os.chmod(output_bundle, 0o600)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_IMAGE_INVALID",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    corrupted_manifest.to_json_bytes(),
+                    expected_page_count=1,
+                )
+
+            page_limit_image = _jpeg_bytes_with_size(5000, 5000)
+            one_pixel_image = _jpeg_bytes_with_size(1, 1)
+
+            def write_images(images):
+                pages = []
+                with zipfile.ZipFile(
+                    output_bundle,
+                    mode="w",
+                    compression=zipfile.ZIP_STORED,
+                ) as archive:
+                    for page_number, image_bytes in enumerate(images, start=1):
+                        text_path = f"page-{page_number:04d}.txt"
+                        image_path = f"page-{page_number:04d}-ocr.jpg"
+                        archive.writestr(text_path, b"")
+                        archive.writestr(image_path, image_bytes)
+                        pages.append(
+                            ResearchPdfPageManifest(
+                                page_number=page_number,
+                                text_relative_path=text_path,
+                                text_sha256=empty_hash,
+                                ocr_image_relative_path=image_path,
+                                ocr_image_sha256=hashlib.sha256(
+                                    image_bytes
+                                ).hexdigest(),
+                            )
+                        )
+                os.chmod(output_bundle, 0o600)
+                return ResearchPdfManifest(pages=tuple(pages))
+
+            exact_images = [page_limit_image] * 4
+            exact_manifest = write_images(exact_images)
+            exact_pages = sandbox_module._read_validated_research_bundle(
+                output_bundle,
+                exact_manifest.to_json_bytes(),
+                expected_page_count=4,
+            )
+            self.assertEqual(len(exact_pages), 4)
+            self.assertEqual(
+                4 * 5000 * 5000,
+                RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS,
+            )
+
+            over_manifest = write_images(exact_images + [one_pixel_image])
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "RESEARCH_PDF_OCR_TOTAL_PIXEL_LIMIT",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    over_manifest.to_json_bytes(),
+                    expected_page_count=5,
+                )
+
+    async def test_bundle_readers_normalize_invalid_utf8_filename_errors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            assistant_bundle = root / "assistant.bundle"
+            assistant_content = b"page"
+            with zipfile.ZipFile(
+                assistant_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.jpg", assistant_content)
+            os.chmod(assistant_bundle, 0o600)
+            _corrupt_zip_filename_utf8(assistant_bundle)
+            assistant_manifest = json.dumps(
+                {
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "relative_path": "page-0001.jpg",
+                            "sha256": hashlib.sha256(
+                                assistant_content
+                            ).hexdigest(),
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_PATH_INVALID",
+            ):
+                _read_validated_bundle(
+                    assistant_bundle,
+                    assistant_manifest,
+                    "image/jpeg",
+                )
+
+            research_bundle = root / "research.bundle"
+            research_text = b"research"
+            with zipfile.ZipFile(
+                research_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.txt", research_text)
+            os.chmod(research_bundle, 0o600)
+            _corrupt_zip_filename_utf8(
+                research_bundle,
+                corrupt_central=False,
+            )
+            research_manifest = ResearchPdfManifest(
+                pages=(
+                    ResearchPdfPageManifest(
+                        page_number=1,
+                        text_relative_path="page-0001.txt",
+                        text_sha256=hashlib.sha256(research_text).hexdigest(),
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_READ_FAILED",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    research_bundle,
+                    research_manifest.to_json_bytes(),
+                    expected_page_count=1,
                 )
 
     async def test_bundle_readers_preflight_eocd_before_zipfile_construction(self):

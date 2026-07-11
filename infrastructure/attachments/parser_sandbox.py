@@ -30,6 +30,7 @@ from infrastructure.attachments.parser_protocol import (
 from utils.pdf_utils import (
     RESEARCH_PDF_MAX_OCR_PAGES,
     RESEARCH_PDF_MAX_PAGE_PIXELS,
+    RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS,
     RESEARCH_PDF_MAX_TEXT_BYTES_PER_PAGE,
     RESEARCH_PDF_MAX_TEXT_BYTES_TOTAL,
 )
@@ -510,7 +511,7 @@ def _read_validated_bundle(
     _preflight_zip_bundle(
         output_bundle,
         file_size=metadata.st_size,
-        expected_entry_count=len(expected_names),
+        expected_names=expected_names,
     )
     parsed_pages: list[ParsedAttachmentPage] = []
     total_bytes = 0
@@ -550,7 +551,7 @@ def _read_validated_bundle(
                 ))
     except AttachmentParserError:
         raise
-    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+    except Exception as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
     return tuple(parsed_pages)
 
@@ -596,12 +597,13 @@ def _read_validated_research_bundle(
     _preflight_zip_bundle(
         output_bundle,
         file_size=metadata.st_size,
-        expected_entry_count=len(expected_names),
+        expected_names=expected_names,
     )
 
     parsed_pages: list[ParsedResearchPdfPage] = []
     total_bytes = 0
     total_text_bytes = 0
+    total_ocr_pixels = 0
     try:
         with zipfile.ZipFile(output_bundle, mode="r") as archive:
             entries = archive.infolist()
@@ -651,7 +653,16 @@ def _read_validated_research_bundle(
                         raise AttachmentParserError(
                             "ATTACHMENT_OUTPUT_HASH_MISMATCH"
                         )
-                    _validate_research_ocr_jpeg(ocr_image_content)
+                    total_ocr_pixels += _validate_research_ocr_jpeg(
+                        ocr_image_content
+                    )
+                    if (
+                        total_ocr_pixels
+                        > RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS
+                    ):
+                        raise AttachmentParserError(
+                            "RESEARCH_PDF_OCR_TOTAL_PIXEL_LIMIT"
+                        )
                 parsed_pages.append(
                     ParsedResearchPdfPage(
                         page_number=page.page_number,
@@ -663,7 +674,7 @@ def _read_validated_research_bundle(
                 )
     except AttachmentParserError:
         raise
-    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+    except Exception as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
     return tuple(parsed_pages)
 
@@ -692,13 +703,14 @@ def _preflight_zip_bundle(
     output_bundle: Path,
     *,
     file_size: int,
-    expected_entry_count: int,
+    expected_names: set[str],
 ) -> None:
+    expected_entry_count = len(expected_names)
     if (
         type(file_size) is not int
         or file_size < _ZIP_EOCD.size
-        or type(expected_entry_count) is not int
         or not 1 <= expected_entry_count <= 120
+        or any(type(name) is not str for name in expected_names)
     ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
     tail_size = min(file_size, _ZIP_EOCD_MAX_SEARCH_BYTES)
@@ -756,7 +768,7 @@ def _preflight_zip_bundle(
         output_bundle,
         central_directory_offset=central_directory_offset,
         central_directory_size=central_directory_size,
-        expected_entry_count=expected_entry_count,
+        expected_names=expected_names,
     )
 
 
@@ -765,8 +777,9 @@ def _preflight_zip_central_directory(
     *,
     central_directory_offset: int,
     central_directory_size: int,
-    expected_entry_count: int,
+    expected_names: set[str],
 ) -> None:
+    expected_entry_count = len(expected_names)
     try:
         with output_bundle.open("rb") as source:
             source.seek(central_directory_offset)
@@ -777,6 +790,7 @@ def _preflight_zip_central_directory(
         raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED")
 
     offset = 0
+    decoded_names: list[str] = []
     for _ in range(expected_entry_count):
         if len(central_directory) - offset < _ZIP_CENTRAL_HEADER.size:
             raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
@@ -785,7 +799,7 @@ def _preflight_zip_central_directory(
                 signature,
                 _version_made_by,
                 version_needed,
-                _flags,
+                flags,
                 _compression,
                 _modified_time,
                 _modified_date,
@@ -824,11 +838,26 @@ def _preflight_zip_central_directory(
         if variable_end > len(central_directory):
             raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
         extra_start = variable_start + filename_length
+        filename_bytes = central_directory[
+            variable_start : variable_start + filename_length
+        ]
+        try:
+            decoded_names.append(
+                filename_bytes.decode("utf-8" if flags & 0x0800 else "cp437")
+            )
+        except UnicodeError as exc:
+            raise AttachmentParserError(
+                "ATTACHMENT_OUTPUT_PATH_INVALID"
+            ) from exc
         _reject_zip64_extra_field(
             central_directory[extra_start : extra_start + extra_length]
         )
         offset = variable_end
-    if offset != len(central_directory):
+    if (
+        offset != len(central_directory)
+        or len(set(decoded_names)) != len(decoded_names)
+        or set(decoded_names) != expected_names
+    ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
 
 
@@ -844,7 +873,7 @@ def _reject_zip64_extra_field(extra: bytes) -> None:
         offset += data_size
 
 
-def _validate_research_ocr_jpeg(content: bytes) -> None:
+def _validate_research_ocr_jpeg(content: bytes) -> int:
     if (
         len(content) < 5
         or not content.startswith(b"\xff\xd8\xff")
@@ -868,6 +897,16 @@ def _validate_research_ocr_jpeg(content: bytes) -> None:
                         "ATTACHMENT_OUTPUT_IMAGE_INVALID"
                     )
                 image.verify()
+            with Image.open(io.BytesIO(content)) as decoded_image:
+                if (
+                    decoded_image.format != "JPEG"
+                    or decoded_image.size != (width, height)
+                ):
+                    raise AttachmentParserError(
+                        "ATTACHMENT_OUTPUT_IMAGE_INVALID"
+                    )
+                decoded_image.load()
+            return width * height
     except AttachmentParserError:
         raise
     except Exception as exc:
