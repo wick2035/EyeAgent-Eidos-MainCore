@@ -31,7 +31,7 @@ class _FakePixmap:
     def tobytes(self, output):
         if output != "jpeg":
             raise AssertionError("strict renderer must emit JPEG")
-        return b"jpeg-page"
+        return b"\xff\xd8\xff\xe0jpeg-page\xff\xd9"
 
 
 class _FakePage:
@@ -390,13 +390,17 @@ class AttachmentParserLimitsTest(unittest.TestCase):
         input_path = self.input_dir / "attachment.bin"
         input_path.write_bytes(b"pdf")
         cases = (
-            (_FakeDocument([_FakePage()], encrypted=True), None, "PDF_ENCRYPTED"),
-            (None, ValueError("corrupt details"), "PDF_INVALID"),
-            (_FakeDocument([]), None, "PDF_EMPTY"),
+            (
+                _FakeDocument([_FakePage()], encrypted=True),
+                None,
+                "RESEARCH_PDF_ENCRYPTED",
+            ),
+            (None, ValueError("corrupt details"), "RESEARCH_PDF_INVALID"),
+            (_FakeDocument([]), None, "RESEARCH_PDF_INVALID"),
             (
                 _FakeDocument([_FakePage(width=float("nan"))]),
                 None,
-                "PDF_PAGE_GEOMETRY_INVALID",
+                "RESEARCH_PDF_INVALID",
             ),
         )
         for index, (document, raised, code) in enumerate(cases):
@@ -497,6 +501,64 @@ class AttachmentParserLimitsTest(unittest.TestCase):
                 )
         self.assertEqual(output_page.render_calls, 1)
         self.assertEqual(list(output_limit.iterdir()), [])
+
+    def test_research_pdf_rejects_real_empty_password_encryption_and_repair(self):
+        encrypted_path = self.input_dir / "empty-password-encrypted.pdf"
+        encrypted_output = self.output_dir / "empty-password-encrypted"
+        encrypted_output.mkdir()
+        encrypted_document = pdf_utils.fitz.open()
+        encrypted_page = encrypted_document.new_page()
+        encrypted_page.insert_text(
+            (72, 72),
+            "Research 1234567890 ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        )
+        encrypted_document.save(
+            encrypted_path,
+            encryption=pdf_utils.fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="owner-secret",
+            user_pw="",
+        )
+        encrypted_document.close()
+        opened_encrypted = pdf_utils.fitz.open(encrypted_path)
+        self.assertEqual(opened_encrypted.needs_pass, 0)
+        self.assertFalse(opened_encrypted.is_encrypted)
+        self.assertTrue(opened_encrypted.metadata.get("encryption"))
+        opened_encrypted.close()
+
+        with self.assertRaisesRegex(
+            StrictPdfError,
+            "RESEARCH_PDF_ENCRYPTED",
+        ):
+            pdf_utils.extract_research_pdf_path_strict(
+                encrypted_path,
+                encrypted_output,
+                declared_page_count=1,
+            )
+        self.assertEqual(list(encrypted_output.iterdir()), [])
+
+        valid_path = self.input_dir / "valid-before-truncation.pdf"
+        repaired_path = self.input_dir / "repairable-truncated.pdf"
+        repaired_output = self.output_dir / "repairable-truncated"
+        repaired_output.mkdir()
+        valid_document = pdf_utils.fitz.open()
+        valid_document.new_page()
+        valid_document.save(valid_path)
+        valid_document.close()
+        repaired_path.write_bytes(valid_path.read_bytes()[:-20])
+        opened_repaired = pdf_utils.fitz.open(repaired_path)
+        self.assertTrue(opened_repaired.is_repaired)
+        opened_repaired.close()
+
+        with self.assertRaisesRegex(
+            StrictPdfError,
+            "RESEARCH_PDF_INVALID",
+        ):
+            pdf_utils.extract_research_pdf_path_strict(
+                repaired_path,
+                repaired_output,
+                declared_page_count=1,
+            )
+        self.assertEqual(list(repaired_output.iterdir()), [])
 
     def test_worker_research_profile_emits_independent_metadata_manifest(self):
         (self.input_dir / "attachment.bin").write_bytes(b"pdf")

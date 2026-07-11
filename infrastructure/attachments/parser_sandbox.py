@@ -1,16 +1,21 @@
 import asyncio
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from PIL import Image
 
 from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
@@ -23,6 +28,8 @@ from infrastructure.attachments.parser_protocol import (
     WorkerRequest,
 )
 from utils.pdf_utils import (
+    RESEARCH_PDF_MAX_OCR_PAGES,
+    RESEARCH_PDF_MAX_PAGE_PIXELS,
     RESEARCH_PDF_MAX_TEXT_BYTES_PER_PAGE,
     RESEARCH_PDF_MAX_TEXT_BYTES_TOTAL,
 )
@@ -38,6 +45,13 @@ _MAX_STDOUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 _STARTUP_CLEANUP_WAIT_SECONDS = 2.0
+_ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_EOCD_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP_CENTRAL_HEADER_SIGNATURE = b"PK\x01\x02"
+_ZIP_EOCD = struct.Struct("<4sHHHHIIH")
+_ZIP_CENTRAL_HEADER = struct.Struct("<4s6H3I5H2I")
+_ZIP_EOCD_MAX_SEARCH_BYTES = _ZIP_EOCD.size + 65_535
+_MAX_CENTRAL_DIRECTORY_BYTES = 128 * 1024
 
 
 CommandRunner = Callable[..., Awaitable[int]]
@@ -209,12 +223,11 @@ class AttachmentParserSandbox:
                 research_pages = _read_validated_research_bundle(
                     output_bundle,
                     stdout,
+                    expected_page_count=_value(downloaded, "page_count"),
                 )
                 return ParsedResearchPdf(
                     attachment_id=str(_value(downloaded, "attachment_id")),
-                    document_version=int(
-                        _value(downloaded, "document_version")
-                    ),
+                    document_version=_value(downloaded, "document_version"),
                     mime_type=str(_value(downloaded, "mime_type")),
                     pages=research_pages,
                 )
@@ -494,6 +507,11 @@ def _read_validated_bundle(
         raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
 
     expected_names = {page.relative_path for page in manifest.pages}
+    _preflight_zip_bundle(
+        output_bundle,
+        file_size=metadata.st_size,
+        expected_entry_count=len(expected_names),
+    )
     parsed_pages: list[ParsedAttachmentPage] = []
     total_bytes = 0
     try:
@@ -540,10 +558,23 @@ def _read_validated_bundle(
 def _read_validated_research_bundle(
     output_bundle: Path,
     stdout: bytes,
+    *,
+    expected_page_count: int,
 ) -> tuple[ParsedResearchPdfPage, ...]:
     if len(stdout) > _MAX_STDOUT_BYTES:
         raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
     manifest = ResearchPdfManifest.from_json_bytes(stdout)
+    if (
+        type(expected_page_count) is not int
+        or not 1 <= expected_page_count <= 100
+        or len(manifest.pages) != expected_page_count
+    ):
+        raise AttachmentParserError("ATTACHMENT_PAGE_COUNT_MISMATCH")
+    ocr_page_count = sum(
+        page.ocr_image_relative_path is not None for page in manifest.pages
+    )
+    if ocr_page_count > RESEARCH_PDF_MAX_OCR_PAGES:
+        raise AttachmentParserError("RESEARCH_PDF_OCR_PAGE_LIMIT")
     try:
         metadata = output_bundle.lstat()
     except OSError as exc:
@@ -562,6 +593,11 @@ def _read_validated_research_bundle(
         expected_names.add(page.text_relative_path)
         if page.ocr_image_relative_path is not None:
             expected_names.add(page.ocr_image_relative_path)
+    _preflight_zip_bundle(
+        output_bundle,
+        file_size=metadata.st_size,
+        expected_entry_count=len(expected_names),
+    )
 
     parsed_pages: list[ParsedResearchPdfPage] = []
     total_bytes = 0
@@ -615,6 +651,7 @@ def _read_validated_research_bundle(
                         raise AttachmentParserError(
                             "ATTACHMENT_OUTPUT_HASH_MISMATCH"
                         )
+                    _validate_research_ocr_jpeg(ocr_image_content)
                 parsed_pages.append(
                     ParsedResearchPdfPage(
                         page_number=page.page_number,
@@ -651,6 +688,192 @@ def _read_research_bundle_entry(
     return content
 
 
+def _preflight_zip_bundle(
+    output_bundle: Path,
+    *,
+    file_size: int,
+    expected_entry_count: int,
+) -> None:
+    if (
+        type(file_size) is not int
+        or file_size < _ZIP_EOCD.size
+        or type(expected_entry_count) is not int
+        or not 1 <= expected_entry_count <= 120
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    tail_size = min(file_size, _ZIP_EOCD_MAX_SEARCH_BYTES)
+    try:
+        with output_bundle.open("rb") as source:
+            source.seek(file_size - tail_size)
+            tail = source.read(tail_size + 1)
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+    if len(tail) != tail_size:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED")
+    relative_eocd_offset = tail.rfind(_ZIP_EOCD_SIGNATURE)
+    if relative_eocd_offset < 0:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if len(tail) - relative_eocd_offset < _ZIP_EOCD.size:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    try:
+        (
+            signature,
+            disk_number,
+            central_directory_disk,
+            entries_on_disk,
+            total_entries,
+            central_directory_size,
+            central_directory_offset,
+            comment_length,
+        ) = _ZIP_EOCD.unpack_from(tail, relative_eocd_offset)
+    except struct.error as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    absolute_eocd_offset = file_size - tail_size + relative_eocd_offset
+    if (
+        signature != _ZIP_EOCD_SIGNATURE
+        or absolute_eocd_offset + _ZIP_EOCD.size + comment_length != file_size
+        or disk_number != 0
+        or central_directory_disk != 0
+        or entries_on_disk != total_entries
+        or total_entries in {0xFFFF}
+        or central_directory_size == 0xFFFFFFFF
+        or central_directory_offset == 0xFFFFFFFF
+        or total_entries != expected_entry_count
+        or central_directory_size > _MAX_CENTRAL_DIRECTORY_BYTES
+        or central_directory_size < total_entries * 46
+        or central_directory_offset + central_directory_size
+        != absolute_eocd_offset
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    locator_offset = relative_eocd_offset - 20
+    if (
+        locator_offset >= 0
+        and tail[locator_offset : locator_offset + 4]
+        == _ZIP64_EOCD_LOCATOR_SIGNATURE
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    _preflight_zip_central_directory(
+        output_bundle,
+        central_directory_offset=central_directory_offset,
+        central_directory_size=central_directory_size,
+        expected_entry_count=expected_entry_count,
+    )
+
+
+def _preflight_zip_central_directory(
+    output_bundle: Path,
+    *,
+    central_directory_offset: int,
+    central_directory_size: int,
+    expected_entry_count: int,
+) -> None:
+    try:
+        with output_bundle.open("rb") as source:
+            source.seek(central_directory_offset)
+            central_directory = source.read(central_directory_size)
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+    if len(central_directory) != central_directory_size:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED")
+
+    offset = 0
+    for _ in range(expected_entry_count):
+        if len(central_directory) - offset < _ZIP_CENTRAL_HEADER.size:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        try:
+            (
+                signature,
+                _version_made_by,
+                version_needed,
+                _flags,
+                _compression,
+                _modified_time,
+                _modified_date,
+                _crc32,
+                compressed_size,
+                uncompressed_size,
+                filename_length,
+                extra_length,
+                comment_length,
+                disk_start,
+                _internal_attributes,
+                _external_attributes,
+                local_header_offset,
+            ) = _ZIP_CENTRAL_HEADER.unpack_from(central_directory, offset)
+        except struct.error as exc:
+            raise AttachmentParserError(
+                "ATTACHMENT_OUTPUT_PATH_INVALID"
+            ) from exc
+        if (
+            signature != _ZIP_CENTRAL_HEADER_SIGNATURE
+            or version_needed >= 45
+            or compressed_size == 0xFFFFFFFF
+            or uncompressed_size == 0xFFFFFFFF
+            or disk_start != 0
+            or local_header_offset == 0xFFFFFFFF
+            or local_header_offset >= central_directory_offset
+        ):
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        variable_start = offset + _ZIP_CENTRAL_HEADER.size
+        variable_end = (
+            variable_start
+            + filename_length
+            + extra_length
+            + comment_length
+        )
+        if variable_end > len(central_directory):
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        extra_start = variable_start + filename_length
+        _reject_zip64_extra_field(
+            central_directory[extra_start : extra_start + extra_length]
+        )
+        offset = variable_end
+    if offset != len(central_directory):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+
+
+def _reject_zip64_extra_field(extra: bytes) -> None:
+    offset = 0
+    while offset < len(extra):
+        if len(extra) - offset < 4:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        header_id, data_size = struct.unpack_from("<HH", extra, offset)
+        offset += 4
+        if offset + data_size > len(extra) or header_id == 0x0001:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        offset += data_size
+
+
+def _validate_research_ocr_jpeg(content: bytes) -> None:
+    if (
+        len(content) < 5
+        or not content.startswith(b"\xff\xd8\xff")
+        or not content.endswith(b"\xff\xd9")
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_IMAGE_INVALID")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(content)) as image:
+                width, height = image.size
+                if (
+                    image.format != "JPEG"
+                    or type(width) is not int
+                    or type(height) is not int
+                    or width <= 0
+                    or height <= 0
+                    or width * height > RESEARCH_PDF_MAX_PAGE_PIXELS
+                ):
+                    raise AttachmentParserError(
+                        "ATTACHMENT_OUTPUT_IMAGE_INVALID"
+                    )
+                image.verify()
+    except AttachmentParserError:
+        raise
+    except Exception as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_IMAGE_INVALID") from exc
+
+
 def _copy_and_revalidate_input(downloaded: Any, destination: Path) -> None:
     source = Path(_value(downloaded, "path"))
     try:
@@ -682,8 +905,10 @@ def _copy_and_revalidate_input(downloaded: Any, destination: Path) -> None:
         raise
     except OSError as exc:
         raise AttachmentParserError("ATTACHMENT_INPUT_COPY_FAILED") from exc
+    expected_size = _value(downloaded, "size_bytes")
     if (
-        total != int(_value(downloaded, "size_bytes"))
+        type(expected_size) is not int
+        or total != expected_size
         or digest.hexdigest() != str(_value(downloaded, "content_sha256"))
     ):
         raise AttachmentParserError("ATTACHMENT_INPUT_CHANGED")

@@ -55,9 +55,15 @@ class DownloadedAttachment:
     document_version: int = 1
 
     def __post_init__(self) -> None:
+        if type(self.size_bytes) is not int or self.size_bytes < 1:
+            raise ValueError("size_bytes must be a positive integer")
+        if self.page_count is not None and (
+            type(self.page_count) is not int
+            or not 1 <= self.page_count <= 100
+        ):
+            raise ValueError("page_count must be an integer from 1 to 100")
         if (
-            not isinstance(self.document_version, int)
-            or isinstance(self.document_version, bool)
+            type(self.document_version) is not int
             or self.document_version < 1
         ):
             raise ValueError("document_version must be a positive integer")
@@ -120,7 +126,11 @@ class SecureAttachmentDownloader:
         request_id: str,
     ) -> AsyncIterator[list[DownloadedAttachment]]:
         items = list(descriptors)
-        declared_total = sum(int(_value(item, "size_bytes")) for item in items)
+        declared_total = 0
+        for item in items:
+            declared_total += _strict_descriptor_integer(item, "size_bytes")
+            _strict_descriptor_integer(item, "document_version")
+            _strict_descriptor_integer(item, "page_count", allow_none=True)
         if declared_total > _TOTAL_LIMIT_BYTES:
             raise AttachmentDownloadError("ATTACHMENT_TOTAL_LIMIT_EXCEEDED")
 
@@ -198,7 +208,7 @@ class SecureAttachmentDownloader:
         index: int,
     ) -> DownloadedAttachment:
         attachment_id = str(_value(descriptor, "attachment_id"))
-        expected_size = int(_value(descriptor, "size_bytes"))
+        expected_size = _strict_descriptor_integer(descriptor, "size_bytes")
         mime_type = str(_value(descriptor, "mime_type"))
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
@@ -281,7 +291,10 @@ class SecureAttachmentDownloader:
             content_sha256=digest.hexdigest(),
             page_count=_value(descriptor, "page_count"),
             path=destination,
-            document_version=int(_value(descriptor, "document_version")),
+            document_version=_strict_descriptor_integer(
+                descriptor,
+                "document_version",
+            ),
         )
 
 
@@ -289,6 +302,28 @@ def _value(item: Any, name: str) -> Any:
     if isinstance(item, dict):
         return item[name]
     return getattr(item, name)
+
+
+def _strict_descriptor_integer(
+    item: Any,
+    name: str,
+    *,
+    allow_none: bool = False,
+) -> int | None:
+    value = _value(item, name)
+    if value is None and allow_none:
+        return None
+    if type(value) is not int or value < 1:
+        attachment_id = ""
+        try:
+            attachment_id = str(_value(item, "attachment_id"))
+        except (AttributeError, KeyError):
+            pass
+        raise AttachmentDownloadError(
+            "ATTACHMENT_DESCRIPTOR_INVALID",
+            attachment_id=attachment_id,
+        )
+    return value
 
 
 def _safe_suffix(mime_type: str) -> str:

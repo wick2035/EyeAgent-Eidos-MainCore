@@ -63,10 +63,10 @@ class InternalAttachmentDescriptor(BaseModel):
         "image/webp",
         "application/pdf",
     ]
-    size_bytes: int = Field(gt=0, le=30 * 1024 * 1024)
-    page_count: int | None = Field(default=None, ge=1, le=100)
+    size_bytes: int = Field(strict=True, gt=0, le=30 * 1024 * 1024)
+    page_count: int | None = Field(default=None, strict=True, ge=1, le=100)
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    document_version: int = Field(ge=1)
+    document_version: int = Field(strict=True, ge=1)
     analysis_attempt_id: str
     download_url: str
 

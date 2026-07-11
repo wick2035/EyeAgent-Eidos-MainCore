@@ -328,3 +328,7 @@ class ParsedResearchPdf:
     document_version: int
     mime_type: str
     pages: tuple[ParsedResearchPdfPage, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.document_version) is not int or self.document_version < 1:
+            raise AttachmentParserError("ATTACHMENT_DOCUMENT_VERSION_INVALID")

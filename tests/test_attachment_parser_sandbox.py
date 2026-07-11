@@ -4,6 +4,7 @@ import io
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,12 @@ _LABEL_KEY = "eyeagent.attachment-parser.run"
 def _png_bytes():
     output = io.BytesIO()
     Image.new("RGB", (8, 8), color=(20, 40, 60)).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _jpeg_bytes():
+    output = io.BytesIO()
+    Image.new("RGB", (8, 8), color=(80, 60, 40)).save(output, format="JPEG")
     return output.getvalue()
 
 
@@ -504,7 +511,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary)
             output_bundle = root / "output.bundle"
             text = "科研正文 1234567890 ABCDEFGHIJ".encode("utf-8")
-            image = b"ocr-image"
+            image = _jpeg_bytes()
             manifest = ResearchPdfManifest(
                 pages=(
                     ResearchPdfPageManifest(
@@ -533,6 +540,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             pages = sandbox_module._read_validated_research_bundle(
                 output_bundle,
                 manifest.to_json_bytes(),
+                expected_page_count=1,
             )
             self.assertEqual(pages[0].text, text.decode("utf-8"))
             self.assertEqual(pages[0].ocr_image_content, image)
@@ -546,6 +554,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                 sandbox_module._read_validated_research_bundle(
                     output_bundle,
                     json.dumps(bad_hash).encode("utf-8"),
+                    expected_page_count=1,
                 )
 
             traversal = json.loads(manifest.to_json_bytes())
@@ -557,6 +566,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                 sandbox_module._read_validated_research_bundle(
                     output_bundle,
                     json.dumps(traversal).encode("utf-8"),
+                    expected_page_count=1,
                 )
 
             write_bundle(extra=True)
@@ -567,7 +577,210 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                 sandbox_module._read_validated_research_bundle(
                     output_bundle,
                     manifest.to_json_bytes(),
+                    expected_page_count=1,
                 )
+
+            write_bundle()
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_PAGE_COUNT_MISMATCH",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                    expected_page_count=2,
+                )
+
+            invalid_image = b"not-a-jpeg"
+            invalid_manifest = ResearchPdfManifest(
+                pages=(
+                    ResearchPdfPageManifest(
+                        page_number=1,
+                        text_relative_path="page-0001.txt",
+                        text_sha256=hashlib.sha256(text).hexdigest(),
+                        ocr_image_relative_path="page-0001-ocr.jpg",
+                        ocr_image_sha256=hashlib.sha256(invalid_image).hexdigest(),
+                    ),
+                )
+            )
+            with zipfile.ZipFile(
+                output_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.txt", text)
+                archive.writestr("page-0001-ocr.jpg", invalid_image)
+            os.chmod(output_bundle, 0o600)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_IMAGE_INVALID",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    invalid_manifest.to_json_bytes(),
+                    expected_page_count=1,
+                )
+
+            huge_image = bytearray(_jpeg_bytes())
+            sof_offset = huge_image.find(b"\xff\xc0")
+            self.assertGreaterEqual(sof_offset, 0)
+            struct.pack_into(">HH", huge_image, sof_offset + 5, 0xFFFF, 0xFFFF)
+            huge_image_bytes = bytes(huge_image)
+            huge_manifest = ResearchPdfManifest(
+                pages=(
+                    ResearchPdfPageManifest(
+                        page_number=1,
+                        text_relative_path="page-0001.txt",
+                        text_sha256=hashlib.sha256(text).hexdigest(),
+                        ocr_image_relative_path="page-0001-ocr.jpg",
+                        ocr_image_sha256=hashlib.sha256(
+                            huge_image_bytes
+                        ).hexdigest(),
+                    ),
+                )
+            )
+            with zipfile.ZipFile(
+                output_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.txt", text)
+                archive.writestr("page-0001-ocr.jpg", huge_image_bytes)
+            os.chmod(output_bundle, 0o600)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_IMAGE_INVALID",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    huge_manifest.to_json_bytes(),
+                    expected_page_count=1,
+                )
+
+    async def test_host_rejects_more_than_twenty_research_ocr_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_bundle = Path(temporary) / "output.bundle"
+            output_bundle.touch(mode=0o600)
+            empty_hash = hashlib.sha256(b"").hexdigest()
+            jpeg_hash = hashlib.sha256(_jpeg_bytes()).hexdigest()
+            manifest = ResearchPdfManifest(
+                pages=tuple(
+                    ResearchPdfPageManifest(
+                        page_number=page_number,
+                        text_relative_path=f"page-{page_number:04d}.txt",
+                        text_sha256=empty_hash,
+                        ocr_image_relative_path=(
+                            f"page-{page_number:04d}-ocr.jpg"
+                        ),
+                        ocr_image_sha256=jpeg_hash,
+                    )
+                    for page_number in range(1, 22)
+                )
+            )
+
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "RESEARCH_PDF_OCR_PAGE_LIMIT",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                    expected_page_count=21,
+                )
+
+    async def test_bundle_readers_preflight_eocd_before_zipfile_construction(self):
+        manifest = json.dumps(
+            {
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "relative_path": "page-0001.jpg",
+                        "sha256": hashlib.sha256(b"page").hexdigest(),
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            many_entries = root / "many-entries.bundle"
+            with zipfile.ZipFile(
+                many_entries,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                for index in range(50_000):
+                    archive.writestr(f"entry-{index:05d}", b"")
+            os.chmod(many_entries, 0o600)
+
+            valid = root / "valid.bundle"
+            with zipfile.ZipFile(
+                valid,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("page-0001.jpg", b"page")
+            valid_bytes = valid.read_bytes()
+            eocd_offset = valid_bytes.rfind(b"PK\x05\x06")
+            self.assertGreaterEqual(eocd_offset, 0)
+
+            zip64 = bytearray(valid_bytes)
+            struct.pack_into("<HH", zip64, eocd_offset + 8, 0xFFFF, 0xFFFF)
+            zip64_bundle = root / "zip64.bundle"
+            zip64_bundle.write_bytes(zip64)
+            os.chmod(zip64_bundle, 0o600)
+
+            zip64_extra_bundle = root / "zip64-extra.bundle"
+            zip64_info = zipfile.ZipInfo("page-0001.jpg")
+            zip64_info.compress_type = zipfile.ZIP_STORED
+            zip64_info.extract_version = 45
+            zip64_info.extra = struct.pack("<HH", 0x0001, 0)
+            with zipfile.ZipFile(zip64_extra_bundle, mode="w") as archive:
+                archive.writestr(zip64_info, b"page")
+            os.chmod(zip64_extra_bundle, 0o600)
+
+            multidisk = bytearray(valid_bytes)
+            struct.pack_into("<HH", multidisk, eocd_offset + 4, 1, 1)
+            multidisk_bundle = root / "multidisk.bundle"
+            multidisk_bundle.write_bytes(multidisk)
+            os.chmod(multidisk_bundle, 0o600)
+
+            fake_eocd_bundle = root / "fake-eocd.bundle"
+            fake_eocd_bundle.write_bytes(
+                b"not-a-zip"
+                + struct.pack(
+                    "<4sHHHHIIH",
+                    b"PK\x05\x06",
+                    0,
+                    0,
+                    1,
+                    1,
+                    46,
+                    999_999,
+                    0,
+                )
+            )
+            os.chmod(fake_eocd_bundle, 0o600)
+
+            for bundle in (
+                many_entries,
+                zip64_bundle,
+                zip64_extra_bundle,
+                multidisk_bundle,
+                fake_eocd_bundle,
+            ):
+                with self.subTest(bundle=bundle.name), patch(
+                    "infrastructure.attachments.parser_sandbox.zipfile.ZipFile",
+                    side_effect=AssertionError(
+                        "ZipFile must not be constructed before EOCD preflight"
+                    ),
+                ):
+                    with self.assertRaises(AttachmentParserError):
+                        _read_validated_bundle(
+                            bundle,
+                            manifest,
+                            "image/jpeg",
+                        )
 
     async def test_parse_research_profile_returns_text_and_optional_ocr_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -575,7 +788,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             source = root / "source.pdf"
             source.write_bytes(b"%PDF-fake")
             text = "科研正文 1234567890 ABCDEFGHIJ"
-            image = b"ocr-image"
+            image = _jpeg_bytes()
             runner = root / "research-runner.py"
             runner.write_text(
                 "#!" + sys.executable + "\n"
@@ -629,6 +842,54 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(parsed.pages[0].text, text)
             self.assertEqual(parsed.pages[0].ocr_image_content, image)
             self.assertEqual(list((root / "sandbox").iterdir()), [])
+
+    async def test_research_worker_error_code_is_preserved_by_host(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF-fake")
+            runner = root / "failing-research-runner.py"
+            runner.write_text(
+                "#!" + sys.executable + "\n"
+                "import sys\n"
+                "sys.stdin.buffer.read()\n"
+                "sys.stderr.write('{\"error_code\":\"RESEARCH_PDF_ENCRYPTED\"}')\n"
+                "raise SystemExit(2)\n",
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o700)
+            payload = source.read_bytes()
+            downloaded = DownloadedAttachment(
+                attachment_id="research-error",
+                analysis_attempt_id="research-error-attempt",
+                file_type="pdf",
+                filename="paper.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                page_count=1,
+                path=source,
+                document_version=1,
+            )
+            sandbox = AttachmentParserSandbox(
+                runner_path=runner,
+                docker_binary="true",
+                temp_root=root / "sandbox",
+            )
+            sandbox.preflight = AsyncMock()
+            with patch(
+                "infrastructure.attachments.parser_sandbox._cleanup_container",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(AttachmentParserError) as raised:
+                    await sandbox.parse(
+                        downloaded,
+                        profile="research_pdf_v1",
+                    )
+            self.assertEqual(
+                raised.exception.error_code,
+                "RESEARCH_PDF_ENCRYPTED",
+            )
 
     async def test_fixed_runner_contains_all_required_isolation_flags(self):
         runner = (
@@ -811,6 +1072,52 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertIsNone(parsed.pages[0].ocr_image_content)
         self.assertEqual(parsed.pages[1].text, "")
         self.assertTrue(parsed.pages[1].ocr_image_content.startswith(b"\xff\xd8"))
+        self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_empty_password_encrypted_pdf_preserves_error_code(self):
+        source = self.root / "empty-password-encrypted.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text(
+            (72, 72),
+            "Research 1234567890 ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        )
+        document.save(
+            source,
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="owner-secret",
+            user_pw="",
+        )
+        document.close()
+        os.chmod(source, 0o600)
+        payload = source.read_bytes()
+        downloaded = DownloadedAttachment(
+            attachment_id="research-encrypted-integration",
+            analysis_attempt_id="research-encrypted-attempt",
+            file_type="pdf",
+            filename="encrypted.pdf",
+            mime_type="application/pdf",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=1,
+            path=source,
+            document_version=10,
+        )
+        label = "integration-research-encrypted"
+        sandbox_root = self.root / "sandbox-research-encrypted"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: label,
+        )
+
+        with self.assertRaises(AttachmentParserError) as raised:
+            await sandbox.parse(downloaded, profile="research_pdf_v1")
+
+        self.assertEqual(
+            raised.exception.error_code,
+            "RESEARCH_PDF_ENCRYPTED",
+        )
         self.assertEqual(self._containers_for_label(label), ())
         self.assertEqual(list(sandbox_root.iterdir()), [])
 

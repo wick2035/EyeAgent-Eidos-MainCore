@@ -107,18 +107,25 @@ def extract_research_pdf_path_strict(
     try:
         document = fitz.open(filename=str(source_real), filetype="pdf")
     except Exception as exc:
-        raise StrictPdfError("PDF_INVALID") from exc
+        raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
 
     created: list[Path] = []
     try:
-        if bool(getattr(document, "needs_pass", False)):
-            raise StrictPdfError("PDF_ENCRYPTED")
+        try:
+            if _research_pdf_is_encrypted(document):
+                raise StrictPdfError("RESEARCH_PDF_ENCRYPTED")
+            if bool(getattr(document, "is_repaired", False)):
+                raise StrictPdfError("RESEARCH_PDF_INVALID")
+        except StrictPdfError:
+            raise
+        except Exception as exc:
+            raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
         try:
             page_count = len(document)
         except Exception as exc:
-            raise StrictPdfError("PDF_INVALID") from exc
+            raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
         if page_count == 0:
-            raise StrictPdfError("PDF_EMPTY")
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
         if page_count > RESEARCH_PDF_MAX_PAGES:
             raise StrictPdfError("RESEARCH_PDF_PAGE_LIMIT")
         if (
@@ -139,14 +146,14 @@ def extract_research_pdf_path_strict(
                 width = float(page.rect.width)
                 height = float(page.rect.height)
             except Exception as exc:
-                raise StrictPdfError("PDF_INVALID") from exc
+                raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
             if (
                 not math.isfinite(width)
                 or not math.isfinite(height)
                 or width <= 0
                 or height <= 0
             ):
-                raise StrictPdfError("PDF_PAGE_GEOMETRY_INVALID")
+                raise StrictPdfError("RESEARCH_PDF_INVALID")
             pixel_width = math.ceil(width * scale)
             pixel_height = math.ceil(height * scale)
             page_pixels = pixel_width * pixel_height
@@ -160,7 +167,7 @@ def extract_research_pdf_path_strict(
             except StrictPdfError:
                 raise
             except Exception as exc:
-                raise StrictPdfError("RESEARCH_PDF_TEXT_EXTRACTION_FAILED") from exc
+                raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
             if len(text_bytes) > RESEARCH_PDF_MAX_TEXT_BYTES_PER_PAGE:
                 raise StrictPdfError("RESEARCH_PDF_TEXT_LIMIT")
             total_text_bytes += len(text_bytes)
@@ -199,14 +206,20 @@ def extract_research_pdf_path_strict(
                     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
                     rendered_pixels = int(pixmap.width) * int(pixmap.height)
                     if rendered_pixels <= 0:
-                        raise StrictPdfError("PDF_PAGE_GEOMETRY_INVALID")
+                        raise StrictPdfError("RESEARCH_PDF_INVALID")
                     if rendered_pixels > RESEARCH_PDF_MAX_PAGE_PIXELS:
                         raise StrictPdfError("PDF_PAGE_PIXEL_LIMIT")
                     image_bytes = pixmap.tobytes("jpeg")
+                    if (
+                        len(image_bytes) < 5
+                        or not image_bytes.startswith(b"\xff\xd8\xff")
+                        or not image_bytes.endswith(b"\xff\xd9")
+                    ):
+                        raise StrictPdfError("RESEARCH_PDF_INVALID")
                 except StrictPdfError:
                     raise
                 except Exception as exc:
-                    raise StrictPdfError("PDF_RENDER_FAILED") from exc
+                    raise StrictPdfError("RESEARCH_PDF_INVALID") from exc
                 total_output_bytes += len(image_bytes)
                 if (
                     len(image_bytes) > RESEARCH_PDF_MAX_OUTPUT_BYTES
@@ -245,16 +258,16 @@ def extract_research_pdf_path_strict(
 
 def _normalize_research_pdf_blocks(blocks: object) -> str:
     if not isinstance(blocks, (list, tuple)):
-        raise StrictPdfError("RESEARCH_PDF_TEXT_EXTRACTION_FAILED")
+        raise StrictPdfError("RESEARCH_PDF_INVALID")
     normalized_blocks: list[str] = []
     for block in blocks:
         if not isinstance(block, (list, tuple)) or len(block) < 5:
-            raise StrictPdfError("RESEARCH_PDF_TEXT_EXTRACTION_FAILED")
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
         if len(block) >= 7 and block[6] != 0:
             continue
         raw_text = block[4]
         if not isinstance(raw_text, str):
-            raise StrictPdfError("RESEARCH_PDF_TEXT_EXTRACTION_FAILED")
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
         normalized_lines = [
             " ".join(line.split())
             for line in unicodedata.normalize("NFC", raw_text)
@@ -266,6 +279,45 @@ def _normalize_research_pdf_blocks(blocks: object) -> str:
         if normalized:
             normalized_blocks.append(normalized)
     return "\n\n".join(normalized_blocks)
+
+
+def _research_pdf_is_encrypted(document: object) -> bool:
+    if bool(getattr(document, "needs_pass", False)) or bool(
+        getattr(document, "is_encrypted", False)
+    ):
+        return True
+
+    metadata = getattr(document, "metadata", None)
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
+        encryption = metadata.get("encryption")
+        if encryption is not None and str(encryption).strip().lower() not in {
+            "",
+            "none",
+            "null",
+        }:
+            return True
+
+    xref_get_key = getattr(document, "xref_get_key", None)
+    if callable(xref_get_key):
+        key = xref_get_key(-1, "Encrypt")
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
+        key_type, key_value = key
+        if str(key_type).lower() not in {"null", "none"} or str(
+            key_value
+        ).lower() not in {"null", "none", ""}:
+            return True
+
+    pdf_trailer = getattr(document, "pdf_trailer", None)
+    if callable(pdf_trailer):
+        trailer = pdf_trailer()
+        if not isinstance(trailer, str):
+            raise StrictPdfError("RESEARCH_PDF_INVALID")
+        if re.search(r"/Encrypt(?:\s|[/<])", trailer):
+            return True
+    return False
 
 
 def _write_private_research_artifact(path: Path, content: bytes) -> None:

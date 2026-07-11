@@ -156,11 +156,14 @@ def _parse_research_pdf(
     input_path: Path,
     output_root: Path,
 ) -> ResearchPdfManifest:
+    declared_page_count = request.declared_page_count
+    if type(declared_page_count) is not int:
+        raise AttachmentParserError("ATTACHMENT_PAGE_COUNT_INVALID")
     try:
         extracted_pages = extract_research_pdf_path_strict(
             input_path,
             output_root,
-            declared_page_count=int(request.declared_page_count),
+            declared_page_count=declared_page_count,
         )
     except StrictPdfError as exc:
         raise AttachmentParserError(exc.error_code) from exc

@@ -100,6 +100,35 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
 
         self._assert_no_request_directories()
 
+    async def test_downloader_rejects_non_integer_document_version_before_request(self):
+        requested = []
+
+        async def handler(_request):
+            requested.append(True)
+            return web.Response(body=_PNG, content_type="image/png")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port), temp_root=self.temp_root
+        )
+        descriptor = _descriptor(
+            f"http://storage.test:{port}/download"
+        ).model_dump()
+        descriptor["document_version"] = True
+
+        with self.assertRaisesRegex(
+            AttachmentDownloadError,
+            "ATTACHMENT_DESCRIPTOR_INVALID",
+        ):
+            async with downloader.download_all(
+                [descriptor],
+                "request-invalid-document-version",
+            ):
+                self.fail("invalid document version must fail before yielding")
+
+        self.assertEqual(requested, [])
+        self._assert_no_request_directories()
+
     async def test_multiple_exact_ips_for_one_endpoint_are_all_allowlisted(self):
         async def handler(_request):
             return web.Response(body=_PNG, content_type="image/png")

@@ -318,6 +318,28 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     InternalAttachmentDescriptor(**payload)
 
+    def test_internal_descriptor_integer_identity_fields_are_strict(self):
+        base = valid_descriptor(
+            file_type="pdf",
+            filename="paper.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            page_count=1,
+            document_version=1,
+        )
+        for field_name in ("size_bytes", "page_count", "document_version"):
+            for invalid_value in (True, False, "1", 1.0, 0, -1):
+                with self.subTest(
+                    field_name=field_name,
+                    invalid_value=repr(invalid_value),
+                ):
+                    payload = dict(base)
+                    payload[field_name] = invalid_value
+                    with self.assertRaises(ValidationError):
+                        InternalAttachmentDescriptor.model_validate_json(
+                            json.dumps(payload)
+                        )
+
     def test_pdf_descriptor_schema_allows_up_to_one_hundred_pages(self):
         descriptor = InternalAttachmentDescriptor(
             **valid_descriptor(
