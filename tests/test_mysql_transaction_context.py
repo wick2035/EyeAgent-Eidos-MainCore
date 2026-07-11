@@ -18,6 +18,13 @@ class FakeCursor:
             raise pymysql.err.OperationalError(1213, "deadlock found")
         return 1
 
+    def executemany(self, sql, params_list):
+        params = list(params_list)
+        self.connection.statements.append((sql, params))
+        if sql == "FAIL_MANY":
+            raise RuntimeError("segment batch failed")
+        return len(params)
+
     def close(self):
         self.closed = True
 
@@ -134,6 +141,22 @@ class MySQLTransactionContextTest(unittest.TestCase):
         ])
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
+
+    def test_batch_write_reuses_transaction_and_commits_with_state_update(self):
+        connection = FakeConnection()
+        db = FakeMySQLConnectionPool(connection)
+
+        with db.transaction():
+            db.execute_many("INSERT_SEGMENTS", [("segment-1",), ("segment-2",)])
+            db.execute("MARK_READY", ("ingestion-1", 2))
+
+        self.assertEqual(connection.statements, [
+            ("INSERT_SEGMENTS", [("segment-1",), ("segment-2",)]),
+            ("MARK_READY", ("ingestion-1", 2)),
+        ])
+        self.assertEqual(db.connection_calls, 1)
+        self.assertEqual(connection.commit_calls, 1)
+        self.assertEqual(connection.rollback_calls, 0)
 
 
 if __name__ == "__main__":

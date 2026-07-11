@@ -15,6 +15,7 @@ class ChatTurnRequestEntity(BaseModel):
     agent_type: str = "health"
     attachment_scope: str = "patient"
     research_options_json: Optional[str] = None
+    ingestion_ids_json: Optional[str] = None
     operation: str
     conversation_id: str
     session_id: str
@@ -35,7 +36,9 @@ class ChatTurnRequestEntity(BaseModel):
     @property
     def attachment_ids(self) -> list[str]:
         value = json.loads(self.attachment_ids_json)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
             raise ValueError("attachment_ids_json 必须是字符串数组")
         return value
 
@@ -53,4 +56,13 @@ class ChatTurnRequestEntity(BaseModel):
         value = json.loads(self.research_options_json)
         if not isinstance(value, dict):
             raise ValueError("research_options_json 必须是对象")
+        return value
+
+    @property
+    def ingestion_ids(self) -> list[str]:
+        if self.ingestion_ids_json is None:
+            return []
+        value = json.loads(self.ingestion_ids_json)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError("ingestion_ids_json 必须是字符串数组")
         return value

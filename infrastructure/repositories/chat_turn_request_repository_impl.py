@@ -22,6 +22,7 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
     _SELECT_COLUMNS = """
         doctor_id, request_id, request_fingerprint, operation,
         protocol_version, agent_type, attachment_scope, research_options_json,
+        ingestion_ids_json,
         conversation_id, session_id, patient_id, source_message_id,
         implicit_prompt_id, attachment_ids_json, user_message_id,
         assistant_message_id, previous_active_node_id, status, error_code,
@@ -67,7 +68,7 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             INSERT INTO chat_turn_request (
                 doctor_id, request_id, request_fingerprint, operation,
                 protocol_version, agent_type, attachment_scope,
-                research_options_json,
+                research_options_json, ingestion_ids_json,
                 conversation_id, session_id, patient_id, source_message_id,
                 implicit_prompt_id, attachment_ids_json, user_message_id,
                 assistant_message_id, previous_active_node_id, status, error_code,
@@ -75,7 +76,7 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s, %s
             )
         """
         params = (
@@ -87,6 +88,7 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             entity.agent_type,
             entity.attachment_scope,
             entity.research_options_json,
+            entity.ingestion_ids_json,
             entity.conversation_id,
             entity.session_id,
             entity.patient_id,
@@ -238,6 +240,16 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
             agent_type=row.get("agent_type", "health"),
             attachment_scope=row.get("attachment_scope", "patient"),
             research_options_json=row.get("research_options_json"),
+            ingestion_ids_json=(
+                row.get("ingestion_ids_json")
+                if isinstance(row.get("ingestion_ids_json"), str)
+                or row.get("ingestion_ids_json") is None
+                else json.dumps(
+                    row["ingestion_ids_json"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            ),
             operation=row["operation"],
             conversation_id=row["conversation_id"],
             session_id=row["session_id"],

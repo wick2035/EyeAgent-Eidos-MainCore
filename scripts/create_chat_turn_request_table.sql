@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS chat_turn_request (
     agent_type VARCHAR(16) NOT NULL DEFAULT 'health',
     attachment_scope VARCHAR(16) NOT NULL DEFAULT 'patient',
     research_options_json JSON NULL,
+    ingestion_ids_json JSON NULL,
     operation VARCHAR(20) NOT NULL,
     conversation_id VARCHAR(36) NOT NULL,
     session_id VARCHAR(64) NOT NULL,
