@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import inspect
 import math
@@ -124,7 +125,14 @@ class ResearchDocumentIngestionService:
     ) -> ResearchDocumentIngestionResult:
         items = _validate_metadata(doctor_id, downloaded)
         await self._validate_files(items, deadline)
-        identities = tuple(_build_identity(doctor_id, item) for item in items)
+        try:
+            identities = tuple(
+                _build_identity(doctor_id, item) for item in items
+            )
+        except Exception:
+            raise ResearchDocumentIngestionError(
+                "RESEARCH_DOCUMENT_INPUT_INVALID"
+            ) from None
         tasks = [
             asyncio.create_task(self._ingest_one(identity, item, deadline))
             for identity, item in zip(identities, items)
@@ -185,8 +193,8 @@ class ResearchDocumentIngestionService:
                 raise ResearchDocumentIngestionError(
                     "RESEARCH_DOCUMENT_INGESTION_FAILED"
                 )
-            entity = _validate_claim(identity, claim)
-            if claim.acquired:
+            entity, acquired = _validate_claim(identity, claim, now)
+            if acquired:
                 return await self._run_owner(identity, entity, item, deadline)
             if entity.status == "ready":
                 return _validate_ready(identity, entity, item)
@@ -372,7 +380,10 @@ def _validate_metadata(
     ):
         raise ResearchDocumentIngestionError("RESEARCH_DOCUMENT_INPUT_INVALID")
     attachment_ids = [item.attachment_id for item in items]
-    if any(not isinstance(value, str) or not value for value in attachment_ids):
+    if any(
+        not isinstance(value, str) or not 1 <= len(value) <= 64
+        for value in attachment_ids
+    ):
         raise ResearchDocumentIngestionError("RESEARCH_DOCUMENT_INPUT_INVALID")
     if len(set(attachment_ids)) != len(attachment_ids):
         raise ResearchDocumentIngestionError("RESEARCH_DOCUMENT_INPUT_INVALID")
@@ -438,20 +449,52 @@ def _build_identity(
     )
 
 
-def _validate_claim(identity: IngestionIdentity, claim: Any):
-    entity = getattr(claim, "entity", None)
+def _validate_claim(
+    identity: IngestionIdentity,
+    claim: Any,
+    claim_now: datetime,
+) -> tuple[ResearchDocumentIngestionEntity, bool]:
+    raw_entity = getattr(claim, "entity", None)
     acquired = getattr(claim, "acquired", None)
+    try:
+        entity = ResearchDocumentIngestionEntity.model_validate(
+            copy.deepcopy(raw_entity.model_dump(mode="python"))
+        )
+    except Exception:
+        raise ResearchDocumentIngestionError(
+            "RESEARCH_DOCUMENT_INGESTION_FAILED"
+        ) from None
     if (
         type(acquired) is not bool
-        or not isinstance(entity, ResearchDocumentIngestionEntity)
         or entity.identity != identity
         or entity.id != build_research_document_ingestion_id(identity)
-        or (acquired and entity.status != "processing")
+        or entity.status not in {"processing", "ready"}
     ):
         raise ResearchDocumentIngestionError(
             "RESEARCH_DOCUMENT_INGESTION_FAILED"
         )
-    return entity
+    if acquired and entity.status != "processing":
+        raise ResearchDocumentIngestionError(
+            "RESEARCH_DOCUMENT_INGESTION_FAILED"
+        )
+    if entity.status == "processing":
+        try:
+            valid_processing = (
+                entity.attempt_count >= 1
+                and entity.lease_expires_at is not None
+                and entity.lease_expires_at > claim_now
+                and entity.started_at is not None
+                and entity.page_count is None
+                and entity.error_code is None
+                and entity.completed_at is None
+            )
+        except (TypeError, ValueError):
+            valid_processing = False
+        if not valid_processing:
+            raise ResearchDocumentIngestionError(
+                "RESEARCH_DOCUMENT_INGESTION_FAILED"
+            )
+    return entity, acquired
 
 
 def _validate_ready(
@@ -459,22 +502,30 @@ def _validate_ready(
     entity: Any,
     item: DownloadedAttachment,
 ) -> ResearchDocumentIngestionEntity:
+    try:
+        rebuilt = ResearchDocumentIngestionEntity.model_validate(
+            copy.deepcopy(entity.model_dump(mode="python"))
+        )
+    except Exception:
+        raise ResearchDocumentIngestionError(
+            "RESEARCH_DOCUMENT_FENCING_FAILED"
+        ) from None
     expected_page_count = item.page_count if item.file_type == "pdf" else 0
     if (
-        not isinstance(entity, ResearchDocumentIngestionEntity)
-        or entity.identity != identity
-        or entity.id != build_research_document_ingestion_id(identity)
-        or entity.status != "ready"
-        or entity.page_count != expected_page_count
-        or entity.attempt_count < 1
-        or entity.lease_expires_at is not None
-        or entity.error_code is not None
-        or entity.completed_at is None
+        rebuilt.identity != identity
+        or rebuilt.id != build_research_document_ingestion_id(identity)
+        or rebuilt.status != "ready"
+        or rebuilt.page_count != expected_page_count
+        or rebuilt.attempt_count < 1
+        or rebuilt.lease_expires_at is not None
+        or rebuilt.error_code is not None
+        or rebuilt.started_at is None
+        or rebuilt.completed_at is None
     ):
         raise ResearchDocumentIngestionError(
             "RESEARCH_DOCUMENT_FENCING_FAILED"
         )
-    return entity
+    return rebuilt
 
 
 def _validate_files_on_disk(items: Sequence[DownloadedAttachment]) -> None:

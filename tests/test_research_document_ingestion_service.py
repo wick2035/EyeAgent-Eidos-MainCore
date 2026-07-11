@@ -391,6 +391,112 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("secret", repr(raised.exception))
 
+    async def test_malformed_acquired_claim_never_processes_completes_or_fails(self):
+        item = _downloaded(self.temp.name, "malformed-owner")
+        mutations = {
+            "zero_attempt": {"attempt_count": 0},
+            "missing_lease": {"lease_expires_at": None},
+            "expired_lease": {"lease_expires_at": datetime(2000, 1, 1)},
+            "missing_started": {"started_at": None},
+            "unexpected_page_count": {"page_count": 1},
+            "unexpected_error": {"error_code": "RESEARCH_DOCUMENT_FAILED"},
+            "unexpected_completed": {"completed_at": datetime.now()},
+        }
+
+        for name, updates in mutations.items():
+            with self.subTest(name=name):
+                processor = FakeProcessor()
+
+                class MalformedClaimRepository(FakeRepository):
+                    def claim(inner_self, identity, now, lease_until):
+                        inner_self.claim_calls.append((identity, now, lease_until))
+                        entity = _entity(identity, lease=lease_until)
+                        for field, value in updates.items():
+                            setattr(entity, field, value)
+                        return ResearchDocumentClaimResult(entity, True)
+
+                repository = MalformedClaimRepository()
+                service = ResearchDocumentIngestionService(
+                    repository=repository,
+                    processor=processor,
+                    poll_interval_seconds=0.001,
+                    renew_interval_seconds=0.01,
+                )
+
+                with self.assertRaises(ResearchDocumentIngestionError) as raised:
+                    await service.ingest("doctor-1", [item])
+
+                self.assertEqual(
+                    raised.exception.error_code,
+                    "RESEARCH_DOCUMENT_INGESTION_FAILED",
+                )
+                self.assertEqual(processor.calls, [])
+                self.assertEqual(repository.complete_calls, [])
+                self.assertEqual(repository.fail_calls, [])
+
+    async def test_malformed_processing_observer_and_ready_started_at_fail_closed(self):
+        item = _downloaded(self.temp.name, "malformed-observer")
+        identity = IngestionIdentity(
+            doctor_id="doctor-1",
+            attachment_id=item.attachment_id,
+            document_version=1,
+            content_sha256=item.content_sha256,
+            processor_type="image_vision_v1",
+            extractor_version=IMAGE_EXTRACTOR_VERSION,
+            segment_schema_version=SEGMENT_SCHEMA_VERSION,
+        )
+        malformed_processing = _entity(
+            identity,
+            lease=datetime.now() + timedelta(minutes=1),
+        )
+        malformed_processing.started_at = None
+        self.repo.records[identity] = malformed_processing
+
+        with self.assertRaises(ResearchDocumentIngestionError) as observer_error:
+            await self._service().ingest(
+                "doctor-1",
+                [item],
+                deadline=time.monotonic() + 0.02,
+            )
+
+        self.assertEqual(
+            observer_error.exception.error_code,
+            "RESEARCH_DOCUMENT_INGESTION_FAILED",
+        )
+        self.assertEqual(self.processor.calls, [])
+        self.assertEqual(self.repo.fail_calls, [])
+
+        ready = _entity(identity, status="ready")
+        ready.page_count = 0
+        ready.started_at = None
+        self.repo.records[identity] = ready
+        with self.assertRaises(ResearchDocumentIngestionError) as ready_error:
+            await self._service().ingest("doctor-1", [item])
+        self.assertEqual(
+            ready_error.exception.error_code,
+            "RESEARCH_DOCUMENT_FENCING_FAILED",
+        )
+        self.assertEqual(self.processor.calls, [])
+        self.assertEqual(self.repo.fail_calls, [])
+
+    async def test_attachment_id_boundary_and_identity_errors_are_stable(self):
+        valid = _downloaded(self.temp.name, "a" * 64)
+        result = await self._service().ingest("doctor-1", [valid])
+        self.assertEqual(len(result.entities), 1)
+
+        self.repo = FakeRepository()
+        self.processor = FakeProcessor()
+        invalid = _downloaded(self.temp.name, "b" * 65)
+        with self.assertRaises(ResearchDocumentIngestionError) as raised:
+            await self._service().ingest("doctor-1", [invalid])
+
+        self.assertEqual(
+            raised.exception.error_code,
+            "RESEARCH_DOCUMENT_INPUT_INVALID",
+        )
+        self.assertEqual(self.repo.claim_calls, [])
+        self.assertEqual(self.processor.calls, [])
+
     async def test_pdf_identity_uses_fixed_versions_and_failed_record_is_taken_over(self):
         item = _downloaded(
             self.temp.name,
