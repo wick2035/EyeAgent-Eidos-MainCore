@@ -55,6 +55,9 @@ _FORBIDDEN_PERSISTED_MARKERS = (
     "page_images",
     "storage_key",
     "untrusted_text",
+    "filename",
+    "file_name",
+    "original_name",
 )
 
 

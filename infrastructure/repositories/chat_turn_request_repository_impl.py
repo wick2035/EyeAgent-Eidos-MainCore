@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
 from application.repositories.chat_turn_request_repository import (
@@ -179,16 +179,25 @@ class ChatTurnRequestRepositoryImpl(ChatTurnRequestRepository):
         now: Optional[datetime] = None,
     ) -> list[ChatTurnRequestEntity]:
         now = now or datetime.now()
+        prepared_before = now - timedelta(minutes=10)
         rows = self.db.fetch_all(
             f"""
                 SELECT {self._SELECT_COLUMNS}
                 FROM chat_turn_request
-                WHERE status IN ('prepared', 'streaming')
-                  AND deadline_at IS NOT NULL
-                  AND deadline_at <= %s
-                ORDER BY deadline_at ASC
+                WHERE (
+                    status = 'prepared'
+                    AND create_time <= %s
+                ) OR (
+                    status = 'streaming'
+                    AND deadline_at IS NOT NULL
+                    AND deadline_at <= %s
+                )
+                ORDER BY CASE
+                    WHEN status = 'prepared' THEN create_time
+                    ELSE deadline_at
+                END ASC
             """,
-            (now,),
+            (prepared_before, now),
         )
         return [self._row_to_entity(row) for row in rows]
 

@@ -2,6 +2,7 @@
 FastAPI主应用 - 智能医疗咨询系统
 基于 LangGraph 架构
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -20,6 +21,7 @@ from presentation.exception_handlers.platform_validation_handler import (
     install_platform_validation_handler,
 )
 from presentation.middleware.internal_jwt_auth import install_internal_auth
+from application.services.chat_turn_watchdog import get_chat_turn_watchdog
 
 # 配置日志
 logging.basicConfig(
@@ -41,12 +43,41 @@ async def lifespan(app: FastAPI):
         logger.error(f"[Startup] 数据库连接池初始化失败: {e}")
         # 不阻止启动，让应用可以处理不需要数据库的请求
 
-    yield  # 应用运行中
+    watchdog_stop = asyncio.Event()
+    watchdog_task = None
+    try:
+        watchdog = get_chat_turn_watchdog()
+        watchdog_task = asyncio.create_task(
+            watchdog.run(watchdog_stop),
+            name="chat-turn-watchdog",
+        )
+        logger.info("[Startup] 附件回合 watchdog 已启动")
+    except Exception as error:
+        logger.error(
+            "[Startup] 附件回合 watchdog 启动失败: %s",
+            type(error).__name__,
+        )
 
-    # 关闭时：清理数据库连接池
-    logger.info("[Shutdown] 关闭数据库连接池...")
-    close_db_connection()
-    logger.info("[Shutdown] 数据库连接池已关闭")
+    try:
+        yield  # 应用运行中
+    finally:
+        try:
+            if watchdog_task is not None:
+                watchdog_stop.set()
+                try:
+                    await watchdog_task
+                except Exception as error:
+                    logger.error(
+                        "[Shutdown] 附件回合 watchdog 退出异常: %s",
+                        type(error).__name__,
+                    )
+                else:
+                    logger.info("[Shutdown] 附件回合 watchdog 已停止")
+        finally:
+            # Watchdog 异常或取消也不能跳过原有数据库清理。
+            logger.info("[Shutdown] 关闭数据库连接池...")
+            close_db_connection()
+            logger.info("[Shutdown] 数据库连接池已关闭")
 
 
 # 创建FastAPI应用
