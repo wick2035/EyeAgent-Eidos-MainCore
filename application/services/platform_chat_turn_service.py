@@ -75,6 +75,8 @@ class _TurnAuthoritySnapshot:
     patient_id: Optional[str]
     research_options: Optional[dict[str, Any]]
     attachment_ids: tuple[str, ...]
+    attachment_only: bool
+    implicit_prompt_id: Optional[str]
 
 
 class PlatformChatTurnService:
@@ -476,6 +478,12 @@ class PlatformChatTurnService:
         context_snapshot = self._parse_source_user_snapshot(source_user.context)
         if context_snapshot is None or source_turn is None:
             raise SourceTurnAuthorityError()
+        if (
+            not isinstance(source_user.message_content, str)
+            or (not bool(source_user.message_content))
+            != context_snapshot.attachment_only
+        ):
+            raise SourceTurnAuthorityError()
 
         authoritative = _TurnAuthoritySnapshot(
             protocol_version=context_snapshot.protocol_version,
@@ -484,6 +492,8 @@ class PlatformChatTurnService:
             patient_id=source_turn.patient_id,
             research_options=context_snapshot.research_options,
             attachment_ids=context_snapshot.attachment_ids,
+            attachment_only=context_snapshot.attachment_only,
+            implicit_prompt_id=context_snapshot.implicit_prompt_id,
         )
         if not self._source_turn_matches_snapshot(
             source_turn,
@@ -494,7 +504,16 @@ class PlatformChatTurnService:
             ),
         ):
             raise SourceTurnAuthorityError()
-        if authoritative != requested:
+        if not self._same_turn_configuration(authoritative, requested):
+            raise SourceTurnAuthorityError()
+        # edit_resend 按定义会产生新正文；regenerate 则必须逐字复用源问题，
+        # 并保持文字/纯附件模式与隐式提示三方一致。
+        if request.operation == "regenerate" and (
+            authoritative.attachment_only != requested.attachment_only
+            or authoritative.implicit_prompt_id
+            != requested.implicit_prompt_id
+            or source_user.message_content != request.message
+        ):
             raise SourceTurnAuthorityError()
         return authoritative
 
@@ -733,6 +752,12 @@ class PlatformChatTurnService:
             patient_id=None,
             research_options=canonical_options,
             attachment_ids=tuple(attachment_ids),
+            attachment_only=has_attachment_only,
+            implicit_prompt_id=(
+                metadata["implicit_prompt_id"]
+                if has_implicit_prompt
+                else None
+            ),
         )
 
     @staticmethod
@@ -759,6 +784,22 @@ class PlatformChatTurnService:
                 else None
             ),
             attachment_ids=tuple(request.attachment_ids),
+            attachment_only=request.attachment_only,
+            implicit_prompt_id=request.implicit_prompt_id,
+        )
+
+    @staticmethod
+    def _same_turn_configuration(
+        source: _TurnAuthoritySnapshot,
+        requested: _TurnAuthoritySnapshot,
+    ) -> bool:
+        return bool(
+            source.protocol_version == requested.protocol_version
+            and source.agent_type == requested.agent_type
+            and source.attachment_scope == requested.attachment_scope
+            and source.patient_id == requested.patient_id
+            and source.research_options == requested.research_options
+            and source.attachment_ids == requested.attachment_ids
         )
 
     @staticmethod
@@ -789,6 +830,9 @@ class PlatformChatTurnService:
                 and source_turn.patient_id == snapshot.patient_id
                 and source_turn.research_options == snapshot.research_options
                 and tuple(source_turn.attachment_ids) == snapshot.attachment_ids
+                and source_turn.attachment_only == snapshot.attachment_only
+                and source_turn.implicit_prompt_id
+                == snapshot.implicit_prompt_id
                 and (
                     snapshot.agent_type != "research"
                     or snapshot.patient_id is None

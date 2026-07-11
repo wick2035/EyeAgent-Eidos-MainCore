@@ -223,6 +223,80 @@ class CitationMergeAndHistoryTest(unittest.TestCase):
 
 
 class GraphManagerAttachmentCitationTest(unittest.IsolatedAsyncioTestCase):
+    async def _stream_prepared(
+        self,
+        candidates,
+        stream_events,
+        *,
+        safe_attachment_refs,
+    ):
+        candidate_ids = tuple(candidate.segment_id for candidate in candidates)
+        context = TransientResearchDocumentContext(
+            implicit_prompt_id=None,
+            selection=ResearchDocumentContextSelection(
+                context_blocks=(
+                    ResearchContextBlock(
+                        content="受控科研上下文",
+                        supporting_segment_ids=candidate_ids,
+                        estimated_tokens=10,
+                    ),
+                ),
+                citation_candidates=tuple(candidates),
+                mode="focused",
+                estimated_tokens=10,
+            ),
+        )
+
+        class Checkpointer:
+            @staticmethod
+            def save_thread_mapping(**_kwargs):
+                return True
+
+        class StreamingGraph:
+            async def astream_events(self, _state, config, version):
+                for event in stream_events:
+                    yield event
+
+            @staticmethod
+            def get_state(_config):
+                return SimpleNamespace(values={})
+
+        manager = object.__new__(GraphManager)
+        manager.checkpointer = Checkpointer()
+        manager._build_branch_history_messages = lambda **_kwargs: []
+        manager._get_state_message_count = lambda *_args: 0
+        config = {"configurable": {}}
+        binding = bind_research_document_context(context, config)
+        try:
+            with patch(
+                "agents.graph.graph_builder.get_streaming_medical_graph",
+                return_value=StreamingGraph(),
+            ):
+                return [
+                    event
+                    async for event in manager.chat_stream_prepared_async(
+                        patient_id=None,
+                        doctor_id="11111111-1111-4111-8111-111111111111",
+                        session_id="session-1",
+                        conversation_id="conversation-1",
+                        message="请分析",
+                        user_message_id="user-1",
+                        assistant_message_id="assistant-1",
+                        safe_attachment_refs=safe_attachment_refs,
+                        agent_type="research",
+                        research_options={
+                            "enable_institution_data": False,
+                            "enable_web_search": True,
+                            "types": ["general"],
+                        },
+                        health_handle=None,
+                        research_handle=binding.handle,
+                        runnable_config=config,
+                    )
+                ]
+        finally:
+            reset_research_document_context(binding, config)
+
     async def test_only_exact_tool_maps_current_transient_candidates(self):
         page = _candidate("segment-page")
         file = _candidate(
@@ -322,6 +396,197 @@ class GraphManagerAttachmentCitationTest(unittest.IsolatedAsyncioTestCase):
             ["segment-page"],
         )
         self.assertNotIn("segment-file", json.dumps(terminal.citations))
+
+    async def test_invalid_exact_tool_does_not_silently_trigger_fallback(self):
+        candidates = (
+            _candidate("segment-a"),
+            _candidate("segment-b"),
+        )
+
+        events = await self._stream_prepared(
+            candidates,
+            (
+                {
+                    "event": "on_tool_end",
+                    "name": CITATION_TOOL_NAME,
+                    "data": {"output": {"segment_ids": ["unknown"]}},
+                },
+                {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="安全回答")},
+                },
+            ),
+            safe_attachment_refs=[
+                {
+                    "attachment_id": "attachment-1",
+                    "document_version": 3,
+                    "content_sha256": "a" * 64,
+                    "page_count": 1,
+                }
+            ],
+        )
+
+        terminal = events[-1]
+        self.assertIsInstance(terminal, PreparedGraphTerminal)
+        self.assertEqual(terminal.citations, [])
+
+    async def test_no_tool_uses_stable_server_fallback_and_keeps_web_merge(self):
+        private_tail = "PRIVATE_DOCUMENT_BODY_URL_HANDLE"
+        first_attachment = tuple(
+            _candidate(
+                f"segment-page-{index}",
+                attachment_id="attachment-pdf",
+                page_start=index + 1,
+                page_end=index + 1,
+                content=(
+                    "受控 PDF 摘录 " + "证" * 310 + private_tail
+                    if index == 0
+                    else f"PDF 证据 {index}"
+                ),
+            )
+            for index in range(6)
+        )
+        second_attachment = tuple(
+            _candidate(
+                f"segment-image-{index}",
+                attachment_id="attachment-image",
+                page_start=None,
+                page_end=None,
+                content=f"图片证据 {index}",
+            )
+            for index in range(6)
+        )
+        candidates = (*first_attachment, *second_attachment)
+        events = await self._stream_prepared(
+            candidates,
+            (
+                {
+                    "event": "on_tool_end",
+                    "name": "web_search_medical",
+                    "data": {
+                        "output": {
+                            "results": [
+                                {
+                                    "title": "公开网页",
+                                    "url": "https://example.com/evidence",
+                                    "snippet": "网页证据",
+                                }
+                            ]
+                        }
+                    },
+                },
+                {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=(
+                                "模型自由文本伪造 segment-forged、page 999、"
+                                "https://private.invalid/handle"
+                            )
+                        )
+                    },
+                },
+            ),
+            safe_attachment_refs=[
+                {
+                    "attachment_id": "attachment-pdf",
+                    "document_version": 3,
+                    "content_sha256": "a" * 64,
+                    "page_count": 6,
+                },
+                {
+                    "attachment_id": "attachment-image",
+                    "document_version": 3,
+                    "content_sha256": "b" * 64,
+                    "page_count": 0,
+                },
+            ],
+        )
+
+        terminal = events[-1]
+        self.assertIsInstance(terminal, PreparedGraphTerminal)
+        self.assertEqual(terminal.citations[0]["title"], "公开网页")
+        attachment = [
+            item
+            for item in terminal.citations
+            if item.get("source_type") == "attachment"
+        ]
+        self.assertEqual(len(attachment), 10)
+        self.assertEqual(
+            [item["segment_id"] for item in attachment[:4]],
+            [
+                "segment-page-0",
+                "segment-image-0",
+                "segment-page-1",
+                "segment-page-2",
+            ],
+        )
+        self.assertEqual(
+            attachment[0]["locator"],
+            {"type": "page", "page_start": 1, "page_end": 1},
+        )
+        self.assertEqual(attachment[1]["locator"], {"type": "file"})
+        serialized = json.dumps(attachment, ensure_ascii=False)
+        self.assertNotIn("segment-forged", serialized)
+        self.assertNotIn("page 999", serialized)
+        self.assertNotIn("private.invalid", serialized)
+        self.assertNotIn(private_tail, serialized)
+
+    async def test_fallback_rejects_too_many_attachments_and_invalid_candidate(self):
+        stream_events = (
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": SimpleNamespace(content="安全回答")},
+            },
+        )
+        too_many = tuple(
+            _candidate(
+                f"segment-{index}",
+                attachment_id=f"attachment-{index}",
+            )
+            for index in range(11)
+        )
+        invalid = (
+            _candidate(
+                "segment-invalid",
+                attachment_id="attachment-invalid",
+                page_start=3,
+                page_end=2,
+            ),
+        )
+        cases = (
+            (
+                too_many,
+                [
+                    {
+                        "attachment_id": f"attachment-{index}",
+                        "document_version": 3,
+                        "content_sha256": f"{index % 10}" * 64,
+                        "page_count": 1,
+                    }
+                    for index in range(11)
+                ],
+            ),
+            (
+                invalid,
+                [
+                    {
+                        "attachment_id": "attachment-invalid",
+                        "document_version": 3,
+                        "content_sha256": "c" * 64,
+                        "page_count": 3,
+                    }
+                ],
+            ),
+        )
+        for candidates, safe_refs in cases:
+            with self.subTest(candidate_count=len(candidates)):
+                with self.assertRaises(ValueError):
+                    await self._stream_prepared(
+                        candidates,
+                        stream_events,
+                        safe_attachment_refs=safe_refs,
+                    )
 
 
 if __name__ == "__main__":

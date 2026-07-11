@@ -843,6 +843,169 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
             "research-document-analysis-v1",
         )
 
+    def test_failed_regenerate_rejects_prompt_and_message_authority_drift(self):
+        def drop_context_attachment_mode(source):
+            user = self.message_repo.get_by_id(source.user_message_id)
+            context = json.loads(user.context)
+            metadata = next(
+                item["metadata"] for item in context if "metadata" in item
+            )
+            metadata.pop("attachment_only")
+            metadata.pop("implicit_prompt_id")
+            user.context = json.dumps(context, ensure_ascii=False)
+
+        def drop_turn_implicit_prompt(source):
+            source.implicit_prompt_id = None
+
+        def replace_source_user_with_text(source):
+            self.message_repo.get_by_id(source.user_message_id).message_content = (
+                "被篡改的源问题"
+            )
+
+        def mark_text_context_as_attachment_only(source):
+            user = self.message_repo.get_by_id(source.user_message_id)
+            context = json.loads(user.context)
+            metadata = next(
+                item["metadata"] for item in context if "metadata" in item
+            )
+            metadata.update(
+                {
+                    "attachment_only": True,
+                    "implicit_prompt_id": "research-document-analysis-v1",
+                }
+            )
+            user.context = json.dumps(context, ensure_ascii=False)
+
+        cases = (
+            {
+                "name": "context_drops_attachment_mode",
+                "source_message": "",
+                "source_prompt": "research-document-analysis-v1",
+                "request_message": "",
+                "request_prompt": "research-document-analysis-v1",
+                "mutate": drop_context_attachment_mode,
+            },
+            {
+                "name": "turn_drops_implicit_prompt",
+                "source_message": "",
+                "source_prompt": "research-document-analysis-v1",
+                "request_message": "",
+                "request_prompt": "research-document-analysis-v1",
+                "mutate": drop_turn_implicit_prompt,
+            },
+            {
+                "name": "source_user_becomes_text",
+                "source_message": "",
+                "source_prompt": "research-document-analysis-v1",
+                "request_message": "",
+                "request_prompt": "research-document-analysis-v1",
+                "mutate": replace_source_user_with_text,
+            },
+            {
+                "name": "request_turns_attachment_into_text",
+                "source_message": "",
+                "source_prompt": "research-document-analysis-v1",
+                "request_message": "新文字问题",
+                "request_prompt": None,
+                "mutate": lambda _source: None,
+            },
+            {
+                "name": "request_replaces_source_text",
+                "source_message": "原始科研问题",
+                "source_prompt": None,
+                "request_message": "替换后的科研问题",
+                "request_prompt": None,
+                "mutate": lambda _source: None,
+            },
+            {
+                "name": "request_turns_text_into_attachment_only",
+                "source_message": "原始科研问题",
+                "source_prompt": None,
+                "request_message": "",
+                "request_prompt": "research-document-analysis-v1",
+                "mutate": lambda _source: None,
+            },
+            {
+                "name": "text_context_claims_attachment_only",
+                "source_message": "原始科研问题",
+                "source_prompt": None,
+                "request_message": "原始科研问题",
+                "request_prompt": None,
+                "mutate": mark_text_context_as_attachment_only,
+            },
+        )
+        for index, case in enumerate(cases):
+            with self.subTest(case=case["name"]):
+                self.setUp()
+                source = self._fail_source_turn(
+                    self._research_request(
+                        request_id=f"request-authority-source-{index}",
+                        message=case["source_message"],
+                        implicit_prompt_id=case["source_prompt"],
+                    )
+                )
+                case["mutate"](source)
+                branch = self._research_request(
+                    request_id=f"request-authority-branch-{index}",
+                    operation="regenerate",
+                    source_message_id=source.assistant_message_id,
+                    message=case["request_message"],
+                    implicit_prompt_id=case["request_prompt"],
+                )
+
+                self._assert_prepare_rejected_without_mutation(branch)
+
+    def test_edit_preserves_legitimate_text_and_attachment_only_transitions(self):
+        cases = (
+            {
+                "name": "attachment_only_to_text",
+                "source_message": "",
+                "source_prompt": "research-document-analysis-v1",
+                "edited_message": "编辑后的科研问题",
+                "edited_prompt": None,
+            },
+            {
+                "name": "text_to_attachment_only",
+                "source_message": "原始科研问题",
+                "source_prompt": None,
+                "edited_message": "",
+                "edited_prompt": "research-document-analysis-v1",
+            },
+        )
+        for index, case in enumerate(cases):
+            with self.subTest(case=case["name"]):
+                self.setUp()
+                source = self._complete_source_turn(
+                    self._research_request(
+                        request_id=f"request-edit-mode-source-{index}",
+                        message=case["source_message"],
+                        implicit_prompt_id=case["source_prompt"],
+                    )
+                )
+                branch = self._research_request(
+                    request_id=f"request-edit-mode-branch-{index}",
+                    operation="edit_resend",
+                    source_message_id=source.user_message_id,
+                    message=case["edited_message"],
+                    implicit_prompt_id=case["edited_prompt"],
+                )
+
+                response = self.service.prepare(branch)
+
+                self.assertEqual(response.status, "prepared")
+                self.assertEqual(
+                    response.attachment_only,
+                    not bool(case["edited_message"]),
+                )
+                self.assertEqual(
+                    response.implicit_prompt_id,
+                    case["edited_prompt"],
+                )
+                turn = self._stored_turn(branch.request_id)
+                user = self.message_repo.get_by_id(turn.user_message_id)
+                self.assertEqual(user.message_content, case["edited_message"])
+                self.assertEqual(turn.implicit_prompt_id, case["edited_prompt"])
+
     def test_failed_regenerate_requires_exact_message_turn_pair(self):
         def isolated_failed_assistant(source):
             self.turn_repo.items.pop(("doctor-1", source.request_id))

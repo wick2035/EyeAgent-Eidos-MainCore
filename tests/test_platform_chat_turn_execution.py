@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agents.graph_manager import PreparedGraphTerminal
+from agents.graph_manager import GraphManager, PreparedGraphTerminal
 from application.services.research_document_context_selector import (
+    ResearchCitationCandidate,
     ResearchContextBlock,
     ResearchDocumentContextSelection,
 )
@@ -1284,6 +1285,154 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(persisted, ensure_ascii=False).lower()
         self.assertNotIn("filename", serialized)
         self.assertNotIn("url", serialized)
+
+    async def test_research_no_tool_fallback_reaches_done_and_history(self):
+        request = execute_request(
+            "research-fallback-e2e",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+            attachments=[
+                {
+                    "attachment_id": "attachment-pdf-e2e",
+                    "file_type": "pdf",
+                    "filename": "private-report.pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 256,
+                    "page_count": 2,
+                    "content_sha256": "c" * 64,
+                    "document_version": 4,
+                    "analysis_attempt_id": "attempt-pdf-e2e",
+                    "download_url": "https://storage.example/private-pdf",
+                },
+                {
+                    "attachment_id": "attachment-image-e2e",
+                    "file_type": "image",
+                    "filename": "private-image.png",
+                    "mime_type": "image/png",
+                    "size_bytes": 128,
+                    "page_count": None,
+                    "content_sha256": "d" * 64,
+                    "document_version": 5,
+                    "analysis_attempt_id": "attempt-image-e2e",
+                    "download_url": "https://storage.example/private-image",
+                },
+            ],
+        )
+        candidates = (
+            ResearchCitationCandidate(
+                segment_id="segment-pdf-e2e",
+                ingestion_id="ingestion-attachment-pdf-e2e",
+                attachment_id="attachment-pdf-e2e",
+                document_version=4,
+                page_start=2,
+                page_end=2,
+                content="PDF 受控摘录",
+                token_count=10,
+            ),
+            ResearchCitationCandidate(
+                segment_id="segment-image-e2e",
+                ingestion_id="ingestion-attachment-image-e2e",
+                attachment_id="attachment-image-e2e",
+                document_version=5,
+                page_start=None,
+                page_end=None,
+                content="图片受控摘录",
+                token_count=10,
+            ),
+        )
+        selection = ResearchDocumentContextSelection(
+            context_blocks=(
+                ResearchContextBlock(
+                    content="PRIVATE_FULL_DOCUMENT_BODY",
+                    supporting_segment_ids=tuple(
+                        candidate.segment_id for candidate in candidates
+                    ),
+                    estimated_tokens=10,
+                ),
+            ),
+            citation_candidates=candidates,
+            mode="focused",
+            estimated_tokens=10,
+        )
+
+        class StaticSelector:
+            async def select(self, *_args, **_kwargs):
+                return selection
+
+        class Checkpointer:
+            @staticmethod
+            def save_thread_mapping(**_kwargs):
+                return True
+
+        class StreamingGraph:
+            async def astream_events(self, _state, config, version):
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="科研回答")},
+                }
+
+            @staticmethod
+            def get_state(_config):
+                return SimpleNamespace(values={})
+
+        manager = object.__new__(GraphManager)
+        manager.checkpointer = Checkpointer()
+        manager._build_branch_history_messages = lambda **_kwargs: []
+        manager._get_state_message_count = lambda *_args: 0
+        service, _, messages, _, _ = make_service(
+            [request],
+            graph=manager,
+            research_selector=StaticSelector(),
+        )
+
+        with patch(
+            "agents.graph.graph_builder.get_streaming_medical_graph",
+            return_value=StreamingGraph(),
+        ), patch(
+            "utils.role_verification.verify_role",
+            return_value=("doctor", False),
+        ):
+            events = await collect(
+                service.stream(request, principal(scopes={"ai:research"}))
+            )
+
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(
+            [item["segment_id"] for item in events[-1]["citations"]],
+            ["segment-pdf-e2e", "segment-image-e2e"],
+        )
+        self.assertEqual(
+            events[-1]["citations"][0]["locator"],
+            {"type": "page", "page_start": 2, "page_end": 2},
+        )
+        self.assertEqual(
+            events[-1]["citations"][1]["locator"],
+            {"type": "file"},
+        )
+        history = MessageContext.from_context_list(
+            json.loads(messages.get_by_id(request.assistant_message_id).context)
+        )
+        self.assertEqual(history.citations, events[-1]["citations"])
+        public_and_history = json.dumps(
+            {"events": events, "history": history.to_context_list()},
+            ensure_ascii=False,
+        )
+        for forbidden in (
+            "PRIVATE_FULL_DOCUMENT_BODY",
+            "private-report.pdf",
+            "private-image.png",
+            "download_url",
+            "storage.example",
+            "research_document_context_handle",
+        ):
+            self.assertNotIn(forbidden, public_and_history)
 
     async def test_finalize_race_restores_citations_from_persisted_assistant(self):
         persisted_citation = {

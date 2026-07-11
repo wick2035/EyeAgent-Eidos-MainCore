@@ -14,6 +14,7 @@ from agents.graph.nodes.report_node import _prepare_report
 from agents.graph.state import create_initial_state
 from agents.tools.agent_tools import AGENT_1_TOOLS
 from application.services.research_document_context_selector import (
+    ResearchCitationCandidate,
     ResearchContextBlock,
     ResearchDocumentContextSelection,
 )
@@ -248,7 +249,18 @@ class GraphManagerPreparedResearchTest(unittest.IsolatedAsyncioTestCase):
                         estimated_tokens=10,
                     ),
                 ),
-                citation_candidates=(),
+                citation_candidates=(
+                    ResearchCitationCandidate(
+                        segment_id="segment-1",
+                        ingestion_id="ingestion-1",
+                        attachment_id="attachment-1",
+                        document_version=1,
+                        page_start=None,
+                        page_end=None,
+                        content="受控引用片段",
+                        token_count=10,
+                    ),
+                ),
                 mode="focused",
                 estimated_tokens=10,
             ),

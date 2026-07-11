@@ -101,18 +101,47 @@ def build_attachment_citations(
 
     citations: list[dict[str, Any]] = []
     for segment_id in selection.segment_ids:
-        candidate = candidate_by_id[segment_id]
-        locator = _build_locator(candidate)
-        citation = AttachmentCitation(
-            source_type="attachment",
-            attachment_id=candidate.attachment_id,
-            document_version=candidate.document_version,
-            segment_id=candidate.segment_id,
-            locator=locator,
-            excerpt=_normalize_excerpt(candidate.content),
+        citations.append(
+            _build_attachment_citation(candidate_by_id[segment_id])
         )
-        citations.append(citation.model_dump(mode="json"))
     return citations
+
+
+def build_attachment_citation_fallback(
+    candidates: Iterable[ResearchCitationCandidate],
+) -> list[dict[str, Any]]:
+    """按服务端候选顺序构建每附件优先的确定性 provenance。"""
+
+    candidate_tuple = tuple(candidates)
+    candidate_by_id = _candidate_map(candidate_tuple)
+    if not candidate_by_id:
+        raise ValueError("citation candidates 不能为空")
+
+    # fallback 是服务端 provenance，必须先验证整个候选集合；不能只验证最终
+    # 选中的前 10 条，否则尾部损坏候选会被静默掩盖。
+    for candidate in candidate_tuple:
+        _build_attachment_citation(candidate)
+
+    first_per_attachment: list[str] = []
+    seen_attachments: set[str] = set()
+    for candidate in candidate_tuple:
+        if candidate.attachment_id in seen_attachments:
+            continue
+        seen_attachments.add(candidate.attachment_id)
+        if len(seen_attachments) > MAX_ATTACHMENT_CITATIONS:
+            raise ValueError("附件数量超过 citation 上限")
+        first_per_attachment.append(candidate.segment_id)
+
+    selected_ids = list(first_per_attachment)
+    selected = set(selected_ids)
+    for candidate in candidate_tuple:
+        if len(selected_ids) >= MAX_ATTACHMENT_CITATIONS:
+            break
+        if candidate.segment_id in selected:
+            continue
+        selected.add(candidate.segment_id)
+        selected_ids.append(candidate.segment_id)
+    return build_attachment_citations(selected_ids, candidate_tuple)
 
 
 def extract_attachment_citations_from_tool_output(
@@ -177,6 +206,20 @@ def _build_locator(candidate: ResearchCitationCandidate) -> dict[str, Any]:
     }
 
 
+def _build_attachment_citation(
+    candidate: ResearchCitationCandidate,
+) -> dict[str, Any]:
+    citation = AttachmentCitation(
+        source_type="attachment",
+        attachment_id=candidate.attachment_id,
+        document_version=candidate.document_version,
+        segment_id=candidate.segment_id,
+        locator=_build_locator(candidate),
+        excerpt=_normalize_excerpt(candidate.content),
+    )
+    return citation.model_dump(mode="json")
+
+
 def _normalize_excerpt(content: str) -> str:
     return re.sub(r"\s+", " ", content).strip()[
         :MAX_ATTACHMENT_EXCERPT_LENGTH
@@ -186,6 +229,7 @@ def _normalize_excerpt(content: str) -> str:
 __all__ = [
     "AttachmentCitationSelection",
     "CITATION_TOOL_NAME",
+    "build_attachment_citation_fallback",
     "build_attachment_citation_tool",
     "build_attachment_citations",
     "extract_attachment_citations_from_tool_output",

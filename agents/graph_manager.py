@@ -35,6 +35,7 @@ from agents.graph.citation_extractor import (
 )
 from agents.graph.attachment_citations import (
     CITATION_TOOL_NAME,
+    build_attachment_citation_fallback,
     extract_attachment_citations_from_tool_output,
 )
 from utils.transient_attachment_context import (
@@ -1053,6 +1054,7 @@ class GraphManager:
         # 收集搜索工具来源，流结束后持久化到 context.citations
         collected_citations: List[Dict[str, Any]] = []
         collected_attachment_citations: List[Dict[str, Any]] = []
+        citation_tool_seen = False
         redact_research_tool_payload = (
             prepared_mode and agent_type == "research"
         )
@@ -1119,6 +1121,11 @@ class GraphManager:
                 # 持久化后前端可在该位置精确切分"前置文本"与"工具调用"，恢复流式 block 顺序。
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "unknown")
+                    if (
+                        redact_research_tool_payload
+                        and tool_name == CITATION_TOOL_NAME
+                    ):
+                        citation_tool_seen = True
                     tool_input = event.get("data", {}).get("input", {})
                     retained_tool_input = (
                         {} if redact_research_tool_payload else tool_input
@@ -1148,6 +1155,7 @@ class GraphManager:
                         redact_research_tool_payload
                         and tool_name == CITATION_TOOL_NAME
                     ):
+                        citation_tool_seen = True
                         research_context = get_research_document_context()
                         collected_attachment_citations.extend(
                             extract_attachment_citations_from_tool_output(
@@ -1360,6 +1368,17 @@ class GraphManager:
                     "[GraphManager] 流式 - 保存 AI 回复失败, error_type=%s",
                     type(e).__name__,
                 )
+
+        if prepared_mode and agent_type == "research":
+            research_context = get_research_document_context()
+            fallback_citations = build_attachment_citation_fallback(
+                research_context.selection.citation_candidates
+            )
+            if (
+                not citation_tool_seen
+                and not collected_attachment_citations
+            ):
+                collected_attachment_citations = fallback_citations
 
         final_citations = merge_citations(
             collected_citations,
