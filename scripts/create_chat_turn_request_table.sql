@@ -1,0 +1,28 @@
+CREATE TABLE IF NOT EXISTS chat_turn_request (
+    doctor_id VARCHAR(36) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    request_fingerprint CHAR(64) NOT NULL,
+    operation VARCHAR(20) NOT NULL,
+    conversation_id VARCHAR(36) NOT NULL,
+    session_id VARCHAR(64) NOT NULL,
+    patient_id VARCHAR(36) NOT NULL,
+    source_message_id VARCHAR(36) NULL,
+    implicit_prompt_id VARCHAR(64) NULL,
+    attachment_ids_json JSON NOT NULL,
+    user_message_id VARCHAR(36) NOT NULL,
+    assistant_message_id VARCHAR(36) NOT NULL,
+    previous_active_node_id VARCHAR(36) NULL,
+    status VARCHAR(16) NOT NULL,
+    error_code VARCHAR(64) NULL,
+    execute_started_at DATETIME(6) NULL,
+    deadline_at DATETIME(6) NULL,
+    create_time DATETIME(6) NOT NULL,
+    update_time DATETIME(6) NOT NULL,
+    PRIMARY KEY (doctor_id, request_id),
+    UNIQUE KEY uk_chat_turn_request_assistant_message (assistant_message_id),
+    KEY idx_chat_turn_request_conversation_status (
+        conversation_id,
+        status,
+        deadline_at
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

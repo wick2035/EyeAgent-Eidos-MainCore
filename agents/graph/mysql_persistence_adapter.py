@@ -126,7 +126,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> Dict[str, str]:
         msg_context = self._build_user_context(context, is_first_message)
         user, assistant = self.service.create_turn(chat_id, content, sender_id, msg_context)
-        if is_first_message:
+        if is_first_message and content:
             self.update_conversation_title(chat_id, content)
         return {"user_message_id": user.id, "assistant_message_id": assistant.id}
 

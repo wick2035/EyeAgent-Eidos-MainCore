@@ -75,6 +75,18 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
             logger.error(f"[ChatConversationRepository] 获取会话失败: {e}")
             return None
 
+    def lock_by_id(self, conversation_id: str) -> Optional[ChatConversationEntity]:
+        """在当前事务中读取并锁定会话行。"""
+        sql = """
+            SELECT id, user_type, host_id, title, summary, total_messages, active_node_id,
+                   create_time, create_by, update_time, update_by, deleted, version
+            FROM chat_conversation
+            WHERE id = %s AND deleted = 0
+            FOR UPDATE
+        """
+        result = self.db.fetch_one(sql, (conversation_id,))
+        return self._row_to_entity(result) if result else None
+
     def list_by_host(
         self,
         host_id: str,
@@ -160,6 +172,24 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
         except DatabaseError as e:
             logger.error(f"[ChatConversationRepository] 更新 active_node_id 失败: {e}")
             return False
+
+    def compare_and_set_active_node(
+        self,
+        conversation_id: str,
+        expected_node_id: str,
+        active_node_id: Optional[str],
+    ) -> bool:
+        """只恢复仍指向旧附件占位的活跃节点，避免旧 abort 覆盖新分支。"""
+        sql = """
+            UPDATE chat_conversation
+            SET active_node_id = %s, update_time = %s, version = version + 1
+            WHERE id = %s AND active_node_id = %s AND deleted = 0
+        """
+        affected = self.db.execute(
+            sql,
+            (active_node_id, datetime.now(), conversation_id, expected_node_id),
+        )
+        return affected > 0
 
     def soft_delete(self, conversation_id: str) -> bool:
         """软删除会话"""
@@ -367,6 +397,26 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
         except DatabaseError as e:
             logger.error(f"[ChatMessageRepository] 获取子消息失败: {e}")
             return []
+
+    def get_active_assistant_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        """查询仍在生成的最新助手消息；会话锁由上层统一持有。"""
+        sql = """
+            SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content,
+                   message_type, sender_id, context, token_used, status, error_message,
+                   create_time, create_by, update_time, update_by, deleted, version
+            FROM chat_message
+            WHERE chat_id = %s
+              AND message_type = 'assistant'
+              AND status IN ('running', 'streaming')
+              AND deleted = 0
+            ORDER BY message_order DESC, create_time DESC
+            LIMIT 1
+        """
+        row = self.db.fetch_one(sql, (conversation_id,))
+        return self._row_to_entity(row) if row else None
 
     def get_latest_sibling_order(self, chat_id: str, parent_id: str, message_type: str) -> int:
         """获取同父同角色消息的最大 message_order"""

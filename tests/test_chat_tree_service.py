@@ -216,6 +216,7 @@ class FakeTreeService:
     def __init__(self):
         self.turns = []
         self.regenerate_context = None
+        self.title_updates = []
         self._counter = 0
 
     def create_turn(self, chat_id, content, sender_id, context=None, source_message_id=None, mode="normal"):
@@ -257,10 +258,24 @@ class FakeTreeService:
         )
 
     def update_conversation_title(self, chat_id, first_message):
+        self.title_updates.append((chat_id, first_message))
         return True
 
 
 class MySQLPersistenceAdapterTreeTest(unittest.TestCase):
+    def test_empty_first_message_does_not_update_conversation_title(self):
+        service = FakeTreeService()
+        adapter = MySQLPersistenceAdapter(service)
+
+        adapter.prepare_normal_turn(
+            "chat-1",
+            "",
+            "doctor-1",
+            is_first_message=True,
+        )
+
+        self.assertEqual(service.title_updates, [])
+
     def test_two_step_bridge_keeps_pending_assistant_ids_per_execution_context(self):
         adapter = MySQLPersistenceAdapter(FakeTreeService())
         ctx1 = copy_context()

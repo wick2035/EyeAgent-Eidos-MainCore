@@ -9,6 +9,7 @@ import logging
 import functools
 from typing import Optional, Any, List, Dict, Tuple
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -160,6 +161,10 @@ class MySQLConnectionPool:
     def __init__(self):
         """初始化连接池配置"""
         self._pool: Optional[PooledDB] = None
+        self._transaction_cursor: ContextVar[Optional[Any]] = ContextVar(
+            f"mysql_transaction_cursor_{id(self)}",
+            default=None,
+        )
         self._config = {
             "host": os.getenv("DB_HOST", "localhost"),
             "port": int(os.getenv("DB_PORT", 3306)),
@@ -221,6 +226,11 @@ class MySQLConnectionPool:
         Yields:
             DictCursor: 字典游标对象
         """
+        transaction_cursor = self._transaction_cursor.get()
+        if transaction_cursor is not None:
+            yield transaction_cursor
+            return
+
         connection = None
         cursor = None
         try:
@@ -247,6 +257,28 @@ class MySQLConnectionPool:
                     connection.close()  # 归还到池，不是真正关闭
                 except Exception:
                     pass
+
+    @contextmanager
+    def transaction(self):
+        """在当前执行上下文中复用同一连接，并仅由最外层提交或回滚。"""
+        transaction_cursor = self._transaction_cursor.get()
+        if transaction_cursor is not None:
+            yield
+            return
+
+        connection = self._get_connection()
+        cursor = connection.cursor()
+        token = self._transaction_cursor.set(cursor)
+        try:
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._transaction_cursor.reset(token)
+            cursor.close()
+            connection.close()
 
     @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def execute(self, sql: str, params: Tuple = None) -> int:
