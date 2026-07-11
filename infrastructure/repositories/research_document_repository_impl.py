@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 from typing import Optional
@@ -14,11 +15,13 @@ from domain.models.research_document import (
 from infrastructure.database.mysql_connection import get_db_connection
 
 
-class _FencingConflict(RuntimeError):
-    pass
+class ResearchDocumentFencingError(RuntimeError):
+    """锁定后发布 ready 失败；调用方必须回滚整个事务。"""
 
 
 class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
+    _CLAIM_MAX_TRANSACTION_ATTEMPTS = 3
+
     _INGESTION_COLUMNS = """
         id, doctor_id, attachment_id, document_version, content_sha256,
         processor_type, extractor_version, segment_schema_version, status,
@@ -64,17 +67,33 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         if lease_until <= now:
             raise ValueError("lease_until 必须晚于 now")
 
+        for transaction_attempt in range(self._CLAIM_MAX_TRANSACTION_ATTEMPTS):
+            try:
+                return self._claim_once(identity, now, lease_until)
+            except Exception as error:
+                if (
+                    not self._is_retryable_claim_transaction_error(error)
+                    or transaction_attempt
+                    == self._CLAIM_MAX_TRANSACTION_ATTEMPTS - 1
+                ):
+                    raise
+        raise RuntimeError("claim transaction retry 状态不可达")
+
+    def _claim_once(
+        self,
+        identity: IngestionIdentity,
+        now: datetime,
+        lease_until: datetime,
+    ) -> ResearchDocumentIngestionEntity:
         with self.db.transaction():
-            row = self._select_identity_for_update(identity)
-            if row is None:
-                try:
-                    return self._insert_claim(identity, now, lease_until)
-                except Exception as error:
-                    if not self._is_duplicate_error(error):
-                        raise
-                    row = self._select_identity_for_update(identity)
-                    if row is None:
-                        raise
+            try:
+                return self._insert_claim(identity, now, lease_until)
+            except Exception as error:
+                if not self._is_duplicate_error(error):
+                    raise
+                row = self._select_identity_for_update(identity)
+                if row is None:
+                    raise RuntimeError("duplicate claim 后摄取记录不可见") from error
             return self._claim_existing(row, now, lease_until)
 
     def renew_lease(
@@ -92,8 +111,16 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                   AND status = 'processing'
                   AND attempt_count = %s
                   AND lease_expires_at > CURRENT_TIMESTAMP(6)
+                  AND %s > CURRENT_TIMESTAMP(6)
+                  AND %s > lease_expires_at
             """,
-            (lease_until, ingestion_id, attempt_count),
+            (
+                lease_until,
+                ingestion_id,
+                attempt_count,
+                lease_until,
+                lease_until,
+            ),
         )
         return affected == 1
 
@@ -103,64 +130,65 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         attempt_count: int,
         segments: list[ResearchDocumentSegmentEntity],
     ) -> bool:
-        self._validate_completion_segments(ingestion_id, segments)
-        try:
-            with self.db.transaction():
-                row = self._select_id_for_update(ingestion_id)
-                if (
-                    row is None
-                    or row["status"] != "processing"
-                    or row["attempt_count"] != attempt_count
-                ):
-                    return False
+        segments = self._validate_completion_segments(ingestion_id, segments)
+        with self.db.transaction():
+            row = self._select_active_attempt_for_update(
+                ingestion_id,
+                attempt_count,
+            )
+            if (
+                row is None
+                or row["status"] != "processing"
+                or row["attempt_count"] != attempt_count
+            ):
+                return False
 
-                self.db.execute(
-                    """
-                        DELETE FROM research_document_segment
-                        WHERE ingestion_id = %s
-                    """,
-                    (ingestion_id,),
+            self.db.execute(
+                """
+                    DELETE FROM research_document_segment
+                    WHERE ingestion_id = %s
+                """,
+                (ingestion_id,),
+            )
+            self.db.execute_many(
+                """
+                    INSERT INTO research_document_segment (
+                        id, ingestion_id, ordinal, content, content_sha256,
+                        page_start, page_end, sheet_name, row_start, row_end,
+                        token_count, metadata_json
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s
+                    )
+                """,
+                [self._segment_params(segment) for segment in segments],
+            )
+            page_count = max(
+                (
+                    segment.page_end or segment.page_start or 0
+                    for segment in segments
+                ),
+                default=0,
+            )
+            affected = self.db.execute(
+                """
+                    UPDATE research_document_ingestion
+                    SET status = 'ready',
+                        lease_expires_at = NULL,
+                        page_count = %s,
+                        error_code = NULL,
+                        completed_at = CURRENT_TIMESTAMP(6),
+                        update_time = CURRENT_TIMESTAMP(6)
+                    WHERE id = %s
+                      AND status = 'processing'
+                      AND attempt_count = %s
+                """,
+                (page_count, ingestion_id, attempt_count),
+            )
+            if affected != 1:
+                raise ResearchDocumentFencingError(
+                    "锁定后的 ready CAS 未命中"
                 )
-                self.db.execute_many(
-                    """
-                        INSERT INTO research_document_segment (
-                            id, ingestion_id, ordinal, content, content_sha256,
-                            page_start, page_end, sheet_name, row_start, row_end,
-                            token_count, metadata_json
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s
-                        )
-                    """,
-                    [self._segment_params(segment) for segment in segments],
-                )
-                page_count = max(
-                    (
-                        segment.page_end or segment.page_start or 0
-                        for segment in segments
-                    ),
-                    default=0,
-                )
-                affected = self.db.execute(
-                    """
-                        UPDATE research_document_ingestion
-                        SET status = 'ready',
-                            lease_expires_at = NULL,
-                            page_count = %s,
-                            error_code = NULL,
-                            completed_at = CURRENT_TIMESTAMP(6),
-                            update_time = CURRENT_TIMESTAMP(6)
-                        WHERE id = %s
-                          AND status = 'processing'
-                          AND attempt_count = %s
-                          AND lease_expires_at > CURRENT_TIMESTAMP(6)
-                    """,
-                    (page_count, ingestion_id, attempt_count),
-                )
-                if affected != 1:
-                    raise _FencingConflict()
-        except _FencingConflict:
-            return False
         return True
 
     def fail(
@@ -229,15 +257,22 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             self._identity_params(identity),
         )
 
-    def _select_id_for_update(self, ingestion_id: str):
+    def _select_active_attempt_for_update(
+        self,
+        ingestion_id: str,
+        attempt_count: int,
+    ):
         return self.db.fetch_one(
             f"""
                 SELECT {self._INGESTION_COLUMNS}
                 FROM research_document_ingestion
                 WHERE id = %s
+                  AND status = 'processing'
+                  AND attempt_count = %s
+                  AND lease_expires_at > CURRENT_TIMESTAMP(6)
                 FOR UPDATE
             """,
-            (ingestion_id,),
+            (ingestion_id, attempt_count),
         )
 
     def _insert_claim(
@@ -339,7 +374,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             ),
         )
         if affected != 1:
-            latest = self._select_id_for_update(entity.id)
+            latest = self._select_identity_for_update(entity.identity)
             if latest is None:
                 raise RuntimeError("claim CAS 后摄取记录不存在")
             return self._row_to_ingestion(latest)
@@ -372,14 +407,24 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
     def _validate_completion_segments(
         ingestion_id: str,
         segments: list[ResearchDocumentSegmentEntity],
-    ) -> None:
+    ) -> list[ResearchDocumentSegmentEntity]:
         if not segments:
             raise ValueError("segments 不能为空")
-        if any(segment.ingestion_id != ingestion_id for segment in segments):
+        validated_segments = [
+            ResearchDocumentSegmentEntity.model_validate(
+                copy.deepcopy(segment.model_dump(mode="python"))
+            )
+            for segment in segments
+        ]
+        if any(
+            segment.ingestion_id != ingestion_id
+            for segment in validated_segments
+        ):
             raise ValueError("segment 不属于目标 ingestion")
-        ordinals = [segment.ordinal for segment in segments]
+        ordinals = [segment.ordinal for segment in validated_segments]
         if len(ordinals) != len(set(ordinals)):
             raise ValueError("segment ordinal 不能重复")
+        return validated_segments
 
     @staticmethod
     def _segment_params(segment: ResearchDocumentSegmentEntity) -> tuple:
@@ -412,6 +457,8 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         metadata = row.get("metadata_json")
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata_json 必须是 JSON 对象")
         return ResearchDocumentSegmentEntity(
             id=row["id"],
             ingestion_id=row["ingestion_id"],
@@ -424,7 +471,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             row_start=row.get("row_start"),
             row_end=row.get("row_end"),
             token_count=row["token_count"],
-            metadata=metadata or {},
+            metadata=metadata,
         )
 
     @staticmethod
@@ -435,6 +482,16 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             if args and args[0] == 1062:
                 return True
             if "duplicate entry" in str(current).lower():
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
+    def _is_retryable_claim_transaction_error(error: Exception) -> bool:
+        current = error
+        while current is not None:
+            args = getattr(current, "args", ())
+            if args and args[0] in {1205, 1213}:
                 return True
             current = current.__cause__ or current.__context__
         return False

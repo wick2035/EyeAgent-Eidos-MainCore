@@ -127,6 +127,24 @@ def _segment(ordinal=0, content="第一段科研材料"):
     )
 
 
+def _segment_row(metadata_json='{"extraction_mode":"text"}'):
+    segment = _segment()
+    return {
+        "id": segment.id,
+        "ingestion_id": segment.ingestion_id,
+        "ordinal": segment.ordinal,
+        "content": segment.content,
+        "content_sha256": segment.content_sha256,
+        "page_start": segment.page_start,
+        "page_end": segment.page_end,
+        "sheet_name": None,
+        "row_start": None,
+        "row_end": None,
+        "token_count": segment.token_count,
+        "metadata_json": metadata_json,
+    }
+
+
 class ResearchDocumentSchemaTest(unittest.TestCase):
     def test_identity_rejects_post_parse_extraction_mode_as_processor_type(self):
         with self.assertRaisesRegex(ValueError, "processor_type"):
@@ -189,7 +207,7 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         lease_until = datetime(2026, 7, 11, 9, 5, 0)
         existing = _ingestion_row(lease_expires_at=lease_until)
         db = ScriptedDB(
-            fetch_one_results=[None, existing],
+            fetch_one_results=[existing],
             execute_results=[pymysql.err.IntegrityError(1062, "duplicate entry")],
         )
         repository = ResearchDocumentRepositoryImpl(db=db)
@@ -204,6 +222,7 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(claimed.attempt_count, 1)
         self.assertEqual(claimed.lease_expires_at, lease_until)
         self.assertEqual(db.transaction_events, ["begin", "commit"])
+        self.assertEqual(db.operations[0][0], "execute")
         insert = next(op for op in db.operations if "INSERT INTO" in op[1])
         self.assertEqual(insert[2][1:8], (
             "doctor-1",
@@ -215,6 +234,51 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             "segment_v1",
         ))
 
+    def test_claim_retries_entire_transaction_for_1205_and_1213(self):
+        for error_code in (1205, 1213):
+            with self.subTest(error_code=error_code):
+                db = ScriptedDB(
+                    execute_results=[
+                        pymysql.err.OperationalError(error_code, "retryable"),
+                        1,
+                    ]
+                )
+
+                claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+                    _identity(),
+                    now=datetime(2026, 7, 11, 9, 0, 0),
+                    lease_until=datetime(2026, 7, 11, 9, 5, 0),
+                )
+
+                self.assertEqual(claimed.attempt_count, 1)
+                self.assertEqual(
+                    db.transaction_events,
+                    ["begin", "rollback", "begin", "commit"],
+                )
+
+    def test_claim_retry_exhaustion_stops_after_three_transactions(self):
+        for error_code in (1205, 1213):
+            with self.subTest(error_code=error_code):
+                db = ScriptedDB(
+                    execute_results=[
+                        pymysql.err.OperationalError(error_code, "retryable")
+                        for _ in range(3)
+                    ]
+                )
+
+                with self.assertRaises(pymysql.err.OperationalError) as raised:
+                    ResearchDocumentRepositoryImpl(db=db).claim(
+                        _identity(),
+                        now=datetime(2026, 7, 11, 9, 0, 0),
+                        lease_until=datetime(2026, 7, 11, 9, 5, 0),
+                    )
+
+                self.assertEqual(raised.exception.args[0], error_code)
+                self.assertEqual(
+                    db.transaction_events,
+                    ["begin", "rollback"] * 3,
+                )
+
     def test_expired_lease_takeover_increments_attempt_fencing_token(self):
         now = datetime(2026, 7, 11, 9, 10, 0)
         db = ScriptedDB(
@@ -224,7 +288,10 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
                     lease_expires_at=now - timedelta(microseconds=1),
                 )
             ],
-            execute_results=[1],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                1,
+            ],
         )
         repository = ResearchDocumentRepositoryImpl(db=db)
 
@@ -266,9 +333,28 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         self.assertIn("status = 'processing'", renew_sql)
         self.assertIn("attempt_count = %s", renew_sql)
 
+    def test_renew_lease_only_accepts_future_extension_by_database_time(self):
+        lease_until = datetime(2026, 7, 11, 9, 30, 0)
+        db = ScriptedDB(execute_results=[0])
+
+        renewed = ResearchDocumentRepositoryImpl(db=db).renew_lease(
+            "11111111-1111-5111-8111-111111111111",
+            2,
+            lease_until,
+        )
+
+        self.assertFalse(renewed)
+        sql = " ".join(db.operations[0][1].split()).lower()
+        self.assertIn("%s > current_timestamp(6)", sql)
+        self.assertIn("%s > lease_expires_at", sql)
+        self.assertEqual(db.operations[0][2].count(lease_until), 3)
+
     def test_ready_ingestion_never_returns_to_processing_or_failed(self):
         ready = _ingestion_row(status="ready", attempt_count=3)
-        claim_db = ScriptedDB(fetch_one_results=[ready])
+        claim_db = ScriptedDB(
+            fetch_one_results=[ready],
+            execute_results=[pymysql.err.IntegrityError(1062, "duplicate entry")],
+        )
         repository = ResearchDocumentRepositoryImpl(db=claim_db)
 
         claimed = repository.claim(
@@ -278,7 +364,13 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         )
 
         self.assertEqual(claimed.status, "ready")
-        self.assertFalse(any(op[0] == "execute" for op in claim_db.operations))
+        self.assertFalse(
+            any(
+                op[0] == "execute"
+                and op[1].lstrip().upper().startswith("UPDATE")
+                for op in claim_db.operations
+            )
+        )
 
         fail_db = ScriptedDB(execute_results=[0])
         self.assertFalse(
@@ -309,6 +401,12 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         self.assertEqual(db.transaction_events, ["begin", "commit"])
         self.assertEqual(segments[0].id, _segment(0, "第一段").id)
         self.assertNotEqual(segments[0].id, segments[1].id)
+        lock_sql = " ".join(db.operations[0][1].split()).lower()
+        self.assertIn("status = 'processing'", lock_sql)
+        self.assertIn("attempt_count = %s", lock_sql)
+        self.assertIn("lease_expires_at > current_timestamp(6)", lock_sql)
+        final_where = " ".join(writes[2][1].split()).lower().split("where", 1)[1]
+        self.assertNotIn("current_timestamp(6)", final_where)
 
     def test_segment_failure_rolls_back_without_publishing_ready(self):
         processing = _ingestion_row(attempt_count=2)
@@ -339,30 +437,79 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             execute_many_results=[1],
         )
 
-        completed = ResearchDocumentRepositoryImpl(db=db).complete(
-            processing["id"], 2, [_segment()]
+        with self.assertRaises(RuntimeError):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"], 2, [_segment()]
+            )
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_revalidates_mutated_segments_before_any_database_write(self):
+        for mutation in ("content", "id", "hash", "metadata"):
+            with self.subTest(mutation=mutation):
+                segment = _segment()
+                if mutation == "content":
+                    segment.content = "构造后被替换的正文"
+                elif mutation == "id":
+                    segment.id = "22222222-2222-5222-8222-222222222222"
+                elif mutation == "hash":
+                    segment.content_sha256 = "b" * 64
+                else:
+                    segment.metadata["url"] = "https://forbidden.example"
+                db = ScriptedDB(fetch_one_results=[_ingestion_row(attempt_count=2)])
+
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        segment.ingestion_id,
+                        2,
+                        [segment],
+                    )
+
+                self.assertEqual(db.operations, [])
+
+    def test_segment_metadata_validates_each_whitelisted_value_type(self):
+        valid_metadata = {
+            "block_index": 0,
+            "extraction_method": "digital_text",
+            "extraction_mode": "text",
+            "heading": "研究结论",
+            "ocr_applied": False,
+            "ocr_page_count": 0,
+            "source_page_numbers": [1, 2],
+        }
+        self.assertEqual(
+            ResearchDocumentSegmentEntity(
+                ingestion_id="11111111-1111-5111-8111-111111111111",
+                ordinal=0,
+                content="正文",
+                token_count=2,
+                metadata=valid_metadata,
+            ).metadata,
+            valid_metadata,
         )
 
-        self.assertFalse(completed)
-        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+        invalid_values = {
+            "block_index": "0",
+            "extraction_method": 1,
+            "extraction_mode": [],
+            "heading": 3,
+            "ocr_applied": 1,
+            "ocr_page_count": True,
+            "source_page_numbers": [0],
+        }
+        for key, value in invalid_values.items():
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    ResearchDocumentSegmentEntity(
+                        ingestion_id="11111111-1111-5111-8111-111111111111",
+                        ordinal=0,
+                        content="正文",
+                        token_count=2,
+                        metadata={key: value},
+                    )
 
     def test_list_segments_uses_requested_ingestion_ids_and_decodes_metadata(self):
         segment = _segment()
-        row = {
-            "id": segment.id,
-            "ingestion_id": segment.ingestion_id,
-            "ordinal": segment.ordinal,
-            "content": segment.content,
-            "content_sha256": segment.content_sha256,
-            "page_start": segment.page_start,
-            "page_end": segment.page_end,
-            "sheet_name": None,
-            "row_start": None,
-            "row_end": None,
-            "token_count": segment.token_count,
-            "metadata_json": '{"extraction_mode":"text"}',
-        }
-        db = ScriptedDB(fetch_all_results=[[row]])
+        db = ScriptedDB(fetch_all_results=[[_segment_row()]])
 
         loaded = ResearchDocumentRepositoryImpl(db=db).list_segments(
             [segment.ingestion_id, "22222222-2222-5222-8222-222222222222"]
@@ -376,6 +523,18 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
                 "22222222-2222-5222-8222-222222222222",
             ),
         )
+
+    def test_list_segments_rejects_non_object_metadata_json(self):
+        for metadata_json in ("[]", "null", [], None):
+            with self.subTest(metadata_json=metadata_json):
+                db = ScriptedDB(
+                    fetch_all_results=[[_segment_row(metadata_json)]]
+                )
+
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).list_segments(
+                        ["11111111-1111-5111-8111-111111111111"]
+                    )
 
     def test_purge_is_scoped_by_doctor_and_attachment(self):
         db = ScriptedDB(execute_results=[1])

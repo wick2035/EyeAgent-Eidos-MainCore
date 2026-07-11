@@ -141,6 +141,7 @@ class ResearchDocumentSegmentEntity(BaseModel):
         unknown_metadata = set(self.metadata) - _SAFE_SEGMENT_METADATA_KEYS
         if unknown_metadata:
             raise ValueError("segment metadata 包含非白名单字段")
+        self._validate_metadata_value_types()
         json.dumps(self.metadata, ensure_ascii=False)
 
         if self.page_start is not None and self.page_end is not None:
@@ -150,6 +151,30 @@ class ResearchDocumentSegmentEntity(BaseModel):
             if self.row_end < self.row_start:
                 raise ValueError("row_end 不能小于 row_start")
         return self
+
+    def _validate_metadata_value_types(self) -> None:
+        metadata = self.metadata
+        for key in ("block_index", "ocr_page_count"):
+            if key in metadata and (
+                type(metadata[key]) is not int or metadata[key] < 0
+            ):
+                raise ValueError(f"segment metadata {key} 必须是非负整数")
+
+        for key in ("extraction_method", "extraction_mode", "heading"):
+            if key in metadata and not isinstance(metadata[key], str):
+                raise ValueError(f"segment metadata {key} 必须是字符串")
+
+        if "ocr_applied" in metadata and type(metadata["ocr_applied"]) is not bool:
+            raise ValueError("segment metadata ocr_applied 必须是布尔值")
+
+        if "source_page_numbers" in metadata:
+            pages = metadata["source_page_numbers"]
+            if not isinstance(pages, list) or not all(
+                type(page) is int and page >= 1 for page in pages
+            ):
+                raise ValueError(
+                    "segment metadata source_page_numbers 必须是正整数数组"
+                )
 
 
 class ExtractedResearchPage(BaseModel):
