@@ -171,7 +171,30 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(caught.exception.status_code, 404)
         self.assertEqual(service.abort_calls, [])
-        self.assertFalse(registry.register("request-1").is_set())
+        self.assertFalse(
+            registry.register("doctor-1", "request-1").is_set()
+        )
+
+    async def test_abort_signal_does_not_cross_doctor_boundary(self):
+        service = FakeTurnService()
+        registry = ChatTurnExecutionRegistry()
+        other_doctor = registry.register("doctor-2", "request-1")
+        current_doctor = registry.register("doctor-1", "request-1")
+
+        response = await abort_platform_chat_turn(
+            "request-1",
+            AbortPlatformChatTurnRequest(
+                conversation_id="conversation-1",
+                doctor_id="doctor-1",
+            ),
+            starlette_request(principal("doctor-1")),
+            service,
+            registry,
+        )
+
+        self.assertEqual(response.status, "cancelled")
+        self.assertTrue(current_doctor.is_set())
+        self.assertFalse(other_doctor.is_set())
 
     async def test_abort_rejects_other_doctor_request_id(self):
         service = FakeTurnService()

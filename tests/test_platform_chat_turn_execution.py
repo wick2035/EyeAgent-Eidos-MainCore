@@ -699,12 +699,24 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
 class ChatTurnExecutionRegistryContractTest(unittest.IsolatedAsyncioTestCase):
     async def test_abort_signal_is_visible_to_registered_execution(self):
         registry = ChatTurnExecutionRegistry()
-        event = registry.register("request-1")
+        event = registry.register("doctor-1", "request-1")
 
         self.assertFalse(event.is_set())
-        registry.signal("request-1")
+        registry.signal("doctor-1", "request-1")
         self.assertTrue(event.is_set())
-        registry.unregister("request-1", event)
+        registry.unregister("doctor-1", "request-1", event)
+
+    async def test_same_request_id_is_isolated_by_doctor(self):
+        registry = ChatTurnExecutionRegistry()
+        doctor_one = registry.register("doctor-1", "shared-request")
+        doctor_two = registry.register("doctor-2", "shared-request")
+
+        registry.signal("doctor-1", "shared-request")
+
+        self.assertTrue(doctor_one.is_set())
+        self.assertFalse(doctor_two.is_set())
+        registry.unregister("doctor-1", "shared-request", doctor_one)
+        registry.unregister("doctor-2", "shared-request", doctor_two)
 
 
 if __name__ == "__main__":

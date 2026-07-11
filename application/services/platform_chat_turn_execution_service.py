@@ -143,7 +143,10 @@ class PlatformChatTurnExecutionService:
             yield self._error_event(request, exc.error_code)
             return
 
-        cancel_event = self.registry.register(request.request_id)
+        cancel_event = self.registry.register(
+            principal.subject,
+            request.request_id,
+        )
         active_key = (request.request_id, request.assistant_message_id)
         self._active_doctors[active_key] = principal.subject
         binding = None
@@ -374,7 +377,11 @@ class PlatformChatTurnExecutionService:
                 await asyncio.gather(analysis_task, return_exceptions=True)
             if binding is not None:
                 reset_attachment_analysis(binding)
-            self.registry.unregister(request.request_id, cancel_event)
+            self.registry.unregister(
+                principal.subject,
+                request.request_id,
+                cancel_event,
+            )
             self._active_doctors.pop(active_key, None)
 
     async def finalize_platform_turn_success(

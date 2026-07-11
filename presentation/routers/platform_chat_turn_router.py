@@ -127,7 +127,7 @@ async def abort_platform_chat_turn(
             request_id,
             payload.conversation_id,
         )
-        registry.signal(request_id)
+        registry.signal(principal.subject, request_id)
         result = service.abort(
             principal.subject,
             request_id,
