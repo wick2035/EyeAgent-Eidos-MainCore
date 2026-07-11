@@ -85,12 +85,14 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
             self._settings(port), temp_root=self.temp_root
         )
         descriptor = _descriptor(
-            f"http://storage.test:{port}/download?token=private"
+            f"http://storage.test:{port}/download?token=private",
+            document_version=7,
         )
 
         async with downloader.download_all([descriptor], "request-1") as items:
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].path.read_bytes(), _PNG)
+            self.assertEqual(items[0].document_version, 7)
             self.assertEqual(
                 stat.S_IMODE(items[0].path.parent.stat().st_mode), 0o700
             )

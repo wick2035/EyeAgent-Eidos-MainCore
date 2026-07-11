@@ -1,7 +1,7 @@
 #!/bin/bash
 set -eu
 
-if [ "$#" -ne 4 ]; then
+if [ "$#" -ne 5 ]; then
   exit 64
 fi
 
@@ -9,6 +9,7 @@ input_dir="$1"
 output_bundle="$2"
 cidfile="$3"
 run_label="$4"
+image_ref="$5"
 
 if [ "$(id -u)" -eq 0 ]; then
   exit 77
@@ -17,6 +18,12 @@ fi
 case "$run_label" in
   *[!a-zA-Z0-9_.-]*|'') exit 64 ;;
 esac
+case "$image_ref" in
+  -*|*[!a-zA-Z0-9._/@:+-]*|'') exit 64 ;;
+esac
+if [ "${#image_ref}" -gt 256 ]; then
+  exit 64
+fi
 
 cleanup_container() {
   if [ -f "$cidfile" ]; then
@@ -50,4 +57,4 @@ docker run -i \
   --label "eyeagent.attachment-parser.run=$run_label" \
   -v "$input_dir:/input:ro" \
   -v "$output_bundle:/output.bundle:rw" \
-  eyeagent/attachment-parser:1
+  "$image_ref"

@@ -14,7 +14,13 @@ from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
+from infrastructure.attachments import parser_sandbox as sandbox_module
 from infrastructure.attachments.parser_protocol import AttachmentParserError
+from infrastructure.attachments.parser_protocol import (
+    ParsedResearchPdf,
+    ResearchPdfManifest,
+    ResearchPdfPageManifest,
+)
 from infrastructure.attachments.parser_sandbox import (
     AttachmentParserSandbox,
     _cleanup_container,
@@ -22,10 +28,11 @@ from infrastructure.attachments.parser_sandbox import (
     _run_capture_command,
 )
 from infrastructure.attachments.secure_downloader import DownloadedAttachment
+from utils.pdf_utils import fitz
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_IMAGE = "eyeagent/attachment-parser:1"
+_IMAGE = "eyeagent/attachment-parser:research-c1"
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 
 
@@ -145,6 +152,80 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             AttachmentParserError, "ATTACHMENT_SANDBOX_ROOT_FORBIDDEN"
         ):
             await sandbox.preflight()
+
+    async def test_image_reference_is_strict_and_identical_for_preflight_and_run(self):
+        invalid_images = (
+            "",
+            "--network=host",
+            "eyeagent/parser:tag with-space",
+            "eyeagent/parser:tag\n--privileged",
+            " eyeagent/parser:tag",
+        )
+        for image in invalid_images:
+            with self.subTest(image=repr(image)):
+                with self.assertRaisesRegex(
+                    AttachmentParserError,
+                    "ATTACHMENT_SANDBOX_IMAGE_INVALID",
+                ):
+                    AttachmentParserSandbox(image=image)
+
+        configured_image = "registry.test:5000/eyeagent/parser@sha256:" + "a" * 64
+        sandbox = AttachmentParserSandbox(
+            runner_path=(
+                _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
+            ),
+            docker_binary="docker-test",
+            image=configured_image,
+            uid_getter=lambda: 1000,
+        )
+        with patch(
+            "infrastructure.attachments.parser_sandbox.shutil.which",
+            return_value="/usr/bin/docker-test",
+        ), patch(
+            "infrastructure.attachments.parser_sandbox._run_capture_command",
+            new=AsyncMock(
+                side_effect=[
+                    (0, b"27.0", b""),
+                    (0, b"65532:65532", b""),
+                ]
+            ),
+        ) as capture:
+            await sandbox.preflight()
+        self.assertEqual(capture.await_args_list[1].args[3], configured_image)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            source.write_bytes(_png_bytes())
+            run_sandbox = AttachmentParserSandbox(
+                runner_path="/bin/true",
+                docker_binary="docker-test",
+                image=configured_image,
+                temp_root=root / "sandbox",
+            )
+            run_sandbox.preflight = AsyncMock()
+
+            class FailedProcess:
+                returncode = 2
+
+            create_process = AsyncMock(return_value=FailedProcess())
+            with patch(
+                "infrastructure.attachments.parser_sandbox.asyncio.create_subprocess_exec",
+                create_process,
+            ), patch(
+                "infrastructure.attachments.parser_sandbox._communicate_bounded",
+                new=AsyncMock(
+                    return_value=(b"", b'{"error_code":"ATTACHMENT_WORKER_FAILED"}')
+                ),
+            ), patch(
+                "infrastructure.attachments.parser_sandbox._cleanup_container",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(AttachmentParserError):
+                    await run_sandbox.parse(self._downloaded(source))
+
+            launch_args = create_process.await_args.args
+            self.assertEqual(launch_args[5], configured_image)
 
     async def test_cleanup_accepts_only_full_container_id_and_always_removes_cidfile(self):
         calls = []
@@ -418,6 +499,137 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                     "image/jpeg",
                 )
 
+    async def test_host_validates_research_text_ocr_hashes_and_exact_entry_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_bundle = root / "output.bundle"
+            text = "科研正文 1234567890 ABCDEFGHIJ".encode("utf-8")
+            image = b"ocr-image"
+            manifest = ResearchPdfManifest(
+                pages=(
+                    ResearchPdfPageManifest(
+                        page_number=1,
+                        text_relative_path="page-0001.txt",
+                        text_sha256=hashlib.sha256(text).hexdigest(),
+                        ocr_image_relative_path="page-0001-ocr.jpg",
+                        ocr_image_sha256=hashlib.sha256(image).hexdigest(),
+                    ),
+                )
+            )
+
+            def write_bundle(*, extra=False):
+                with zipfile.ZipFile(
+                    output_bundle,
+                    mode="w",
+                    compression=zipfile.ZIP_STORED,
+                ) as archive:
+                    archive.writestr("page-0001.txt", text)
+                    archive.writestr("page-0001-ocr.jpg", image)
+                    if extra:
+                        archive.writestr("extra.bin", b"extra")
+                os.chmod(output_bundle, 0o600)
+
+            write_bundle()
+            pages = sandbox_module._read_validated_research_bundle(
+                output_bundle,
+                manifest.to_json_bytes(),
+            )
+            self.assertEqual(pages[0].text, text.decode("utf-8"))
+            self.assertEqual(pages[0].ocr_image_content, image)
+
+            bad_hash = json.loads(manifest.to_json_bytes())
+            bad_hash["pages"][0]["text_sha256"] = "0" * 64
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_HASH_MISMATCH",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    json.dumps(bad_hash).encode("utf-8"),
+                )
+
+            traversal = json.loads(manifest.to_json_bytes())
+            traversal["pages"][0]["text_relative_path"] = "../page-0001.txt"
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_PATH_INVALID",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    json.dumps(traversal).encode("utf-8"),
+                )
+
+            write_bundle(extra=True)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_PATH_INVALID",
+            ):
+                sandbox_module._read_validated_research_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                )
+
+    async def test_parse_research_profile_returns_text_and_optional_ocr_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF-fake")
+            text = "科研正文 1234567890 ABCDEFGHIJ"
+            image = b"ocr-image"
+            runner = root / "research-runner.py"
+            runner.write_text(
+                "#!" + sys.executable + "\n"
+                "import hashlib, json, os, sys, zipfile\n"
+                "request = json.loads(sys.stdin.buffer.read())\n"
+                "if request.get('profile') != 'research_pdf_v1':\n"
+                "    raise SystemExit(9)\n"
+                f"text = {text.encode('utf-8')!r}\n"
+                f"image = {image!r}\n"
+                "with zipfile.ZipFile(sys.argv[2], 'w', compression=zipfile.ZIP_STORED) as archive:\n"
+                "    archive.writestr('page-0001.txt', text)\n"
+                "    archive.writestr('page-0001-ocr.jpg', image)\n"
+                "manifest = {'profile': 'research_pdf_v1', 'pages': [{'page_number': 1, "
+                "'text_relative_path': 'page-0001.txt', 'text_sha256': hashlib.sha256(text).hexdigest(), "
+                "'ocr_image_relative_path': 'page-0001-ocr.jpg', 'ocr_image_sha256': hashlib.sha256(image).hexdigest()}]}\n"
+                "sys.stdout.write(json.dumps(manifest, separators=(',', ':')))\n",
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o700)
+            payload = source.read_bytes()
+            downloaded = DownloadedAttachment(
+                attachment_id="research-attachment",
+                analysis_attempt_id="research-attempt",
+                file_type="pdf",
+                filename="paper.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                page_count=1,
+                path=source,
+                document_version=7,
+            )
+            sandbox = AttachmentParserSandbox(
+                runner_path=runner,
+                docker_binary="true",
+                temp_root=root / "sandbox",
+            )
+            sandbox.preflight = AsyncMock()
+            with patch(
+                "infrastructure.attachments.parser_sandbox._cleanup_container",
+                new=AsyncMock(),
+            ):
+                parsed = await sandbox.parse(
+                    downloaded,
+                    profile="research_pdf_v1",
+                )
+
+            self.assertIsInstance(parsed, ParsedResearchPdf)
+            self.assertEqual(parsed.attachment_id, "research-attachment")
+            self.assertEqual(parsed.document_version, 7)
+            self.assertEqual(parsed.pages[0].text, text)
+            self.assertEqual(parsed.pages[0].ocr_image_content, image)
+            self.assertEqual(list((root / "sandbox").iterdir()), [])
+
     async def test_fixed_runner_contains_all_required_isolation_flags(self):
         runner = (
             _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
@@ -437,12 +649,14 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             "--cidfile",
             ":/input:ro",
             ":/output.bundle:rw",
-            _IMAGE,
+            'image_ref="$5"',
+            '"$image_ref"',
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, runner)
         self.assertNotIn("output-staging", runner)
+        self.assertNotIn("eyeagent/attachment-parser:1", runner)
 
 
 class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestCase):
@@ -553,6 +767,50 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.source.stat().st_mode), 0o600)
         self.assertEqual(parsed.pages[0].content, self.source.read_bytes())
+        self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_mixed_pdf_returns_physical_text_and_only_one_ocr_image(self):
+        source = self.root / "mixed-research.pdf"
+        document = fitz.open()
+        digital_page = document.new_page()
+        digital_page.insert_text(
+            (72, 72),
+            "Research document 1234567890 ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        )
+        document.new_page()
+        document.save(source)
+        document.close()
+        os.chmod(source, 0o600)
+        payload = source.read_bytes()
+        downloaded = DownloadedAttachment(
+            attachment_id="research-integration",
+            analysis_attempt_id="research-integration-attempt",
+            file_type="pdf",
+            filename="mixed.pdf",
+            mime_type="application/pdf",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=2,
+            path=source,
+            document_version=9,
+        )
+        label = "integration-research-mixed"
+        sandbox_root = self.root / "sandbox-research"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: label,
+        )
+
+        parsed = await sandbox.parse(downloaded, profile="research_pdf_v1")
+
+        self.assertIsInstance(parsed, ParsedResearchPdf)
+        self.assertEqual(parsed.document_version, 9)
+        self.assertEqual([page.page_number for page in parsed.pages], [1, 2])
+        self.assertIn("Research document", parsed.pages[0].text)
+        self.assertIsNone(parsed.pages[0].ocr_image_content)
+        self.assertEqual(parsed.pages[1].text, "")
+        self.assertTrue(parsed.pages[1].ocr_image_content.startswith(b"\xff\xd8"))
         self.assertEqual(self._containers_for_label(label), ())
         self.assertEqual(list(sandbox_root.iterdir()), [])
 

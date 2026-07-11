@@ -42,7 +42,7 @@ from presentation.schemas.platform_chat_turn_schemas import (
 from utils.transient_attachment_context import get_attachment_analysis
 
 
-_IMAGE = "eyeagent/attachment-parser:1"
+_IMAGE = "eyeagent/attachment-parser:research-c1"
 _URL_SENTINEL = "URL_QUERY_SENTINEL_7f3f7b"
 _BASE64_SENTINEL = "BASE64_SENTINEL_c2Vuc2l0aXZl"
 _PARSED_SENTINEL = "PARSED_BODY_SENTINEL_0d81d9"

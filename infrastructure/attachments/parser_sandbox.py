@@ -16,16 +16,24 @@ from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
     ParsedAttachment,
     ParsedAttachmentPage,
+    ParsedResearchPdf,
+    ParsedResearchPdfPage,
+    ResearchPdfManifest,
     WorkerManifest,
     WorkerRequest,
+)
+from utils.pdf_utils import (
+    RESEARCH_PDF_MAX_TEXT_BYTES_PER_PAGE,
+    RESEARCH_PDF_MAX_TEXT_BYTES_TOTAL,
 )
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RUNNER = _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
-_DEFAULT_IMAGE = "eyeagent/attachment-parser:1"
+_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c1"
 _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ERROR_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+_SAFE_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
 _MAX_STDOUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _LABEL_KEY = "eyeagent.attachment-parser.run"
@@ -53,6 +61,8 @@ class AttachmentParserSandbox:
         gid_getter: Callable[[], int] = os.getgid,
         label_factory: Callable[[], str] | None = None,
     ) -> None:
+        if not isinstance(image, str) or not _SAFE_IMAGE_PATTERN.fullmatch(image):
+            raise AttachmentParserError("ATTACHMENT_SANDBOX_IMAGE_INVALID")
         self._runner_path = Path(runner_path)
         self._docker_binary = docker_binary
         self._image = image
@@ -98,7 +108,11 @@ class AttachmentParserSandbox:
         if inspect[0] != 0 or configured_user.lower() in {"", "root", "0", "0:0"}:
             raise AttachmentParserError("ATTACHMENT_SANDBOX_UNAVAILABLE")
 
-    async def parse(self, downloaded: Any) -> ParsedAttachment:
+    async def parse(
+        self,
+        downloaded: Any,
+        profile: str = "assistant_visual_v1",
+    ) -> ParsedAttachment | ParsedResearchPdf:
         await self.preflight()
         self._ensure_temp_root()
         request_directory: Path | None = None
@@ -142,6 +156,7 @@ class AttachmentParserSandbox:
                 file_type=str(_value(downloaded, "file_type")),
                 mime_type=str(_value(downloaded, "mime_type")),
                 declared_page_count=_value(downloaded, "page_count"),
+                profile=profile,
             )
             label = self._label_factory()
             if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", label):
@@ -155,6 +170,7 @@ class AttachmentParserSandbox:
                         str(output_bundle),
                         str(cidfile),
                         label,
+                        self._image,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
@@ -189,6 +205,19 @@ class AttachmentParserSandbox:
 
             if process.returncode != 0:
                 raise AttachmentParserError(_worker_error_code(stderr))
+            if profile == "research_pdf_v1":
+                research_pages = _read_validated_research_bundle(
+                    output_bundle,
+                    stdout,
+                )
+                return ParsedResearchPdf(
+                    attachment_id=str(_value(downloaded, "attachment_id")),
+                    document_version=int(
+                        _value(downloaded, "document_version")
+                    ),
+                    mime_type=str(_value(downloaded, "mime_type")),
+                    pages=research_pages,
+                )
             pages = _read_validated_bundle(
                 output_bundle,
                 stdout,
@@ -506,6 +535,120 @@ def _read_validated_bundle(
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
     return tuple(parsed_pages)
+
+
+def _read_validated_research_bundle(
+    output_bundle: Path,
+    stdout: bytes,
+) -> tuple[ParsedResearchPdfPage, ...]:
+    if len(stdout) > _MAX_STDOUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    manifest = ResearchPdfManifest.from_json_bytes(stdout)
+    try:
+        metadata = output_bundle.lstat()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    if (
+        output_bundle.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if metadata.st_size > _MAX_OUTPUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+
+    expected_names: set[str] = set()
+    for page in manifest.pages:
+        expected_names.add(page.text_relative_path)
+        if page.ocr_image_relative_path is not None:
+            expected_names.add(page.ocr_image_relative_path)
+
+    parsed_pages: list[ParsedResearchPdfPage] = []
+    total_bytes = 0
+    total_text_bytes = 0
+    try:
+        with zipfile.ZipFile(output_bundle, mode="r") as archive:
+            entries = archive.infolist()
+            actual_names = {entry.filename for entry in entries}
+            if len(entries) != len(actual_names) or actual_names != expected_names:
+                raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+            entries_by_name = {entry.filename: entry for entry in entries}
+            for page in manifest.pages:
+                text_content = _read_research_bundle_entry(
+                    archive,
+                    entries_by_name[page.text_relative_path],
+                )
+                total_bytes += len(text_content)
+                total_text_bytes += len(text_content)
+                if (
+                    len(text_content) > RESEARCH_PDF_MAX_TEXT_BYTES_PER_PAGE
+                    or total_text_bytes > RESEARCH_PDF_MAX_TEXT_BYTES_TOTAL
+                    or total_bytes > _MAX_OUTPUT_BYTES
+                ):
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+                if hashlib.sha256(text_content).hexdigest() != page.text_sha256:
+                    raise AttachmentParserError(
+                        "ATTACHMENT_OUTPUT_HASH_MISMATCH"
+                    )
+                try:
+                    text = text_content.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise AttachmentParserError(
+                        "ATTACHMENT_OUTPUT_TEXT_INVALID"
+                    ) from exc
+
+                ocr_image_content: bytes | None = None
+                if page.ocr_image_relative_path is not None:
+                    image_entry = entries_by_name[page.ocr_image_relative_path]
+                    ocr_image_content = _read_research_bundle_entry(
+                        archive,
+                        image_entry,
+                    )
+                    total_bytes += len(ocr_image_content)
+                    if total_bytes > _MAX_OUTPUT_BYTES:
+                        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+                    if (
+                        page.ocr_image_sha256 is None
+                        or hashlib.sha256(ocr_image_content).hexdigest()
+                        != page.ocr_image_sha256
+                    ):
+                        raise AttachmentParserError(
+                            "ATTACHMENT_OUTPUT_HASH_MISMATCH"
+                        )
+                parsed_pages.append(
+                    ParsedResearchPdfPage(
+                        page_number=page.page_number,
+                        text=text,
+                        text_sha256=page.text_sha256,
+                        ocr_image_content=ocr_image_content,
+                        ocr_image_sha256=page.ocr_image_sha256,
+                    )
+                )
+    except AttachmentParserError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+    return tuple(parsed_pages)
+
+
+def _read_research_bundle_entry(
+    archive: zipfile.ZipFile,
+    entry: zipfile.ZipInfo,
+) -> bytes:
+    if (
+        entry.is_dir()
+        or entry.flag_bits & 0x1
+        or entry.compress_type != zipfile.ZIP_STORED
+        or entry.compress_size != entry.file_size
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if entry.file_size > _MAX_OUTPUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+    with archive.open(entry, mode="r") as input_file:
+        content = input_file.read(entry.file_size + 1)
+    if len(content) != entry.file_size:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED")
+    return content
 
 
 def _copy_and_revalidate_input(downloaded: Any, destination: Path) -> None:

@@ -11,11 +11,17 @@ from PIL import Image
 
 from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
+    ResearchPdfManifest,
+    ResearchPdfPageManifest,
     WorkerManifest,
     WorkerPageManifest,
     WorkerRequest,
 )
-from utils.pdf_utils import StrictPdfError, render_pdf_path_strict
+from utils.pdf_utils import (
+    StrictPdfError,
+    extract_research_pdf_path_strict,
+    render_pdf_path_strict,
+)
 
 
 MAX_IMAGE_PIXELS = 50_000_000
@@ -28,7 +34,7 @@ def parse_attachment_file(
     request: WorkerRequest,
     input_dir: Path | str,
     output_dir: Path | str,
-) -> WorkerManifest:
+) -> WorkerManifest | ResearchPdfManifest:
     input_root = _resolve_directory(input_dir)
     output_root = _resolve_directory(output_dir)
     input_path = input_root / request.input_filename
@@ -46,6 +52,8 @@ def parse_attachment_file(
 
     if request.file_type == "image":
         return _parse_image(request, input_real, output_root)
+    if request.profile == "research_pdf_v1":
+        return _parse_research_pdf(request, input_real, output_root)
     return _parse_pdf(request, input_real, output_root)
 
 
@@ -143,6 +151,33 @@ def _parse_pdf(
     )
 
 
+def _parse_research_pdf(
+    request: WorkerRequest,
+    input_path: Path,
+    output_root: Path,
+) -> ResearchPdfManifest:
+    try:
+        extracted_pages = extract_research_pdf_path_strict(
+            input_path,
+            output_root,
+            declared_page_count=int(request.declared_page_count),
+        )
+    except StrictPdfError as exc:
+        raise AttachmentParserError(exc.error_code) from exc
+    return ResearchPdfManifest(
+        pages=tuple(
+            ResearchPdfPageManifest(
+                page_number=page.page_number,
+                text_relative_path=page.text_relative_path,
+                text_sha256=page.text_sha256,
+                ocr_image_relative_path=page.ocr_image_relative_path,
+                ocr_image_sha256=page.ocr_image_sha256,
+            )
+            for page in extracted_pages
+        )
+    )
+
+
 def _resolve_directory(path: Path | str) -> Path:
     candidate = Path(path)
     try:
@@ -156,7 +191,7 @@ def _resolve_directory(path: Path | str) -> Path:
 
 
 def _write_output_bundle(
-    manifest: WorkerManifest,
+    manifest: WorkerManifest | ResearchPdfManifest,
     output_dir: Path | str,
     bundle_path: Path | str,
 ) -> None:
@@ -166,13 +201,17 @@ def _write_output_bundle(
         bundle_metadata = bundle.lstat()
     except OSError as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
-    if bundle.is_symlink() or not stat.S_ISREG(bundle_metadata.st_mode):
+    if (
+        bundle.is_symlink()
+        or not stat.S_ISREG(bundle_metadata.st_mode)
+        or stat.S_IMODE(bundle_metadata.st_mode) != 0o600
+    ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
 
     validated: list[tuple[Path, str]] = []
     total_bytes = 0
-    for page in manifest.pages:
-        source = output_root / page.relative_path
+    for relative_path, expected_sha256 in _manifest_artifacts(manifest):
+        source = output_root / relative_path
         try:
             metadata = source.lstat()
             resolved = source.resolve(strict=True)
@@ -182,12 +221,15 @@ def _write_output_bundle(
             source.is_symlink()
             or not stat.S_ISREG(metadata.st_mode)
             or resolved.parent != output_root
+            or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
         total_bytes += metadata.st_size
         if total_bytes > _MAX_OUTPUT_TOTAL_BYTES:
             raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
-        validated.append((resolved, page.relative_path))
+        if _sha256_file(resolved) != expected_sha256:
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
+        validated.append((resolved, relative_path))
 
     try:
         with zipfile.ZipFile(
@@ -200,6 +242,39 @@ def _write_output_bundle(
                 archive.write(source, arcname=relative_path)
     except (OSError, RuntimeError, zipfile.LargeZipFile) as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_FAILED") from exc
+
+
+def _manifest_artifacts(
+    manifest: WorkerManifest | ResearchPdfManifest,
+) -> tuple[tuple[str, str], ...]:
+    if isinstance(manifest, WorkerManifest):
+        return tuple(
+            (page.relative_path, page.sha256) for page in manifest.pages
+        )
+    if not isinstance(manifest, ResearchPdfManifest):
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    manifest = ResearchPdfManifest(tuple(manifest.pages))
+    artifacts: list[tuple[str, str]] = []
+    for page in manifest.pages:
+        artifacts.append((page.text_relative_path, page.text_sha256))
+        if page.ocr_image_relative_path is not None:
+            if page.ocr_image_sha256 is None:
+                raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+            artifacts.append(
+                (page.ocr_image_relative_path, page.ocr_image_sha256)
+            )
+    return tuple(artifacts)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+    return digest.hexdigest()
 
 
 def _apply_resource_limits() -> None:

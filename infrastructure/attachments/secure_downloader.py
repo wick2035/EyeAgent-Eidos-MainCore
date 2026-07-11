@@ -52,6 +52,15 @@ class DownloadedAttachment:
     content_sha256: str
     page_count: int | None
     path: Path
+    document_version: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.document_version, int)
+            or isinstance(self.document_version, bool)
+            or self.document_version < 1
+        ):
+            raise ValueError("document_version must be a positive integer")
 
 
 class _PinnedResolver(AbstractResolver):
@@ -272,6 +281,7 @@ class SecureAttachmentDownloader:
             content_sha256=digest.hexdigest(),
             page_count=_value(descriptor, "page_count"),
             path=destination,
+            document_version=int(_value(descriptor, "document_version")),
         )
 
 
