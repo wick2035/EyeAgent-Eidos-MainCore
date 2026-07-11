@@ -7,7 +7,7 @@ import json
 import logging
 import asyncio
 from typing import AsyncGenerator, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from presentation.schemas.chat_schemas import (
@@ -20,6 +20,7 @@ from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
 from utils.ui_element_parser import parse_options_only
 from utils.attachment_analyzer import analyze_attachments
+from presentation.dependencies.security import require_platform_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -535,7 +536,15 @@ async def chat_stream(request: ChatRequest):
 
 
 @router.post("/edit-resend/stream")
-async def chat_edit_resend_stream(request: EditResendRequest):
+async def chat_edit_resend_stream(
+    request: EditResendRequest,
+    http_request: Request,
+):
+    require_platform_doctor(
+        http_request,
+        request.doctor_id or "",
+        request.agent_type,
+    )
     return _streaming_response_for_request(
         request,
         branch_mode="edit",
@@ -544,7 +553,15 @@ async def chat_edit_resend_stream(request: EditResendRequest):
 
 
 @router.post("/regenerate/stream")
-async def chat_regenerate_stream(request: RegenerateRequest):
+async def chat_regenerate_stream(
+    request: RegenerateRequest,
+    http_request: Request,
+):
+    require_platform_doctor(
+        http_request,
+        request.doctor_id or "",
+        request.agent_type,
+    )
     return _streaming_response_for_request(
         request,
         branch_mode="regenerate",

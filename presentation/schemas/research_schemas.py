@@ -4,7 +4,7 @@ ResearchAgent API Schemas
 """
 import re
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from datetime import datetime
 
@@ -62,6 +62,12 @@ class ResearchChatRequest(BaseModel):
             if search_type not in valid_types:
                 raise ValueError(f'无效的搜索类型: "{search_type}"，有效值: {valid_types}')
         return v
+
+    @model_validator(mode="after")
+    def validate_no_patient_binding(self):
+        if self.patient_id is not None:
+            raise ValueError("科研模式不得绑定患者")
+        return self
 
 
 class ResearchChatResponse(BaseModel):

@@ -10,7 +10,7 @@ import logging
 import asyncio
 import re
 from typing import AsyncGenerator
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from presentation.schemas.research_schemas import (
@@ -21,6 +21,7 @@ from presentation.schemas.research_schemas import (
 )
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
+from presentation.dependencies.security import require_platform_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
 
         # 使用 GraphManager 处理对话
         result = graph_manager.chat(
-            patient_id=request.patient_id or request.doctor_id,
+            patient_id=request.patient_id,
             session_id=session_id,
             message=request.message,
             role="doctor",
@@ -140,7 +141,10 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
 
 
 @router.post("/chat/stream")
-async def research_chat_stream(request: ResearchChatRequest):
+async def research_chat_stream(
+    request: ResearchChatRequest,
+    http_request: Request,
+):
     """
     科研对话接口（SSE流式）
 
@@ -159,6 +163,12 @@ async def research_chat_stream(request: ResearchChatRequest):
     Returns:
         StreamingResponse: SSE流式响应
     """
+    require_platform_doctor(
+        http_request,
+        request.doctor_id,
+        "research",
+    )
+
     async def generate_sse() -> AsyncGenerator[str, None]:
         """生成 SSE 事件流"""
         try:
@@ -196,7 +206,7 @@ async def research_chat_stream(request: ResearchChatRequest):
             citations = []
 
             async for chunk in graph_manager.chat_stream_async(
-                patient_id=request.patient_id or request.doctor_id,
+                patient_id=request.patient_id,
                 session_id=session_id,
                 message=request.message,
                 role="doctor",

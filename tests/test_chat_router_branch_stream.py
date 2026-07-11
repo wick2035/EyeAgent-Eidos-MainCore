@@ -551,7 +551,7 @@ class BranchStreamGraphManagerTest(unittest.TestCase):
         ):
             chunks = collect_async(
                 manager.chat_stream_async(
-                    patient_id=doctor_id,
+                    patient_id=None,
                     doctor_id=doctor_id,
                     session_id="s1",
                     message="编辑后的科研问题",
