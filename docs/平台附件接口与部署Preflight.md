@@ -58,6 +58,21 @@ Browser 可以获得业务所需的附件标识、展示元数据、回合状态
 - **数据库**：三张表、索引和应用账号权限已在目标环境验证；迁移先于任何 Java 灰度流量。
 - **可观测性**：能按安全事件、固定 route、回合状态和附件错误码聚合，不记录 download URL、storage key、原文 segment 或内部 Bearer。
 
+科研文档 claim/接管的真实 MySQL 并发门禁必须显式设置
+`RUN_MYSQL_INTEGRATION=1`，并指向已加载
+`scripts/create_research_document_tables.sql` 的隔离数据库：
+
+```bash
+RUN_MYSQL_INTEGRATION=1 \
+DB_HOST=<host> DB_PORT=<port> \
+DB_USER=<user> DB_PASSWORD=<password> DB_NAME=<database> \
+.venv/bin/python -m unittest \
+  tests.test_research_document_repository_mysql_integration -v
+```
+
+未设置开关时测试保持 skip，避免普通单元测试误连数据库；正式验收必须明确输出
+`Ran 2 tests`、`OK`，且不能出现 `skipped`。
+
 生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，不得宣称生产 `enforce` 已完成。
 
 ### 5.2 上线顺序

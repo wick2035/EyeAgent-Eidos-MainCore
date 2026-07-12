@@ -12,14 +12,16 @@ from infrastructure.repositories.research_document_repository_impl import (
 )
 
 
-_RUN_MYSQL_INTEGRATION = (
-    os.getenv("RUN_RESEARCH_DOCUMENT_MYSQL_INTEGRATION") == "1"
-)
+def _mysql_integration_enabled() -> bool:
+    return os.getenv("RUN_MYSQL_INTEGRATION") == "1"
+
+
+_RUN_MYSQL_INTEGRATION = _mysql_integration_enabled()
 
 
 @unittest.skipUnless(
     _RUN_MYSQL_INTEGRATION,
-    "设置 RUN_RESEARCH_DOCUMENT_MYSQL_INTEGRATION=1 后运行真实 MySQL 集成测试",
+    "设置 RUN_MYSQL_INTEGRATION=1 后运行真实 MySQL 集成测试",
 )
 class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
     @classmethod
