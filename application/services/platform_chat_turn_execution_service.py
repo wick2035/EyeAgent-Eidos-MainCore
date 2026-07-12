@@ -133,11 +133,7 @@ class PlatformChatTurnExecutionService:
             )
         )
         self.download_settings = download_settings
-        if downloader is None:
-            settings = download_settings or AttachmentDownloadSettings.from_env()
-            downloader = SecureAttachmentDownloader(settings)
-            self.download_settings = settings
-        elif self.download_settings is None:
+        if downloader is not None and self.download_settings is None:
             self.download_settings = getattr(downloader, "_settings", None)
         self.downloader = downloader
         self.analyzer = analyzer or PlatformAttachmentAnalyzer(
@@ -180,12 +176,33 @@ class PlatformChatTurnExecutionService:
             request.doctor_id,
             request.agent_type or "health",
         )
+        configuration_error = None
         try:
-            self._validate_urls(request)
-            turn, user_message = self._claim_prepared_turn(request, principal.subject)
-        except _ExecuteRejected as exc:
-            yield self._error_event(request, exc.error_code)
-            return
+            self._ensure_downloader()
+        except AttachmentConfigurationError as exc:
+            configuration_error = exc
+
+        if configuration_error is None:
+            try:
+                self._validate_urls(request)
+                turn, user_message = self._claim_prepared_turn(
+                    request,
+                    principal.subject,
+                )
+            except _ExecuteRejected as exc:
+                yield self._error_event(request, exc.error_code)
+                return
+        else:
+            try:
+                # 配置问题不能让已验证的 prepared 回合永久占用附件。
+                # 先由唯一的 claim 路径完成身份与状态核验，再在下方收口为失败。
+                turn, user_message = self._claim_prepared_turn(
+                    request,
+                    principal.subject,
+                )
+            except _ExecuteRejected as exc:
+                yield self._error_event(request, exc.error_code)
+                return
 
         cancel_event = self.registry.register(
             principal.subject,
@@ -202,6 +219,8 @@ class PlatformChatTurnExecutionService:
         descriptors = {item.attachment_id: item for item in request.attachments}
 
         try:
+            if configuration_error is not None:
+                raise configuration_error
             await self._ensure_running(principal.subject, request.request_id, cancel_event)
             yield {
                 "event": "execution_started",
@@ -797,6 +816,13 @@ class PlatformChatTurnExecutionService:
                 self.download_settings.endpoints_for_url(descriptor.download_url)
         except AttachmentConfigurationError as exc:
             raise _ExecuteRejected("ATTACHMENT_URL_REJECTED") from exc
+
+    def _ensure_downloader(self) -> None:
+        if self.downloader is not None:
+            return
+        settings = self.download_settings or AttachmentDownloadSettings.from_env()
+        self.download_settings = settings
+        self.downloader = SecureAttachmentDownloader(settings)
 
     async def _ensure_running(self, doctor_id, request_id, event) -> None:
         if event.is_set():

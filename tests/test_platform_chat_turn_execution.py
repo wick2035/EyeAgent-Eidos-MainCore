@@ -31,6 +31,7 @@ from domain.security.principal import CurrentPrincipal
 from domain.models.chat_entity import MessageContext
 from infrastructure.attachments.config import (
     AllowedAttachmentEndpoint,
+    AttachmentConfigurationError,
     AttachmentDownloadSettings,
 )
 from infrastructure.repositories.chat_turn_request_repository_impl import (
@@ -873,6 +874,38 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events[-1]["error_code"], ATTACHMENT_EXECUTE_MISMATCH)
         self.assertEqual(turns.get("doctor-1", "request-1").status, "prepared")
+        self.assertEqual(graph.calls, [])
+
+    async def test_missing_download_configuration_finalizes_claimed_turn_as_failed(self):
+        request = execute_request("missing-download-configuration")
+        service, turns, messages, graph, _ = make_service([request])
+        service.downloader = None
+        service.download_settings = None
+
+        with patch(
+            "application.services.platform_chat_turn_execution_service."
+            "AttachmentDownloadSettings.from_env",
+            side_effect=AttachmentConfigurationError("missing allowlist"),
+        ):
+            events = await collect(service.stream(request, principal()))
+
+        self.assertEqual(events, [
+            {
+                "event": "error",
+                "request_id": request.request_id,
+                "user_message_id": request.user_message_id,
+                "assistant_message_id": request.assistant_message_id,
+                "error_code": "ATTACHMENT_ANALYSIS_FAILED",
+            }
+        ])
+        self.assertEqual(
+            turns.get("doctor-1", request.request_id).status,
+            "failed",
+        )
+        self.assertEqual(
+            messages.get_by_id(request.assistant_message_id).status,
+            "failed",
+        )
         self.assertEqual(graph.calls, [])
 
     async def test_execute_rejects_each_authoritative_v2_snapshot_mismatch(self):
