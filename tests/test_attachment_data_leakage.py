@@ -1,10 +1,13 @@
+import asyncio
 import hashlib
 import io
 import json
 import logging
 import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +15,11 @@ from unittest.mock import patch
 
 from PIL import Image
 from pydantic import ValidationError
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from agents.graph_manager import GraphManager, PreparedGraphTerminal
+from agents.graph.state import MedicalState
 from application.services.research_document_context_selector import (
     ResearchCitationCandidate,
     ResearchContextBlock,
@@ -30,6 +36,7 @@ from application.services.platform_chat_turn_execution_service import (
 )
 from application.services.platform_chat_turn_service import (
     PlatformChatTurnService,
+    TurnAlreadyCompletedError,
 )
 from domain.models.chat_turn_request import ChatTurnRequestEntity
 from domain.security.principal import CurrentPrincipal
@@ -48,6 +55,7 @@ from presentation.schemas.platform_chat_turn_schemas import (
 from utils.transient_attachment_context import (
     get_attachment_analysis,
     get_research_document_context,
+    inject_untrusted_research_documents,
 )
 
 
@@ -155,6 +163,65 @@ class _TurnRepository:
             separators=(",", ":"),
         )
         return True
+
+
+class _TerminalRaceTurnRepository(_TurnRepository):
+    def __init__(self, turn, *, winner, winner_finished):
+        super().__init__(turn)
+        self.winner = winner
+        self.winner_finished = winner_finished
+        self.terminal_barrier = threading.Barrier(2)
+        self.abort_arrived = threading.Event()
+        self._cas_lock = threading.Lock()
+        self.terminal_calls = []
+
+    def compare_and_set_status(
+        self,
+        doctor_id,
+        request_id,
+        expected_status,
+        new_status,
+        error_code=None,
+        execute_started_at=None,
+        deadline_at=None,
+    ):
+        expected = (
+            {expected_status}
+            if isinstance(expected_status, str)
+            else set(expected_status)
+        )
+        terminal_race = (
+            expected == {"streaming"}
+            and new_status in {"completed", "cancelled"}
+        )
+        if terminal_race:
+            self.terminal_calls.append(("arrived", new_status))
+            if new_status == "cancelled":
+                self.abort_arrived.set()
+            self.terminal_barrier.wait(timeout=3)
+            if (
+                new_status != self.winner
+                and not self.winner_finished.wait(timeout=3)
+            ):
+                raise TimeoutError("terminal winner did not finish")
+
+        with self._cas_lock:
+            turn = self.get(doctor_id, request_id)
+            if turn is None or turn.status not in expected:
+                if terminal_race:
+                    self.terminal_calls.append(
+                        ("lost", new_status, getattr(turn, "status", None))
+                    )
+                return False
+            turn.status = new_status
+            turn.error_code = error_code
+            if execute_started_at is not None:
+                turn.execute_started_at = execute_started_at
+            if deadline_at is not None:
+                turn.deadline_at = deadline_at
+            if terminal_race:
+                self.terminal_calls.append(("won", new_status))
+            return True
 
 
 class _MessageRepository:
@@ -299,10 +366,65 @@ class _ResearchTextSelector:
         )
 
 
-class _MappingCheckpointer:
-    @staticmethod
-    def save_thread_mapping(**_kwargs):
+class _RecordingMemorySaver(MemorySaver):
+    def __init__(self):
+        super().__init__()
+        self.put_calls = 0
+        self.mapping_calls = []
+
+    def put(self, config, checkpoint, metadata, new_versions):
+        self.put_calls += 1
+        return super().put(config, checkpoint, metadata, new_versions)
+
+    def save_thread_mapping(self, **kwargs):
+        self.mapping_calls.append(dict(kwargs))
         return True
+
+
+def _build_checkpointed_research_graph(checkpointer, observed):
+    builder = StateGraph(MedicalState)
+
+    async def research_node(state, config):
+        context = get_research_document_context()
+        injected_messages = inject_untrusted_research_documents(
+            list(state["messages"]),
+            context,
+        )
+        observed["context"] = context
+        observed["secret_seen_in_node_local"] = (
+            _TXT_SECRET_SENTINEL in injected_messages[-1].content
+        )
+        observed["thread_id"] = config["configurable"]["thread_id"]
+        return {
+            "last_response": "安全科研回答",
+            "current_agent": "research",
+            "stage": "research_complete",
+        }
+
+    builder.add_node("research", research_node)
+    builder.add_edge(START, "research")
+    builder.add_edge("research", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+def _serialize_all_checkpoint_tuples(checkpointer):
+    listed = tuple(checkpointer.list(None))
+    serialized = []
+    restored = []
+    for checkpoint_tuple in listed:
+        restored_tuple = checkpointer.get_tuple(checkpoint_tuple.config)
+        restored.append(restored_tuple)
+        for candidate in (checkpoint_tuple, restored_tuple):
+            format_name, payload = checkpointer.serde.dumps_typed(candidate)
+            serialized.append(
+                format_name.encode("utf-8")
+                + (
+                    payload
+                    if isinstance(payload, bytes)
+                    else str(payload).encode("utf-8")
+                )
+            )
+    return listed, tuple(restored), tuple(serialized)
 
 
 class _SQLRecorder:
@@ -673,23 +795,14 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
     async def test_research_txt_body_is_transient_while_safe_excerpt_survives(self):
         observed = {}
 
-        class StreamingGraph:
-            async def astream_events(self, state, config, version):
-                observed["state"] = state
-                observed["thread_id"] = config["configurable"]["thread_id"]
-                observed["version"] = version
-                observed["context"] = get_research_document_context()
-                yield {
-                    "event": "on_chat_model_stream",
-                    "data": {"chunk": SimpleNamespace(content="安全科研回答")},
-                }
-
-            @staticmethod
-            def get_state(_config):
-                return SimpleNamespace(values={})
+        checkpointer = _RecordingMemorySaver()
+        checkpointed_graph = _build_checkpointed_research_graph(
+            checkpointer,
+            observed,
+        )
 
         manager = object.__new__(GraphManager)
-        manager.checkpointer = _MappingCheckpointer()
+        manager.checkpointer = checkpointer
         manager._build_branch_history_messages = lambda **_kwargs: []
         manager._get_state_message_count = lambda *_args: 0
         ingestion = _ResearchTextIngestion()
@@ -707,7 +820,7 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
                 )
                 with patch(
                     "agents.graph.graph_builder.get_streaming_medical_graph",
-                    return_value=StreamingGraph(),
+                    return_value=checkpointed_graph,
                 ), patch(
                     "utils.role_verification.verify_role",
                     return_value=("doctor", False),
@@ -733,11 +846,11 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
             events[-1]["citations"][0]["excerpt"],
             _SAFE_CITATION_EXCERPT,
         )
-        self.assertEqual(observed["version"], "v2")
         self.assertEqual(
             observed["context"].selection.context_blocks[0].content,
             _TXT_SECRET_SENTINEL,
         )
+        self.assertTrue(observed["secret_seen_in_node_local"])
         self.assertEqual(
             [item.file_type for item in ingestion.calls[0][1]],
             ["text"],
@@ -748,6 +861,29 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
         sql_repository.db = sql_db
         for message_id, updates in fixture.message_repo.update_calls:
             self.assertTrue(sql_repository.update(message_id, updates))
+
+        (
+            checkpoint_tuples,
+            restored_checkpoint_tuples,
+            serialized_checkpoint_tuples,
+        ) = _serialize_all_checkpoint_tuples(checkpointer)
+        self.assertGreater(checkpointer.put_calls, 0)
+        self.assertGreater(len(checkpoint_tuples), 0)
+        self.assertEqual(len(checkpointer.mapping_calls), 1)
+        self.assertTrue(all(restored_checkpoint_tuples))
+        secret_bytes = _TXT_SECRET_SENTINEL.encode("utf-8")
+        self.assertTrue(
+            all(
+                secret_bytes not in serialized
+                for serialized in serialized_checkpoint_tuples
+            )
+        )
+        self.assertTrue(
+            all(
+                b"research_document_context_handle" not in serialized
+                for serialized in serialized_checkpoint_tuples
+            )
+        )
 
         surfaces = {
             "SSE": json.dumps(events, ensure_ascii=False, default=str),
@@ -769,11 +905,9 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
                 ensure_ascii=False,
                 default=str,
             ),
-            "checkpoint": json.dumps(
-                observed["state"],
-                ensure_ascii=False,
-                default=str,
-            ),
+            "checkpoint tuples": b"\n".join(
+                serialized_checkpoint_tuples
+            ).decode("utf-8", errors="replace"),
             "status": status.model_dump_json(),
             "log": "\n".join(handler.entries),
         }
@@ -784,6 +918,233 @@ class AttachmentDataLeakageTest(unittest.IsolatedAsyncioTestCase):
             _SAFE_CITATION_EXCERPT,
             surfaces["SSE"] + surfaces["message context"],
         )
+
+    async def test_research_txt_completion_abort_race_keeps_body_transient(self):
+        for winner in ("completed", "cancelled"):
+            with self.subTest(winner=winner):
+                observed = {}
+                checkpointer = _RecordingMemorySaver()
+                checkpointed_graph = _build_checkpointed_research_graph(
+                    checkpointer,
+                    observed,
+                )
+                manager = object.__new__(GraphManager)
+                manager.checkpointer = checkpointer
+                manager._build_branch_history_messages = lambda **_kwargs: []
+                manager._get_state_message_count = lambda *_args: 0
+                handler = _LogCapture()
+                root_logger = logging.getLogger()
+                previous_level = root_logger.level
+                root_logger.setLevel(logging.DEBUG)
+                root_logger.addHandler(handler)
+                try:
+                    with tempfile.TemporaryDirectory() as temporary:
+                        fixture = _research_txt_fixture(
+                            temporary,
+                            ingestion=_ResearchTextIngestion(),
+                            graph=manager,
+                        )
+                        winner_finished = threading.Event()
+                        race_repo = _TerminalRaceTurnRepository(
+                            fixture.turn,
+                            winner=winner,
+                            winner_finished=winner_finished,
+                        )
+                        fixture.turn_repo = race_repo
+                        fixture.service.turn_repo = race_repo
+                        abort_service = PlatformChatTurnService(
+                            db=fixture.service.db,
+                            turn_repo=race_repo,
+                            conversation_repo=fixture.conversation_repo,
+                            message_repo=fixture.message_repo,
+                            chat_persistence_service=(
+                                fixture.service.chat_persistence_service
+                            ),
+                        )
+                        finalizer_entered = asyncio.Event()
+                        allow_completion_cas = asyncio.Event()
+                        real_finalize = (
+                            fixture.service.finalize_platform_turn_success
+                        )
+
+                        async def wrapped_finalize(*args):
+                            finalizer_entered.set()
+                            await allow_completion_cas.wait()
+                            result = await real_finalize(*args)
+                            if winner == "completed":
+                                winner_finished.set()
+                            return result
+
+                        fixture.service.finalize_platform_turn_success = (
+                            wrapped_finalize
+                        )
+
+                        def run_abort():
+                            try:
+                                return abort_service.abort(
+                                    "doctor-1",
+                                    fixture.request.request_id,
+                                    fixture.request.conversation_id,
+                                )
+                            except Exception as error:
+                                return error
+                            finally:
+                                if winner == "cancelled":
+                                    winner_finished.set()
+
+                        with patch(
+                            "agents.graph.graph_builder."
+                            "get_streaming_medical_graph",
+                            return_value=checkpointed_graph,
+                        ), patch(
+                            "utils.role_verification.verify_role",
+                            return_value=("doctor", False),
+                        ):
+                            stream_task = asyncio.create_task(
+                                _collect(
+                                    fixture.service.stream(
+                                        fixture.request,
+                                        _principal(
+                                            frozenset({"ai:research"})
+                                        ),
+                                    )
+                                )
+                            )
+                            await asyncio.wait_for(
+                                finalizer_entered.wait(),
+                                timeout=3,
+                            )
+                            self.assertTrue(
+                                observed["secret_seen_in_node_local"]
+                            )
+                            self.assertEqual(
+                                observed["context"]
+                                .selection.context_blocks[0].content,
+                                _TXT_SECRET_SENTINEL,
+                            )
+                            fixture.service.registry.signal(
+                                "doctor-1",
+                                fixture.request.request_id,
+                            )
+                            with ThreadPoolExecutor(
+                                max_workers=1
+                            ) as executor:
+                                abort_future = executor.submit(run_abort)
+                                abort_arrived = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        race_repo.abort_arrived.wait,
+                                        3,
+                                    ),
+                                    timeout=4,
+                                )
+                                self.assertTrue(abort_arrived)
+                                allow_completion_cas.set()
+                                events = await asyncio.wait_for(
+                                    stream_task,
+                                    timeout=4,
+                                )
+                                abort_result = await asyncio.wrap_future(
+                                    abort_future
+                                )
+
+                        status = abort_service.status(
+                            "doctor-1",
+                            fixture.request.request_id,
+                        )
+                finally:
+                    root_logger.removeHandler(handler)
+                    root_logger.setLevel(previous_level)
+
+                won = [
+                    call[1]
+                    for call in race_repo.terminal_calls
+                    if call[0] == "won"
+                ]
+                lost = [
+                    call[1]
+                    for call in race_repo.terminal_calls
+                    if call[0] == "lost"
+                ]
+                self.assertEqual(won, [winner])
+                self.assertEqual(
+                    lost,
+                    ["cancelled" if winner == "completed" else "completed"],
+                )
+                self.assertEqual(fixture.turn.status, winner)
+                self.assertEqual(status.status, winner)
+                if winner == "completed":
+                    self.assertEqual(fixture.assistant.status, "success")
+                    self.assertEqual(events[-1]["event"], "done")
+                    self.assertIsInstance(
+                        abort_result,
+                        TurnAlreadyCompletedError,
+                    )
+                    self.assertEqual(
+                        str(abort_result),
+                        "TURN_ALREADY_COMPLETED",
+                    )
+                else:
+                    self.assertEqual(fixture.assistant.status, "cancelled")
+                    self.assertEqual(events[-1]["event"], "error")
+                    self.assertEqual(
+                        events[-1]["error_code"],
+                        "TURN_CANCELLED",
+                    )
+                    self.assertEqual(abort_result.status, "cancelled")
+
+                sql_db = _SQLRecorder()
+                sql_repository = object.__new__(ChatMessageRepositoryImpl)
+                sql_repository.db = sql_db
+                for message_id, updates in fixture.message_repo.update_calls:
+                    self.assertTrue(
+                        sql_repository.update(message_id, updates)
+                    )
+                (
+                    listed_checkpoints,
+                    restored_checkpoints,
+                    serialized_checkpoints,
+                ) = _serialize_all_checkpoint_tuples(checkpointer)
+                self.assertGreater(checkpointer.put_calls, 0)
+                self.assertTrue(listed_checkpoints)
+                self.assertTrue(all(restored_checkpoints))
+                abort_surface = (
+                    repr(abort_result)
+                    if isinstance(abort_result, Exception)
+                    else abort_result.model_dump_json()
+                )
+                surfaces = {
+                    "SSE": json.dumps(events, ensure_ascii=False),
+                    "history": json.dumps(
+                        [
+                            vars(message)
+                            for message in fixture.message_repo.get_by_chat_id(
+                                fixture.request.conversation_id
+                            )
+                        ],
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    "message context": str(
+                        getattr(fixture.assistant, "context", None)
+                    ),
+                    "message SQL params": json.dumps(
+                        sql_db.calls,
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    "status": status.model_dump_json(),
+                    "abort result": abort_surface,
+                    "log": "\n".join(handler.entries),
+                    "checkpoint tuples": b"\n".join(
+                        serialized_checkpoints
+                    ).decode("utf-8", errors="replace"),
+                }
+                for surface_name, surface in surfaces.items():
+                    with self.subTest(
+                        winner=winner,
+                        surface=surface_name,
+                    ):
+                        self.assertNotIn(_TXT_SECRET_SENTINEL, surface)
 
     async def test_research_txt_failure_redacts_body_from_exception_and_surfaces(self):
         graph = _CheckpointGraph()
