@@ -166,7 +166,7 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(captured.exception), expected_code)
                 self._assert_no_request_directories()
 
-    async def test_text_stream_stops_at_524289th_byte(self):
+    async def test_text_stream_returns_size_limit_at_524289th_byte(self):
         payload = b"a" * (_TXT_LIMIT_BYTES + 1)
 
         async def handler(_request):
@@ -179,9 +179,7 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
         descriptor = _text_descriptor(
             f"http://storage.test:{port}/oversized.txt",
             b"a" * _TXT_LIMIT_BYTES,
-        ).model_dump()
-        descriptor["size_bytes"] = len(payload)
-        descriptor["content_sha256"] = hashlib.sha256(payload).hexdigest()
+        )
 
         with self.assertRaises(AttachmentDownloadError) as captured:
             async with downloader.download_all(
@@ -192,7 +190,7 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             captured.exception.error_code,
-            "ATTACHMENT_STREAM_LIMIT_EXCEEDED",
+            "RESEARCH_TXT_SIZE_LIMIT",
         )
         self.assertEqual(captured.exception.bytes_received, len(payload))
         self._assert_no_request_directories()

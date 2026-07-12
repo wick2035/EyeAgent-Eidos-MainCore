@@ -216,12 +216,6 @@ class SecureAttachmentDownloader:
         expected_size = _strict_descriptor_integer(descriptor, "size_bytes")
         mime_type = str(_value(descriptor, "mime_type"))
         is_research_text = mime_type == "text/plain"
-        stream_limit = min(
-            expected_size,
-            _RESEARCH_TEXT_LIMIT_BYTES
-            if is_research_text
-            else _TOTAL_LIMIT_BYTES,
-        )
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
         received = 0
@@ -251,7 +245,19 @@ class SecureAttachmentDownloader:
                 with os.fdopen(file_descriptor, "wb") as output:
                     async for chunk in response.content.iter_chunked(self._chunk_size):
                         received += len(chunk)
-                        if received > stream_limit:
+                        if (
+                            is_research_text
+                            and received > _RESEARCH_TEXT_LIMIT_BYTES
+                        ):
+                            raise AttachmentDownloadError(
+                                "RESEARCH_TXT_SIZE_LIMIT",
+                                attachment_id=attachment_id,
+                                bytes_received=received,
+                            )
+                        if (
+                            received > expected_size
+                            or received > _TOTAL_LIMIT_BYTES
+                        ):
                             raise AttachmentDownloadError(
                                 "ATTACHMENT_STREAM_LIMIT_EXCEEDED",
                                 attachment_id=attachment_id,
