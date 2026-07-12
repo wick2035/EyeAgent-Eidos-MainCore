@@ -2,8 +2,10 @@ import hashlib
 import unittest
 
 from infrastructure.attachments.research_text_contract import (
+    MAX_RESEARCH_TEXT_CANONICAL_BYTES,
     ResearchTextContractError,
     normalize_research_text_bytes,
+    validate_canonical_research_text_bytes,
 )
 
 
@@ -97,6 +99,32 @@ class ResearchTextContractTest(unittest.TestCase):
         for content in ("text", bytearray(b"text"), None):
             with self.subTest(content=content):
                 self._assert_contract_error(content, "RESEARCH_TXT_INVALID")
+
+    def test_canonical_artifact_accepts_four_bytes_per_character_at_limit(self):
+        canonical_text = "\U0001f600" * _CHARACTER_LIMIT
+        canonical = canonical_text.encode("utf-8")
+        self.assertEqual(
+            MAX_RESEARCH_TEXT_CANONICAL_BYTES,
+            4 * _CHARACTER_LIMIT,
+        )
+        self.assertEqual(len(canonical), MAX_RESEARCH_TEXT_CANONICAL_BYTES)
+
+        result = validate_canonical_research_text_bytes(canonical)
+
+        self.assertEqual(result.text, canonical_text)
+        self.assertEqual(result.utf8_bytes, canonical)
+        self.assertEqual(result.character_count, _CHARACTER_LIMIT)
+
+    def test_canonical_artifact_rejects_bytes_above_theoretical_limit(self):
+        oversized = ("\U0001f600" * _CHARACTER_LIMIT).encode("utf-8") + b"x"
+
+        with self.assertRaises(ResearchTextContractError) as captured:
+            validate_canonical_research_text_bytes(oversized)
+
+        self.assertEqual(
+            captured.exception.error_code,
+            "RESEARCH_TXT_CONTENT_LIMIT",
+        )
 
     def _assert_contract_error(self, content, expected_code):
         with self.assertRaises(ResearchTextContractError) as captured:

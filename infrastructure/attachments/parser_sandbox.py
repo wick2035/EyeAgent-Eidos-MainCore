@@ -32,7 +32,7 @@ from infrastructure.attachments.parser_protocol import (
 from infrastructure.attachments.research_text_contract import (
     NormalizedResearchText,
     ResearchTextContractError,
-    normalize_research_text_bytes,
+    validate_canonical_research_text_bytes,
 )
 from utils.pdf_utils import (
     RESEARCH_PDF_MAX_OCR_PAGES,
@@ -741,7 +741,7 @@ def _read_validated_research_text_bundle(
     if digest != manifest.text_sha256:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
     try:
-        normalized = normalize_research_text_bytes(content)
+        normalized = validate_canonical_research_text_bytes(content)
     except ResearchTextContractError as exc:
         raise AttachmentParserError(exc.error_code) from exc
     if (

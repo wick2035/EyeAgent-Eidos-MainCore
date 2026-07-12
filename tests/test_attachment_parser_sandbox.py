@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -830,6 +831,47 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                         manifest.to_json_bytes(),
                     )
 
+    async def test_host_accepts_canonical_text_expanded_beyond_raw_size_limit(self):
+        raw_text = "\u0344" * 250_000
+        raw = raw_text.encode("utf-8")
+        canonical_text = unicodedata.normalize("NFC", raw_text)
+        canonical = canonical_text.encode("utf-8")
+        self.assertEqual(len(raw), 500_000)
+        self.assertEqual(len(canonical_text), 500_000)
+        self.assertEqual(len(canonical), 1_000_000)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_bundle = Path(temporary) / "output.bundle"
+            manifest = ResearchTextManifest(
+                profile="research_text_v1",
+                text_relative_path="document.txt",
+                text_sha256=hashlib.sha256(canonical).hexdigest(),
+                character_count=len(canonical_text),
+            )
+            with zipfile.ZipFile(
+                output_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("document.txt", canonical)
+            os.chmod(output_bundle, 0o600)
+
+            try:
+                parsed = sandbox_module._read_validated_research_text_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                )
+            except AttachmentParserError as error:
+                self.fail(
+                    "canonical TXT artifact within the character limit "
+                    f"must be accepted: {error.error_code}"
+                )
+
+        self.assertEqual(parsed.text, canonical_text)
+        self.assertEqual(parsed.utf8_bytes, canonical)
+        self.assertEqual(parsed.sha256, manifest.text_sha256)
+        self.assertEqual(parsed.character_count, 500_000)
+
     async def test_host_rejects_more_than_twenty_research_ocr_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             output_bundle = Path(temporary) / "output.bundle"
@@ -1509,6 +1551,60 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(parsed.text_sha256, hashlib.sha256(canonical).hexdigest())
         self.assertEqual(parsed.character_count, len(canonical_text))
         self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_text_accepts_nfc_expansion_beyond_raw_size_limit(self):
+        raw_text = "\u0344" * 250_000
+        payload = raw_text.encode("utf-8")
+        canonical_text = unicodedata.normalize("NFC", raw_text)
+        canonical = canonical_text.encode("utf-8")
+        self.assertEqual(len(payload), 500_000)
+        self.assertEqual(len(canonical_text), 500_000)
+        self.assertEqual(len(canonical), 1_000_000)
+
+        source = self.root / "research-nfc-expansion.txt"
+        source.write_bytes(payload)
+        os.chmod(source, 0o600)
+        downloaded = DownloadedAttachment(
+            attachment_id="research-text-nfc-expansion",
+            analysis_attempt_id="research-text-nfc-expansion-attempt",
+            file_type="text",
+            filename="nfc-expansion.txt",
+            mime_type="text/plain",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=None,
+            path=source,
+            document_version=12,
+        )
+        sandbox_root = self.root / "sandbox-research-text-nfc-expansion"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: "integration-research-text-nfc-expansion",
+        )
+
+        try:
+            parsed = await sandbox.parse(
+                downloaded,
+                profile="research_text_v1",
+            )
+        except AttachmentParserError as error:
+            self.fail(
+                "raw TXT within the upload and character limits "
+                f"must survive canonical expansion: {error.error_code}"
+            )
+
+        self.assertIsInstance(parsed, ParsedResearchText)
+        self.assertEqual(parsed.document_version, 12)
+        self.assertEqual(parsed.text, canonical_text)
+        self.assertEqual(parsed.text_sha256, hashlib.sha256(canonical).hexdigest())
+        self.assertEqual(parsed.character_count, 500_000)
+        self.assertEqual(
+            self._containers_for_label(
+                "integration-research-text-nfc-expansion"
+            ),
+            (),
+        )
         self.assertEqual(list(sandbox_root.iterdir()), [])
 
     async def test_research_empty_password_encrypted_pdf_preserves_error_code(self):
