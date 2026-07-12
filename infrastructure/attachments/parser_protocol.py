@@ -34,10 +34,16 @@ class WorkerRequest:
         valid_contracts = {
             "image": {"image/jpeg", "image/png", "image/webp"},
             "pdf": {"application/pdf"},
+            "text": {"text/plain"},
         }
         if (
             not isinstance(self.profile, str)
-            or self.profile not in {"assistant_visual_v1", "research_pdf_v1"}
+            or self.profile
+            not in {
+                "assistant_visual_v1",
+                "research_pdf_v1",
+                "research_text_v1",
+            }
         ):
             raise AttachmentParserError("ATTACHMENT_PROFILE_INVALID")
         if self.file_type not in valid_contracts or self.mime_type not in valid_contracts[
@@ -46,7 +52,12 @@ class WorkerRequest:
             raise AttachmentParserError("ATTACHMENT_TYPE_INVALID")
         if self.profile == "research_pdf_v1" and self.file_type != "pdf":
             raise AttachmentParserError("ATTACHMENT_TYPE_INVALID")
-        if self.file_type == "image" and self.declared_page_count is not None:
+        if (
+            self.profile == "research_text_v1"
+            and self.file_type != "text"
+        ) or (self.profile != "research_text_v1" and self.file_type == "text"):
+            raise AttachmentParserError("ATTACHMENT_TYPE_INVALID")
+        if self.file_type in {"image", "text"} and self.declared_page_count is not None:
             raise AttachmentParserError("ATTACHMENT_PAGE_COUNT_INVALID")
         if self.file_type == "pdf" and (
             not isinstance(self.declared_page_count, int)
@@ -298,6 +309,61 @@ class ResearchPdfManifest:
 
 
 @dataclass(frozen=True)
+class ResearchTextManifest:
+    profile: str
+    text_relative_path: str
+    text_sha256: str
+    character_count: int
+
+    def __post_init__(self) -> None:
+        if self.profile != "research_text_v1":
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if self.text_relative_path != "document.txt":
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        if not isinstance(self.text_sha256, str) or not _SHA256_PATTERN.fullmatch(
+            self.text_sha256
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if (
+            type(self.character_count) is not int
+            or not 1 <= self.character_count <= 500_000
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "profile": self.profile,
+                "text_relative_path": self.text_relative_path,
+                "text_sha256": self.text_sha256,
+                "character_count": self.character_count,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json_bytes(cls, payload: bytes) -> "ResearchTextManifest":
+        try:
+            decoded: Any = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID") from exc
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "profile",
+            "text_relative_path",
+            "text_sha256",
+            "character_count",
+        }:
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        try:
+            return cls(**decoded)
+        except TypeError as exc:
+            raise AttachmentParserError(
+                "ATTACHMENT_WORKER_MANIFEST_INVALID"
+            ) from exc
+
+
+@dataclass(frozen=True)
 class ParsedAttachmentPage:
     page_number: int
     mime_type: str
@@ -328,6 +394,20 @@ class ParsedResearchPdf:
     document_version: int
     mime_type: str
     pages: tuple[ParsedResearchPdfPage, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.document_version) is not int or self.document_version < 1:
+            raise AttachmentParserError("ATTACHMENT_DOCUMENT_VERSION_INVALID")
+
+
+@dataclass(frozen=True)
+class ParsedResearchText:
+    attachment_id: str
+    document_version: int
+    mime_type: str
+    text: str
+    text_sha256: str
+    character_count: int
 
     def __post_init__(self) -> None:
         if type(self.document_version) is not int or self.document_version < 1:
