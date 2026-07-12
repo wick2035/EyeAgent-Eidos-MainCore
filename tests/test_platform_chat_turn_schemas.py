@@ -226,6 +226,61 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
         invalid["attachment_scope"] = "patient"
         with self.assertRaises(ValidationError):
             ExecutePlatformChatTurnRequest(**invalid)
+
+    def test_v2_research_text_execute_matches_golden_wire(self):
+        payload = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_text.json"
+        )
+
+        request = ExecutePlatformChatTurnRequest(**payload)
+
+        self.assertEqual(request.attachments[0].file_type, "text")
+        self.assertIsNone(request.attachments[0].page_count)
+        self.assertEqual(request.model_dump(mode="json"), payload)
+
+        invalid_payloads = []
+        for field, value in (
+            ("size_bytes", 524289),
+            ("page_count", 1),
+            ("mime_type", "application/pdf"),
+        ):
+            invalid = load_fixture(
+                "platform_chat_turn_internal_wire_v2_research_text.json"
+            )
+            invalid["attachments"][0][field] = value
+            invalid_payloads.append(invalid)
+
+        health_patient = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_text.json"
+        )
+        health_patient.update(
+            patient_id="patient-1",
+            agent_type="health",
+            attachment_scope="patient",
+            research_options=None,
+        )
+        invalid_payloads.append(health_patient)
+
+        v1 = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_text.json"
+        )
+        v1["version"] = 1
+        v1["patient_id"] = "patient-1"
+        for field in ("agent_type", "attachment_scope", "research_options"):
+            v1.pop(field)
+        invalid_payloads.append(v1)
+
+        extra_field = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_text.json"
+        )
+        extra_field["attachments"][0]["content"] = "forbidden"
+        invalid_payloads.append(extra_field)
+
+        for invalid in invalid_payloads:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValidationError):
+                    ExecutePlatformChatTurnRequest(**invalid)
+
     def test_fingerprint_matches_v1_fixture(self):
         fixture = load_fixture("attachment_turn_fingerprint_v1.json")
         self.assertEqual(

@@ -60,13 +60,14 @@ class InternalAttachmentDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     attachment_id: str
-    file_type: Literal["image", "pdf"]
+    file_type: Literal["image", "pdf", "text"]
     filename: str
     mime_type: Literal[
         "image/jpeg",
         "image/png",
         "image/webp",
         "application/pdf",
+        "text/plain",
     ]
     size_bytes: int = Field(strict=True, gt=0, le=30 * 1024 * 1024)
     page_count: int | None = Field(default=None, strict=True, ge=1, le=100)
@@ -84,11 +85,18 @@ class InternalAttachmentDescriptor(BaseModel):
                 raise ValueError("image size_bytes 不得超过 10MB")
             if self.page_count is not None:
                 raise ValueError("image 不允许 page_count")
-        else:
+        elif self.file_type == "pdf":
             if self.mime_type != "application/pdf":
                 raise ValueError("pdf 必须使用 application/pdf")
             if self.page_count is None:
                 raise ValueError("pdf 必须提供 page_count")
+        elif self.file_type == "text":
+            if (
+                self.mime_type != "text/plain"
+                or self.size_bytes > 512 * 1024
+                or self.page_count is not None
+            ):
+                raise ValueError("text descriptor invalid")
         return self
 
 
@@ -217,6 +225,15 @@ class ExecutePlatformChatTurnRequest(BaseModel):
     @model_validator(mode="after")
     def validate_total_attachment_size(self) -> "ExecutePlatformChatTurnRequest":
         self._validate_agent_contract()
+        if any(
+            attachment.file_type == "text" for attachment in self.attachments
+        ) and (
+            self.version != 2
+            or self.agent_type != "research"
+            or self.attachment_scope != "research"
+            or self.patient_id is not None
+        ):
+            raise ValueError("text 仅允许 v2 research/research/null-patient")
         total_size = sum(attachment.size_bytes for attachment in self.attachments)
         if total_size > 40 * 1024 * 1024:
             raise ValueError("附件总量不得超过 40MB")
