@@ -629,7 +629,26 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         self.assertIn("delete from research_document_ingestion", normalized)
         self.assertIn("doctor_id = %s", normalized)
         self.assertIn("attachment_id = %s", normalized)
+        self.assertNotIn("processor_type", normalized)
+        self.assertNotIn("file_type", normalized)
+        self.assertNotIn("mime_type", normalized)
         self.assertEqual(operation[2], ("doctor-1", "attachment-1"))
+
+    def test_same_attachment_purge_is_isolated_across_doctors(self):
+        db = ScriptedDB(execute_results=[0, 1])
+        repository = ResearchDocumentRepositoryImpl(db=db)
+
+        first = repository.purge("doctor-1", "shared-text-attachment")
+        second = repository.purge("doctor-2", "shared-text-attachment")
+
+        self.assertEqual((first, second), (0, 1))
+        self.assertEqual(
+            [operation[2] for operation in db.operations],
+            [
+                ("doctor-1", "shared-text-attachment"),
+                ("doctor-2", "shared-text-attachment"),
+            ],
+        )
 
 
 class ChatTurnIngestionReferencesTest(unittest.TestCase):

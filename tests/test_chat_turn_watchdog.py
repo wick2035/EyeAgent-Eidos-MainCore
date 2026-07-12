@@ -13,6 +13,7 @@ from infrastructure.repositories.chat_turn_request_repository_impl import (
 
 
 _NOW = datetime(2026, 7, 11, 12, 0, 0)
+TXT_SECRET_SENTINEL = "TXT_SECRET_SENTINEL_7f9c"
 
 
 def _turn(
@@ -291,7 +292,7 @@ class ChatTurnWatchdogTest(unittest.TestCase):
 
     def test_poisoned_candidate_does_not_block_later_expired_turn(self):
         poison = _turn(
-            request_id="sensitive-poison-record",
+            request_id="poisoned-txt",
             status="streaming",
             create_time=_NOW - timedelta(minutes=20),
             deadline_at=_NOW - timedelta(minutes=5),
@@ -302,8 +303,20 @@ class ChatTurnWatchdogTest(unittest.TestCase):
             create_time=_NOW - timedelta(minutes=20),
             deadline_at=_NOW,
         )
+        for turn in (poison, healthy):
+            turn.agent_type = "research"
+            turn.attachment_scope = "research"
+            turn.patient_id = None
+            turn.attachment_ids_json = '["shared-text-attachment"]'
         watchdog, _, conversations, messages, db = _watchdog(poison, healthy)
-        del conversations.items[poison.conversation_id]
+        original_lock = conversations.lock_by_id
+
+        def lock_with_secret_failure(conversation_id):
+            if conversation_id == poison.conversation_id:
+                raise RuntimeError(TXT_SECRET_SENTINEL)
+            return original_lock(conversation_id)
+
+        conversations.lock_by_id = lock_with_secret_failure
 
         with self.assertLogs(
             "application.services.chat_turn_watchdog",
@@ -328,6 +341,7 @@ class ChatTurnWatchdogTest(unittest.TestCase):
         self.assertIn("RuntimeError", captured.output[0])
         self.assertNotIn(poison.request_id, captured.output[0])
         self.assertNotIn(poison.conversation_id, captured.output[0])
+        self.assertNotIn(TXT_SECRET_SENTINEL, captured.output[0])
 
     def test_prepared_turn_younger_than_ten_minutes_is_unchanged(self):
         turn = _turn(

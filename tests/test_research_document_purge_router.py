@@ -192,6 +192,26 @@ class ResearchDocumentPurgeRouterTest(unittest.IsolatedAsyncioTestCase):
             ["begin", "commit", "begin", "commit"],
         )
 
+    async def test_repeated_cross_doctor_purge_is_rejected_before_repository(self):
+        app, db, repository = self._app(_principal())
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            responses = [
+                await client.request(
+                    "DELETE",
+                    f"/api/platform/research-documents/{ATTACHMENT_ID}",
+                    json={"doctor_id": OTHER_DOCTOR_ID},
+                )
+                for _ in range(2)
+            ]
+
+        self.assertEqual([item.status_code for item in responses], [403, 403])
+        self.assertEqual(responses[0].content, responses[1].content)
+        self.assertEqual(repository.calls, [])
+        self.assertEqual(db.events, [])
+
     async def test_body_and_path_identifiers_are_strict_uuid_values(self):
         cases = (
             ({"doctor_id": 123}, ATTACHMENT_ID),
