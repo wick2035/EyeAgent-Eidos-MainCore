@@ -92,7 +92,8 @@ class InternalAttachmentDescriptor(BaseModel):
                 raise ValueError("pdf 必须提供 page_count")
         elif self.file_type == "text":
             if (
-                self.mime_type != "text/plain"
+                "page_count" not in self.model_fields_set
+                or self.mime_type != "text/plain"
                 or self.size_bytes > 512 * 1024
                 or self.page_count is not None
             ):

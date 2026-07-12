@@ -250,6 +250,12 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
             invalid["attachments"][0][field] = value
             invalid_payloads.append(invalid)
 
+        missing_page_count = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_text.json"
+        )
+        missing_page_count["attachments"][0].pop("page_count")
+        invalid_payloads.append(missing_page_count)
+
         health_patient = load_fixture(
             "platform_chat_turn_internal_wire_v2_research_text.json"
         )
