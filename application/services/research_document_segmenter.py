@@ -129,7 +129,11 @@ class ResearchDocumentSegmenter:
         if not isinstance(extracted, ExtractedResearchText):
             raise ValueError("科研 TXT 提取结果无效")
         normalized = _normalize_text(extracted.text)
-        chunks = _split_normalized_text(normalized)
+        chunks = [
+            content
+            for content in _split_normalized_text(normalized)
+            if content.strip()
+        ]
         if not chunks:
             raise ValueError("科研 TXT 提取正文不能为空")
         return [

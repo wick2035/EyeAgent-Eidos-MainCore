@@ -156,6 +156,42 @@ class ResearchDocumentSegmenterTest(unittest.TestCase):
             self.assertEqual(segment.token_count, estimate_tokens_v1(segment.content))
             self.assertLessEqual(segment.token_count, MAX_SEGMENT_TOKENS)
 
+    def test_text_filters_whitespace_only_chunks_and_reindexes_stably(self):
+        cases = (
+            (" " * 7500 + "evidence", 1),
+            ("a" * 7500 + " " * 7500 + "evidence", 2),
+        )
+        for text, expected_count in cases:
+            with self.subTest(expected_count=expected_count):
+                extracted = ExtractedResearchText(
+                    text=text,
+                    text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    character_count=len(text),
+                )
+
+                first = self.segmenter.segment_text(self.ingestion_id, extracted)
+                second = self.segmenter.segment_text(self.ingestion_id, extracted)
+
+                self.assertEqual(first, second)
+                self.assertEqual(len(first), expected_count)
+                self.assertTrue(all(segment.content.strip() for segment in first))
+                self.assertEqual(
+                    [segment.ordinal for segment in first],
+                    list(range(expected_count)),
+                )
+                for segment in first:
+                    digest = hashlib.sha256(
+                        segment.content.encode("utf-8")
+                    ).hexdigest()
+                    self.assertEqual(
+                        segment.id,
+                        build_research_document_segment_id(
+                            self.ingestion_id,
+                            segment.ordinal,
+                            digest,
+                        ),
+                    )
+
     def test_output_is_stable_continuous_and_uses_entity_hash_uuid(self):
         pages = [_page(1, "a" * 8000), _page(2, "结尾", "ocr")]
 
