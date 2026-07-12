@@ -4,11 +4,16 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import Request
+
 from agents.graph_manager import GraphManager, PreparedGraphTerminal
 from application.services.legacy_text_turn_authority import (
     build_legacy_text_turn_authority,
 )
 from domain.models.chat_entity import ChatConversationEntity, ChatMessageEntity
+from presentation.dependencies.security import (
+    INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY,
+)
 from presentation.routers.conversation_router import get_conversation_detail, switch_active_branch
 from presentation.schemas.conversation_schemas import ActiveBranchRequest
 from presentation.schemas.chat_schemas import EditResendRequest, RegenerateRequest
@@ -37,6 +42,16 @@ def first_async(async_iterable):
             await iterator.aclose()
 
     return asyncio.run(_first())
+
+
+def off_mode_request() -> Request:
+    return Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/api/conversations/c1",
+        "headers": [],
+        INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY: "off",
+    })
 
 
 class FakeCheckpointer:
@@ -816,7 +831,9 @@ class BranchConversationRouterTest(unittest.TestCase):
             "presentation.routers.conversation_router.get_chat_persistence_service",
             return_value=service,
         ):
-            response = asyncio.run(get_conversation_detail("c1"))
+            response = asyncio.run(
+                get_conversation_detail("c1", off_mode_request())
+            )
 
         self.assertEqual(response.messages[0].context, None)
 
@@ -840,7 +857,11 @@ class BranchConversationRouterTest(unittest.TestCase):
             return_value=service,
         ):
             response = asyncio.run(
-                switch_active_branch("c1", ActiveBranchRequest(through_message_id="user-branch"))
+                switch_active_branch(
+                    "c1",
+                    ActiveBranchRequest(through_message_id="user-branch"),
+                    off_mode_request(),
+                )
             )
 
         self.assertEqual(response["active_node_id"], "assistant-leaf")
