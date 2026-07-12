@@ -15,6 +15,7 @@ from infrastructure.attachments.config import (
 from infrastructure.attachments.secure_downloader import (
     AttachmentDownloadError,
     SecureAttachmentDownloader,
+    _safe_suffix,
 )
 from presentation.schemas.platform_chat_turn_schemas import (
     InternalAttachmentDescriptor,
@@ -23,6 +24,7 @@ from presentation.schemas.platform_chat_turn_schemas import (
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"safe-image"
 _MIB = 1024 * 1024
+_TXT_LIMIT_BYTES = 512 * 1024
 
 
 def _descriptor(url: str, payload: bytes = _PNG, **overrides):
@@ -40,6 +42,18 @@ def _descriptor(url: str, payload: bytes = _PNG, **overrides):
     }
     values.update(overrides)
     return InternalAttachmentDescriptor(**values)
+
+
+def _text_descriptor(url: str, payload: bytes, **overrides):
+    return _descriptor(
+        url,
+        payload,
+        file_type="text",
+        filename="research.txt",
+        mime_type="text/plain",
+        page_count=None,
+        **overrides,
+    )
 
 
 class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
@@ -75,6 +89,162 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
 
     def _assert_no_request_directories(self):
         self.assertEqual(list(self.temp_root.iterdir()), [])
+
+    def test_text_plain_uses_txt_suffix(self):
+        self.assertEqual(_safe_suffix("text/plain"), ".txt")
+
+    async def test_valid_text_preserves_raw_bytes_and_skips_binary_magic(self):
+        payload = b"\xef\xbb\xbfCafe\xcc\x81\r\nline\r"
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type="text/plain")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port), temp_root=self.temp_root
+        )
+        descriptor = _text_descriptor(
+            f"http://storage.test:{port}/research.txt",
+            payload,
+        )
+
+        with patch(
+            "infrastructure.attachments.secure_downloader._matches_magic"
+        ) as matches_magic:
+            async with downloader.download_all(
+                [descriptor],
+                "request-valid-text",
+            ) as items:
+                self.assertEqual(items[0].path.suffix, ".txt")
+                self.assertEqual(items[0].path.read_bytes(), payload)
+                self.assertEqual(items[0].size_bytes, len(payload))
+                self.assertEqual(
+                    items[0].content_sha256,
+                    hashlib.sha256(payload).hexdigest(),
+                )
+
+        matches_magic.assert_not_called()
+        self._assert_no_request_directories()
+
+    async def test_text_contract_failures_map_to_stable_download_error_codes(self):
+        invalid_payloads = {
+            "/encoding": (
+                b"unsafe-encoding-sentinel\xff",
+                "RESEARCH_TXT_ENCODING_UNSUPPORTED",
+            ),
+            "/binary": (b"safe\x00text", "RESEARCH_TXT_BINARY"),
+            "/blank": (b" \t\r\n", "RESEARCH_TXT_INVALID"),
+            "/characters": (
+                b"a" * 500_001,
+                "RESEARCH_TXT_CONTENT_LIMIT",
+            ),
+        }
+
+        async def handler(request):
+            payload, _error_code = invalid_payloads[request.path]
+            return web.Response(body=payload, content_type="text/plain")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port), temp_root=self.temp_root
+        )
+
+        for path, (payload, expected_code) in invalid_payloads.items():
+            with self.subTest(expected_code=expected_code):
+                descriptor = _text_descriptor(
+                    f"http://storage.test:{port}{path}",
+                    payload,
+                )
+                with self.assertRaises(AttachmentDownloadError) as captured:
+                    async with downloader.download_all(
+                        [descriptor],
+                        f"request-{expected_code}",
+                    ):
+                        self.fail("invalid TXT must fail before yielding")
+
+                self.assertEqual(captured.exception.error_code, expected_code)
+                self.assertEqual(str(captured.exception), expected_code)
+                self._assert_no_request_directories()
+
+    async def test_text_stream_stops_at_524289th_byte(self):
+        payload = b"a" * (_TXT_LIMIT_BYTES + 1)
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type="text/plain")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port), temp_root=self.temp_root
+        )
+        descriptor = _text_descriptor(
+            f"http://storage.test:{port}/oversized.txt",
+            b"a" * _TXT_LIMIT_BYTES,
+        ).model_dump()
+        descriptor["size_bytes"] = len(payload)
+        descriptor["content_sha256"] = hashlib.sha256(payload).hexdigest()
+
+        with self.assertRaises(AttachmentDownloadError) as captured:
+            async with downloader.download_all(
+                [descriptor],
+                "request-text-stream-limit",
+            ):
+                self.fail("TXT stream overflow must fail before yielding")
+
+        self.assertEqual(
+            captured.exception.error_code,
+            "ATTACHMENT_STREAM_LIMIT_EXCEEDED",
+        )
+        self.assertEqual(captured.exception.bytes_received, len(payload))
+        self._assert_no_request_directories()
+
+    async def test_text_failure_does_not_leak_body_decoder_path_or_hash(self):
+        body_sentinel = "PRIVATE_RESEARCH_BODY_SENTINEL"
+        path_sentinel = "PRIVATE_RESEARCH_PATH_SENTINEL"
+        payload = body_sentinel.encode("ascii") + b"\xff"
+        content_sha256 = hashlib.sha256(payload).hexdigest()
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type="text/plain")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port), temp_root=self.temp_root
+        )
+        descriptor = _text_descriptor(
+            f"http://storage.test:{port}/{path_sentinel}",
+            payload,
+        )
+
+        with self.assertLogs(
+            "infrastructure.attachments.secure_downloader",
+            level="WARNING",
+        ) as captured_logs:
+            with self.assertRaises(AttachmentDownloadError) as captured_error:
+                async with downloader.download_all(
+                    [descriptor],
+                    "request-text-private",
+                ):
+                    self.fail("invalid TXT must fail before yielding")
+
+        rendered_error = repr(captured_error.exception)
+        rendered_logs = "\n".join(captured_logs.output)
+        self.assertEqual(
+            captured_error.exception.error_code,
+            "RESEARCH_TXT_ENCODING_UNSUPPORTED",
+        )
+        for private_value in (
+            body_sentinel,
+            path_sentinel,
+            content_sha256,
+            str(self.temp_root),
+        ):
+            self.assertNotIn(private_value, rendered_error)
+            self.assertNotIn(private_value, rendered_logs)
+        self.assertNotIn("position", rendered_error.lower())
+        self.assertNotIn("position", rendered_logs.lower())
+        self.assertIsNone(captured_error.exception.__cause__)
+        self.assertIsNone(captured_error.exception.__context__)
+        self._assert_no_request_directories()
 
     async def test_success_uses_pinned_ip_and_private_permissions(self):
         async def handler(_request):
