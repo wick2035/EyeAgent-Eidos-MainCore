@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 
 from domain.models.research_document import (
     ExtractedResearchPage,
+    ExtractedResearchText,
     ProcessorType,
     ResearchDocumentSegmentEntity,
 )
@@ -44,16 +45,18 @@ class ResearchDocumentSegmenter:
     def segment(
         self,
         ingestion_id: str,
-        pages: Sequence[ExtractedResearchPage],
+        extracted: Sequence[ExtractedResearchPage] | ExtractedResearchText,
         *,
         processor_type: ProcessorType,
     ) -> list[ResearchDocumentSegmentEntity]:
         if processor_type == "pdf_hybrid_v1":
-            return self.segment_pdf(ingestion_id, pages)
+            return self.segment_pdf(ingestion_id, extracted)
         if processor_type == "image_vision_v1":
-            if len(pages) != 1:
+            if not isinstance(extracted, Sequence) or len(extracted) != 1:
                 raise ValueError("科研图片必须且只能产生一个提取页")
-            return self.segment_image(ingestion_id, pages[0])
+            return self.segment_image(ingestion_id, extracted[0])
+        if processor_type == "plain_text_v1":
+            return self.segment_text(ingestion_id, extracted)
         raise ValueError("不支持的科研文档 processor_type")
 
     def segment_pdf(
@@ -116,6 +119,37 @@ class ResearchDocumentSegmenter:
                     "ocr_page_count": 0,
                 },
             )
+        ]
+
+    def segment_text(
+        self,
+        ingestion_id: str,
+        extracted: ExtractedResearchText,
+    ) -> list[ResearchDocumentSegmentEntity]:
+        if not isinstance(extracted, ExtractedResearchText):
+            raise ValueError("科研 TXT 提取结果无效")
+        normalized = _normalize_text(extracted.text)
+        chunks = _split_normalized_text(normalized)
+        if not chunks:
+            raise ValueError("科研 TXT 提取正文不能为空")
+        return [
+            ResearchDocumentSegmentEntity(
+                ingestion_id=ingestion_id,
+                ordinal=ordinal,
+                content=content,
+                page_start=None,
+                page_end=None,
+                sheet_name=None,
+                row_start=None,
+                row_end=None,
+                token_count=estimate_tokens_v1(content),
+                metadata={
+                    "block_index": ordinal,
+                    "extraction_method": "plain_text",
+                    "extraction_mode": "text",
+                },
+            )
+            for ordinal, content in enumerate(chunks)
         ]
 
 

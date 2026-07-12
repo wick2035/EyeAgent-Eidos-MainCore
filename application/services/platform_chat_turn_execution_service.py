@@ -16,6 +16,7 @@ from application.services.platform_attachment_analyzer import (
     AttachmentStatusUpdate,
     PlatformAttachmentAnalyzer,
 )
+from application.services.plain_text_processor import PlainTextProcessor
 from application.services.research_document_context_selector import (
     ResearchDocumentContextSelection,
     ResearchDocumentContextSelector,
@@ -145,12 +146,20 @@ class PlatformChatTurnExecutionService:
             or research_context_selector is None
             else None
         )
+        research_sandbox = (
+            AttachmentParserSandbox()
+            if research_ingestion_service is None
+            else None
+        )
         self.research_ingestion_service = (
             research_ingestion_service
             or ResearchDocumentIngestionService(
                 repository=research_repository,
                 processor=ResearchDocumentProcessor(
-                    AttachmentParserSandbox()
+                    research_sandbox,
+                    plain_text_processor=PlainTextProcessor(
+                        research_sandbox
+                    ),
                 ),
             )
         )

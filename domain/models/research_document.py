@@ -8,7 +8,11 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-ProcessorType = Literal["pdf_hybrid_v1", "image_vision_v1"]
+ProcessorType = Literal[
+    "pdf_hybrid_v1",
+    "image_vision_v1",
+    "plain_text_v1",
+]
 IngestionStatus = Literal["pending", "processing", "ready", "failed"]
 
 _INGESTION_ID_NAMESPACE = uuid.UUID("abf84020-48f2-5d8a-b447-6bb07d0fcf65")
@@ -198,6 +202,14 @@ class ExtractedResearchPage(BaseModel):
     page_number: int = Field(ge=1)
     text: str
     extraction_method: Literal["digital_text", "ocr", "vision"]
+
+
+class ExtractedResearchText(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1)
+    text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    character_count: int = Field(ge=1, le=500_000)
 
 
 class SelectedResearchSegment(BaseModel):

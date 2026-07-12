@@ -23,15 +23,18 @@ from domain.models.research_document import (
 
 
 def _ready(index, *, processor_type="pdf_hybrid_v1"):
+    extractor_versions = {
+        "pdf_hybrid_v1": "pymupdf_v1",
+        "image_vision_v1": "research_vision_v1",
+        "plain_text_v1": "research_text_v1",
+    }
     identity = IngestionIdentity(
         doctor_id="doctor-1",
         attachment_id=f"attachment-{index}",
         document_version=index,
         content_sha256=f"{index:x}" * 64,
         processor_type=processor_type,
-        extractor_version=(
-            "pymupdf_v1" if processor_type == "pdf_hybrid_v1" else "research_vision_v1"
-        ),
+        extractor_version=extractor_versions[processor_type],
         segment_schema_version="segment_v1",
     )
     now = datetime(2026, 7, 11, 9, 0, 0)
@@ -62,6 +65,23 @@ def _segment(entity, ordinal, content, *, page=1, method="digital_text"):
                 "extraction_mode": "vision",
                 "ocr_applied": False,
                 "ocr_page_count": 0,
+            },
+        )
+    if entity.processor_type == "plain_text_v1":
+        return ResearchDocumentSegmentEntity(
+            ingestion_id=entity.id,
+            ordinal=ordinal,
+            content=content,
+            page_start=None,
+            page_end=None,
+            sheet_name=None,
+            row_start=None,
+            row_end=None,
+            token_count=estimate_tokens_v1(content),
+            metadata={
+                "block_index": ordinal,
+                "extraction_method": "plain_text",
+                "extraction_mode": "text",
             },
         )
     mode = "text" if method == "digital_text" else method
@@ -151,6 +171,90 @@ class FakeModel:
 
 
 class ResearchDocumentContextSelectorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_text_focused_and_summary_selection_use_file_sources(self):
+        entity = _ready(3, processor_type="plain_text_v1")
+        segments = [
+            _segment(entity, 0, "普通科研记录"),
+            _segment(entity, 1, "视网膜血管密度显著变化"),
+        ]
+        focused = await ResearchDocumentContextSelector(
+            FakeRepository(segments)
+        ).select(
+            [entity.id],
+            {entity.id: entity},
+            "请分析视网膜血管密度",
+        )
+
+        self.assertEqual(focused.mode, "focused")
+        self.assertEqual(focused.context_blocks[0].supporting_segment_ids, (segments[1].id,))
+        self.assertTrue(
+            all(
+                item.page_start is None and item.page_end is None
+                for item in focused.citation_candidates
+            )
+        )
+
+        gateway = FakeSummaryGateway(
+            map_outputs=[
+                {
+                    "content": "TXT 全文摘要",
+                    "supporting_segment_ids": [segments[0].id, segments[1].id],
+                }
+            ]
+        )
+        summary = await ResearchDocumentContextSelector(
+            FakeRepository(segments),
+            summary_gateway=gateway,
+        ).select([entity.id], {entity.id: entity}, "请总结全文")
+
+        self.assertEqual(summary.mode, "summary")
+        self.assertEqual(
+            summary.context_blocks[0].supporting_segment_ids,
+            (segments[0].id, segments[1].id),
+        )
+        self.assertEqual(
+            tuple(item.segment_id for item in summary.citation_candidates),
+            (segments[0].id, segments[1].id),
+        )
+
+    async def test_plain_text_requires_zero_pages_null_locators_and_exact_metadata(self):
+        mutations = ("page_count", "page", "sheet", "metadata")
+        for mutation in mutations:
+            entity = _ready(4, processor_type="plain_text_v1")
+            segment = _segment(entity, 0, "TXT 正文")
+            if mutation == "page_count":
+                entity.page_count = 1
+            elif mutation == "page":
+                segment.page_start = 1
+                segment.page_end = 1
+            elif mutation == "sheet":
+                segment.sheet_name = "Sheet1"
+            else:
+                segment.metadata["ocr_applied"] = False
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(ResearchDocumentContextError):
+                    await ResearchDocumentContextSelector(
+                        FakeRepository([segment])
+                    ).select([entity.id], {entity.id: entity}, "问题")
+
+    async def test_plain_text_summary_filters_unknown_segment_id(self):
+        entity = _ready(5, processor_type="plain_text_v1")
+        segment = _segment(entity, 0, "TXT 正文")
+        selector = ResearchDocumentContextSelector(
+            FakeRepository([segment]),
+            summary_gateway=FakeSummaryGateway(
+                map_outputs=[
+                    {
+                        "content": "伪造摘要",
+                        "supporting_segment_ids": ["unknown-segment"],
+                    }
+                ]
+            ),
+        )
+
+        with self.assertRaises(ResearchDocumentContextError):
+            await selector.select([entity.id], {entity.id: entity}, "总结全文")
+
     async def test_explicit_ready_map_is_exact_whitelist_and_repo_call_is_exact(self):
         first, second = _ready(1), _ready(2)
         segments = [_segment(second, 0, "第二份"), _segment(first, 0, "第一份")]

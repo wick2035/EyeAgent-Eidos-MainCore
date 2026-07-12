@@ -49,6 +49,25 @@ def _candidate(
 
 
 class AttachmentCitationBuilderTest(unittest.TestCase):
+    def test_plain_text_candidate_uses_file_locator_without_page_fields(self):
+        [citation] = build_attachment_citations(
+            ["segment-text"],
+            (
+                _candidate(
+                    "segment-text",
+                    attachment_id="attachment-text",
+                    document_version=9,
+                    page_start=None,
+                    page_end=None,
+                    content="TXT 科研正文",
+                ),
+            ),
+        )
+
+        self.assertEqual(citation["locator"], {"type": "file"})
+        self.assertNotIn("page_start", citation["locator"])
+        self.assertNotIn("page_end", citation["locator"])
+
     def test_page_file_mapping_excerpt_cap_and_stable_selected_order(self):
         long_content = "  " + "证 据\n" * 100 + "尾部"
         candidates = (

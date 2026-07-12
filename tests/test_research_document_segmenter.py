@@ -12,6 +12,7 @@ from application.services.research_document_segmenter import (
 )
 from domain.models.research_document import (
     ExtractedResearchPage,
+    ExtractedResearchText,
     build_research_document_segment_id,
 )
 
@@ -108,6 +109,52 @@ class ResearchDocumentSegmenterTest(unittest.TestCase):
                 self.ingestion_id,
                 _page(1, "a" * 7501, "vision"),
             )
+
+    def test_text_segments_have_stable_ids_no_locators_and_exact_metadata(self):
+        extracted = ExtractedResearchText(
+            text="e\u0301\r\n" + "a" * 16000,
+            text_sha256=hashlib.sha256(
+                ("e\u0301\r\n" + "a" * 16000).encode("utf-8")
+            ).hexdigest(),
+            character_count=16004,
+        )
+
+        direct = self.segmenter.segment_text(self.ingestion_id, extracted)
+        dispatched = self.segmenter.segment(
+            self.ingestion_id,
+            extracted,
+            processor_type="plain_text_v1",
+        )
+
+        self.assertEqual(direct, dispatched)
+        self.assertEqual("".join(item.content for item in direct), "\u00e9\n" + "a" * 16000)
+        self.assertEqual([item.ordinal for item in direct], list(range(len(direct))))
+        for segment in direct:
+            self.assertIsNone(segment.page_start)
+            self.assertIsNone(segment.page_end)
+            self.assertIsNone(segment.sheet_name)
+            self.assertIsNone(segment.row_start)
+            self.assertIsNone(segment.row_end)
+            self.assertEqual(
+                segment.metadata,
+                {
+                    "block_index": segment.ordinal,
+                    "extraction_method": "plain_text",
+                    "extraction_mode": "text",
+                },
+            )
+            digest = hashlib.sha256(segment.content.encode("utf-8")).hexdigest()
+            self.assertEqual(segment.content_sha256, digest)
+            self.assertEqual(
+                segment.id,
+                build_research_document_segment_id(
+                    self.ingestion_id,
+                    segment.ordinal,
+                    digest,
+                ),
+            )
+            self.assertEqual(segment.token_count, estimate_tokens_v1(segment.content))
+            self.assertLessEqual(segment.token_count, MAX_SEGMENT_TOKENS)
 
     def test_output_is_stable_continuous_and_uses_entity_hash_uuid(self):
         pages = [_page(1, "a" * 8000), _page(2, "结尾", "ocr")]
