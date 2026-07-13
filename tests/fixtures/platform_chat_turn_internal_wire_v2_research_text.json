@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "request_id": "txt-request-1",
+  "request_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+  "conversation_id": "conversation-1",
+  "session_id": "conversation-1",
+  "patient_id": null,
+  "doctor_id": "doctor-1",
+  "agent_type": "research",
+  "attachment_scope": "research",
+  "research_options": {
+    "enable_institution_data": false,
+    "enable_web_search": true,
+    "types": ["pubmed"]
+  },
+  "user_message_id": "user-message-1",
+  "assistant_message_id": "assistant-message-1",
+  "attachments": [
+    {
+      "attachment_id": "attachment-1",
+      "file_type": "text",
+      "filename": "notes.txt",
+      "mime_type": "text/plain",
+      "size_bytes": 524288,
+      "page_count": null,
+      "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "document_version": 1,
+      "analysis_attempt_id": "attempt-1",
+      "download_url": "https://storage.test/internal/attachment-1"
+    }
+  ]
+}

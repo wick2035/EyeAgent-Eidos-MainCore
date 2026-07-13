@@ -5,15 +5,32 @@
 import uuid
 import json
 import logging
-from typing import AsyncGenerator
-from fastapi import APIRouter, HTTPException, status
+import asyncio
+from typing import AsyncGenerator, Optional
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from presentation.schemas.chat_schemas import ChatRequest, ChatResponse
+from presentation.schemas.chat_schemas import (
+    ChatRequest,
+    ChatResponse,
+    EditResendRequest,
+    RegenerateRequest,
+)
 from agents.graph_manager import get_graph_manager
-from application.services.chat_persistence_service import get_chat_persistence_service
+from application.services.chat_persistence_service import (
+    LegacyBranchForbiddenError,
+    LegacyBranchSourceInvalidError,
+    get_chat_persistence_service,
+)
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+)
 from utils.ui_element_parser import parse_options_only
 from utils.attachment_analyzer import analyze_attachments
+from presentation.dependencies.security import (
+    LegacyRouteError,
+    require_legacy_platform_doctor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +42,15 @@ graph_manager = get_graph_manager()
 
 # 患者模式下支持OPTIONS选择框的Agent类型
 _AGENTS_WITH_OPTIONS = {"health", "reminder", "report"}
+_CHAT_ERROR_MESSAGE = "对话暂时不可用，请稍后再试。"
+
+
+def _reject_research_on_generic_route(request) -> None:
+    if request.agent_type == "research":
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "PLATFORM_RESEARCH_ROUTE_REQUIRED"},
+        )
 
 
 @router.post("", response_model=ChatResponse)
@@ -43,6 +69,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     Returns:
         ChatResponse: 聊天响应
     """
+    _reject_research_on_generic_route(request)
     try:
         logger.info(
             f"[ChatRouter] 收到聊天请求: patient={request.patient_id}, "
@@ -119,6 +146,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 "role": role,
                 "thread_id": result.get("thread_id", ""),
                 "version": "langgraph",
+                "citations": result.get("citations", []),
             }
         )
 
@@ -349,27 +377,20 @@ async def get_messages(session_id: str, conversation_id: str = None):
         )
 
 
-@router.post("/stream")
-async def chat_stream(request: ChatRequest):
-    """
-    流式对话 (SSE)
-
-    使用 Server-Sent Events 实现流式响应，支持：
-    - 实时 token 输出
-    - Agent 切换通知
-    - 工具调用状态
-
-    Args:
-        request: 聊天请求
-
-    Returns:
-        StreamingResponse: SSE 流式响应
-    """
+def _streaming_response_for_request(
+    request,
+    branch_mode: str = "normal",
+    source_message_id: Optional[str] = None,
+    legacy_text_turn_authority: Optional[
+        LegacyTextTurnAuthority
+    ] = None,
+) -> StreamingResponse:
     async def generate_sse() -> AsyncGenerator[str, None]:
         """生成 SSE 事件流"""
         try:
             # 生成 session_id
             session_id = request.session_id or f"sess_{uuid.uuid4().hex[:16]}"
+            message = getattr(request, "message", "")
 
             # 获取持久化服务
             persistence_service = get_chat_persistence_service()
@@ -400,14 +421,12 @@ async def chat_stream(request: ChatRequest):
             # 附件预分析（在第一个 SSE token 之前完成）
             attachments_raw = []
             attachment_analysis = ""
-            if request.attachments:
-                attachments_raw = [a.model_dump() for a in request.attachments]
+            attachments = getattr(request, "attachments", None)
+            if attachments:
+                attachments_raw = [a.model_dump() for a in attachments]
                 logger.info(f"[ChatRouter/Stream] 开始预分析附件，数量={len(attachments_raw)}")
-                attachment_analysis = analyze_attachments(attachments_raw, request.message)
+                attachment_analysis = analyze_attachments(attachments_raw, message)
                 logger.info(f"[ChatRouter/Stream] 附件预分析完成，分析长度={len(attachment_analysis)}")
-
-            # 发送开始事件
-            yield f"data: {json.dumps({'event': 'start', 'session_id': session_id, 'conversation_id': conversation_id, 'thread_id': thread_id})}\n\n"
 
             # 获取当前 Agent（用于检测切换）
             previous_agent = graph_manager.checkpointer.get_current_agent(thread_id)
@@ -416,21 +435,32 @@ async def chat_stream(request: ChatRequest):
             full_response = ""
             current_agent = request.agent_type or "health"
             current_stage = "greeting"
+            citations = []
 
             async for chunk in graph_manager.chat_stream_async(
                 patient_id=request.patient_id,
                 session_id=session_id,
-                message=request.message,
+                message=message,
                 role=request.role or "patient",
                 doctor_id=request.doctor_id,
                 conversation_id=conversation_id,
                 agent_type=request.agent_type or "health",
+                source_message_id=source_message_id,
+                branch_mode=branch_mode,
                 attachments=attachments_raw,
                 attachment_analysis=attachment_analysis,
+                _legacy_text_turn_authority=(
+                    legacy_text_turn_authority
+                ),
             ):
                 event_type = chunk.get("type", "")
                 content = chunk.get("content", "")
                 metadata = chunk.get("metadata", {})
+
+                if event_type == "start":
+                    payload = {"event": "start", "session_id": session_id, **metadata}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    continue
 
                 if event_type == "token":
                     full_response += content
@@ -457,9 +487,18 @@ async def chat_stream(request: ChatRequest):
                     full_response = content
                     current_agent = metadata.get("agent_type", current_agent)
                     current_stage = metadata.get("stage", current_stage)
+                    citations = chunk.get("citations") or metadata.get("citations") or []
 
                 elif event_type == "error":
-                    yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+                    error_code = metadata.get("error_code")
+                    if error_code not in {
+                        "CHAT_EXECUTION_FAILED",
+                        "CHAT_PERSISTENCE_FAILED",
+                        "CHAT_SOURCE_INVALID",
+                    }:
+                        error_code = "CHAT_STREAM_FAILED"
+                    yield f"data: {json.dumps({'event': 'error', 'code': error_code, 'message': _CHAT_ERROR_MESSAGE})}\n\n"
+                    return
 
             # 解析UI元素（仅患者模式的特定Agent）
             role = request.role or "patient"
@@ -478,14 +517,30 @@ async def chat_stream(request: ChatRequest):
                 'stage': current_stage,
                 'session_id': session_id,
                 'conversation_id': conversation_id,
+                'citations': citations,
+                'metadata': {
+                    'citations': citations,
+                },
             }
             if ui_elements_data:
                 done_data['ui_elements'] = ui_elements_data
             yield f"data: {json.dumps(done_data)}\n\n"
 
-        except Exception as e:
-            logger.error(f"[ChatRouter] 流式对话失败: {e}", exc_info=True)
-            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+        except GeneratorExit:
+            logger.info("[ChatRouter] SSE 生成器关闭，取消流式对话")
+            raise
+
+        except asyncio.CancelledError:
+            logger.info("[ChatRouter] SSE 客户端断开，取消流式对话")
+            raise
+
+        except Exception as error:
+            logger.error(
+                "chat_stream_failed operation=generate exception_class=%s",
+                type(error).__name__,
+                exc_info=None,
+            )
+            yield f"data: {json.dumps({'event': 'error', 'code': 'CHAT_STREAM_FAILED', 'message': _CHAT_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         generate_sse(),
@@ -496,3 +551,83 @@ async def chat_stream(request: ChatRequest):
             "X-Accel-Buffering": "no",
         }
     )
+
+
+@router.post("/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    流式对话 (SSE)
+
+    使用 Server-Sent Events 实现流式响应，支持：
+    - 实时 token 输出
+    - Agent 切换通知
+    - 工具调用状态
+
+    Args:
+        request: 聊天请求
+
+    Returns:
+        StreamingResponse: SSE 流式响应
+    """
+    _reject_research_on_generic_route(request)
+    return _streaming_response_for_request(request)
+
+
+@router.post("/edit-resend/stream")
+async def chat_edit_resend_stream(
+    request: EditResendRequest,
+    http_request: Request,
+):
+    require_legacy_platform_doctor(
+        http_request,
+        request.doctor_id or "",
+        request.agent_type,
+    )
+    authority = _assert_legacy_branch_authority(request, "edit")
+    return _streaming_response_for_request(
+        request,
+        branch_mode="edit",
+        source_message_id=request.source_message_id,
+        legacy_text_turn_authority=authority,
+    )
+
+
+@router.post("/regenerate/stream")
+async def chat_regenerate_stream(
+    request: RegenerateRequest,
+    http_request: Request,
+):
+    require_legacy_platform_doctor(
+        http_request,
+        request.doctor_id or "",
+        request.agent_type,
+    )
+    authority = _assert_legacy_branch_authority(
+        request,
+        "regenerate",
+    )
+    return _streaming_response_for_request(
+        request,
+        branch_mode="regenerate",
+        source_message_id=request.source_message_id,
+        legacy_text_turn_authority=authority,
+    )
+
+
+def _assert_legacy_branch_authority(
+    request,
+    branch_mode: str,
+) -> LegacyTextTurnAuthority:
+    try:
+        return get_chat_persistence_service().assert_legacy_branch_authority(
+            chat_id=request.conversation_id,
+            source_message_id=request.source_message_id,
+            branch_mode=branch_mode,
+            doctor_id=request.doctor_id or "",
+            agent_type=request.agent_type or "health",
+            patient_id=request.patient_id,
+        )
+    except LegacyBranchForbiddenError:
+        raise LegacyRouteError(403, "PLATFORM_DOCTOR_FORBIDDEN") from None
+    except LegacyBranchSourceInvalidError:
+        raise LegacyRouteError(409, "LEGACY_BRANCH_SOURCE_INVALID") from None

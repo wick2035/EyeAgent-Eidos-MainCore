@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 
 # 兼容不同版本的 langgraph
 try:
@@ -24,21 +25,17 @@ from agents.prompts.health_prompts import (
 )
 from agents.tools.agent_tools import AGENT_1_TOOLS
 from utils.llm_config import get_llm, get_streaming_llm
-from utils.attachment_analyzer import inject_attachment_analysis
+from utils.attachment_analyzer import (
+    inject_attachment_analysis,
+    inject_untrusted_attachment_data,
+)
+from utils.transient_attachment_context import get_attachment_analysis
 
 logger = logging.getLogger(__name__)
 
 
-def health_agent_node(state: MedicalState) -> Dict[str, Any]:
-    """
-    HealthAgent 节点 - 处理健康咨询、眼科分诊、预约
-
-    Args:
-        state: 当前状态
-
-    Returns:
-        状态更新字典
-    """
+def _prepare_health(state: MedicalState, config: RunnableConfig = None):
+    """构建 HealthAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "patient")
     stage = state.get("stage", "greeting")
     messages = state.get("messages", [])
@@ -58,115 +55,159 @@ def health_agent_node(state: MedicalState) -> Dict[str, Any]:
 
     logger.info(f"[HealthNode] === 开始处理 === role={role}, stage={stage}, patient_id={patient_id}")
 
-    try:
-        # 注入附件分析结果（如有）
+    # 注入附件分析结果（如有）
+    if state.get("platform_prepared"):
+        attachment_context = get_attachment_analysis(config)
+        messages = inject_untrusted_attachment_data(list(messages), attachment_context)
+        logger.info("[HealthNode] 已注入平台附件分析，附件数=%d", len(attachment_context.analyses))
+    else:
         attachment_analysis = state.get("attachment_analysis") or ""
         messages = inject_attachment_analysis(list(messages), attachment_analysis)
         if attachment_analysis:
             logger.info(f"[HealthNode] 已注入附件分析，长度={len(attachment_analysis)}")
 
-        # 根据流式标志选择 LLM
-        is_streaming = state.get("is_streaming", False)
-        llm = get_streaming_llm() if is_streaming else get_llm()
+    # 根据流式标志选择 LLM
+    is_streaming = state.get("is_streaming", False)
+    llm = get_streaming_llm() if is_streaming else get_llm()
 
-        # 创建 ReAct Agent
-        agent = create_react_agent(
-            model=llm,
-            tools=AGENT_1_TOOLS,
-        )
+    # 创建 ReAct Agent
+    agent = create_react_agent(
+        model=llm,
+        tools=AGENT_1_TOOLS,
+    )
 
-        # 准备输入消息
-        input_messages = [SystemMessage(content=full_system_prompt)]
+    # 准备输入消息
+    input_messages = [SystemMessage(content=full_system_prompt)]
 
-        # 添加对话历史（包含 ToolMessage 以保留工具调用结果如 doctorId）
-        for msg in messages:
-            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
-                input_messages.append(msg)
-            elif isinstance(msg, dict):
-                msg_type = msg.get("type", "")
-                content = msg.get("content", "")
-                if msg_type == "human":
-                    input_messages.append(HumanMessage(content=content))
-                elif msg_type == "ai":
-                    input_messages.append(AIMessage(content=content))
+    # 添加对话历史（包含 ToolMessage 以保留工具调用结果如 doctorId）
+    for msg in messages:
+        if isinstance(msg, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
+            input_messages.append(msg)
+        elif isinstance(msg, dict):
+            msg_type = msg.get("type", "")
+            content = msg.get("content", "")
+            if msg_type == "human":
+                input_messages.append(HumanMessage(content=content))
+            elif msg_type == "ai":
+                input_messages.append(AIMessage(content=content))
 
-        logger.info(f"[HealthNode] 输入消息数: {len(input_messages)} (含系统提示词)")
+    logger.info(f"[HealthNode] 输入消息数: {len(input_messages)} (含系统提示词)")
+    return agent, input_messages
 
-        # 调用 Agent
-        result = agent.invoke({"messages": input_messages})
 
-        # 提取响应并记录详细日志
-        response_messages = result.get("messages", [])
-        ai_response = ""
-        tool_calls = []
+def _finalize_health(state: MedicalState, result: Dict[str, Any], input_messages: list) -> Dict[str, Any]:
+    """处理 HealthAgent 的执行结果（sync/async 共用）"""
+    # 提取响应并记录详细日志
+    response_messages = result.get("messages", [])
+    ai_response = ""
+    tool_calls = []
 
-        logger.info(f"[HealthNode] Agent 返回消息数: {len(response_messages)}")
-        for i, msg in enumerate(response_messages):
-            msg_type = type(msg).__name__
-            msg_name = getattr(msg, "name", None)
-            msg_content = getattr(msg, "content", "")
-            msg_tool_calls = getattr(msg, "tool_calls", [])
-            content_preview = (msg_content[:200] + "...") if len(msg_content) > 200 else msg_content
-            logger.info(
-                f"[HealthNode]   消息[{i}] type={msg_type}, name={msg_name}, "
-                f"content_len={len(msg_content)}, tool_calls={len(msg_tool_calls)}, "
-                f"preview={content_preview}"
-            )
-            if msg_tool_calls:
-                for tc in msg_tool_calls:
-                    tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                    tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                    logger.info(f"[HealthNode]     tool_call: {tc_name}({tc_args})")
-
-            if isinstance(msg, AIMessage):
-                if msg.content:
-                    ai_response = msg.content
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tool_calls.extend(msg.tool_calls)
-
-        tool_names = [tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "") for tc in tool_calls]
-        logger.info(f"[HealthNode] 最终 ai_response 长度={len(ai_response)}, tool_calls={tool_names}")
-
-        # 防护：拦截预约成功的提前声明
-        ai_response = _sanitize_premature_confirmation(ai_response, tool_calls, response_messages)
-
-        # 检测状态变更
-        new_stage = _detect_stage_transition(state, ai_response, tool_calls, response_messages)
-        appointment_confirmed = _check_appointment_confirmed(tool_calls, response_messages)
-
-        # 提取本轮新增的消息（跳过输入消息），保留 ToolMessage 以便下轮使用
-        new_messages = response_messages[len(input_messages):]
-        # 如果 ai_response 被 sanitize 修改过，替换最后一条 AIMessage 的内容
-        if new_messages:
-            for i in range(len(new_messages) - 1, -1, -1):
-                if isinstance(new_messages[i], AIMessage) and new_messages[i].content:
-                    if new_messages[i].content != ai_response:
-                        new_messages[i] = AIMessage(content=ai_response)
-                    break
-
+    logger.info(f"[HealthNode] Agent 返回消息数: {len(response_messages)}")
+    for i, msg in enumerate(response_messages):
+        msg_type = type(msg).__name__
+        msg_name = getattr(msg, "name", None)
+        msg_content = getattr(msg, "content", "")
+        msg_tool_calls = getattr(msg, "tool_calls", [])
         logger.info(
-            f"[HealthNode] === 处理完成 === new_stage={new_stage}, "
-            f"appointment_confirmed={appointment_confirmed}, "
-            f"new_messages_count={len(new_messages)}, "
-            f"response_preview={ai_response[:150]}"
+            f"[HealthNode]   消息[{i}] type={msg_type}, name={msg_name}, "
+            f"content_len={len(msg_content)}, tool_calls={len(msg_tool_calls)}"
         )
+        if msg_tool_calls:
+            for tc in msg_tool_calls:
+                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                logger.info(f"[HealthNode]     tool_call: {tc_name}")
 
-        # 返回状态更新（包含所有新消息：AIMessage + ToolMessage）
-        return {
-            "messages": new_messages if new_messages else ([AIMessage(content=ai_response)] if ai_response else []),
-            "stage": new_stage,
-            "appointment_confirmed": appointment_confirmed,
-            "last_response": ai_response,
-        }
+        if isinstance(msg, AIMessage):
+            if msg.content:
+                ai_response = msg.content
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tool_calls.extend(msg.tool_calls)
 
+    tool_names = [tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "") for tc in tool_calls]
+    logger.info(f"[HealthNode] 最终 ai_response 长度={len(ai_response)}, tool_calls={tool_names}")
+
+    # 防护：拦截预约成功的提前声明
+    ai_response = _sanitize_premature_confirmation(ai_response, tool_calls, response_messages)
+
+    # 检测状态变更
+    new_stage = _detect_stage_transition(state, ai_response, tool_calls, response_messages)
+    appointment_confirmed = _check_appointment_confirmed(tool_calls, response_messages)
+
+    # 提取本轮新增的消息（跳过输入消息），保留 ToolMessage 以便下轮使用
+    new_messages = response_messages[len(input_messages):]
+    # 如果 ai_response 被 sanitize 修改过，替换最后一条 AIMessage 的内容
+    if new_messages:
+        for i in range(len(new_messages) - 1, -1, -1):
+            if isinstance(new_messages[i], AIMessage) and new_messages[i].content:
+                if new_messages[i].content != ai_response:
+                    new_messages[i] = AIMessage(content=ai_response)
+                break
+
+    logger.info(
+        f"[HealthNode] === 处理完成 === new_stage={new_stage}, "
+        f"appointment_confirmed={appointment_confirmed}, "
+        f"new_messages_count={len(new_messages)}, response_len={len(ai_response)}"
+    )
+
+    # 返回状态更新（包含所有新消息：AIMessage + ToolMessage）
+    return {
+        "messages": new_messages if new_messages else ([AIMessage(content=ai_response)] if ai_response else []),
+        "stage": new_stage,
+        "appointment_confirmed": appointment_confirmed,
+        "last_response": ai_response,
+    }
+
+
+def _health_error(e: Exception) -> Dict[str, Any]:
+    """HealthAgent 异常兜底（sync/async 共用）"""
+    logger.error("[HealthNode] 处理失败, error_type=%s", type(e).__name__)
+    error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
+    return {
+        "messages": [AIMessage(content=error_response)],
+        "last_response": error_response,
+        "error": "HEALTH_AGENT_FAILED",
+    }
+
+
+def health_agent_node(state: MedicalState) -> Dict[str, Any]:
+    """
+    HealthAgent 节点（同步）- 非流式路径 /api/chat 使用
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        状态更新字典
+    """
+    try:
+        agent, input_messages = _prepare_health(state)
+        result = agent.invoke({"messages": input_messages})
+        return _finalize_health(state, result, input_messages)
     except Exception as e:
-        logger.error(f"[HealthNode] 处理失败: {e}", exc_info=True)
-        error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
-        return {
-            "messages": [AIMessage(content=error_response)],
-            "last_response": error_response,
-            "error": str(e),
-        }
+        return _health_error(e)
+
+
+async def health_agent_node_async(state: MedicalState, config: RunnableConfig) -> Dict[str, Any]:
+    """
+    HealthAgent 节点（异步）- 流式路径 /api/chat/stream 使用
+
+    关键：使用 await agent.ainvoke 并【显式透传 config】。
+    这样外层 astream_events 才能捕获到内层 LLM 的 on_chat_model_stream 事件，
+    从而实现真正的逐 token 流式输出（Python 3.10 下 contextvars 不会自动传播 config，必须手动透传）。
+
+    Args:
+        state: 当前状态
+        config: LangGraph 注入的运行配置（携带 astream_events 回调）
+
+    Returns:
+        状态更新字典
+    """
+    try:
+        agent, input_messages = _prepare_health(state, config)
+        result = await agent.ainvoke({"messages": input_messages}, config=config)
+        return _finalize_health(state, result, input_messages)
+    except Exception as e:
+        return _health_error(e)
 
 
 def _detect_stage_transition(

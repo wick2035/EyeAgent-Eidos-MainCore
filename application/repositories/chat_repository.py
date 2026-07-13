@@ -42,6 +42,11 @@ class IChatConversationRepository(ABC):
         pass
 
     @abstractmethod
+    def lock_by_id(self, conversation_id: str) -> Optional[ChatConversationEntity]:
+        """读取并锁定会话行，调用方必须位于事务中。"""
+        pass
+
+    @abstractmethod
     def list_by_host(
         self,
         host_id: str,
@@ -112,6 +117,30 @@ class IChatConversationRepository(ABC):
         pass
 
     @abstractmethod
+    def update_active_node(self, conversation_id: str, active_node_id: str) -> bool:
+        """
+        更新会话当前活跃叶子节点
+
+        Args:
+            conversation_id: 会话UUID
+            active_node_id: 当前活跃叶子消息ID
+
+        Returns:
+            bool: 是否更新成功
+        """
+        pass
+
+    @abstractmethod
+    def compare_and_set_active_node(
+        self,
+        conversation_id: str,
+        expected_node_id: str,
+        active_node_id: Optional[str],
+    ) -> bool:
+        """仅当 active_node_id 仍为 expected_node_id 时更新。"""
+        pass
+
+    @abstractmethod
     def soft_delete(self, conversation_id: str) -> bool:
         """
         软删除会话
@@ -163,6 +192,70 @@ class IChatMessageRepository(ABC):
 
         Returns:
             List[ChatMessageEntity]: 消息列表，按 message_order 升序
+        """
+        pass
+
+    @abstractmethod
+    def get_by_id(self, message_id: str) -> Optional[ChatMessageEntity]:
+        """
+        根据消息ID获取消息
+
+        Args:
+            message_id: 消息UUID
+
+        Returns:
+            Optional[ChatMessageEntity]: 消息实体，不存在返回 None
+        """
+        pass
+
+    @abstractmethod
+    def get_by_ids(self, chat_id: str, ids: List[str]) -> List[ChatMessageEntity]:
+        """
+        按ID列表获取同一会话内的消息
+
+        Args:
+            chat_id: 会话UUID
+            ids: 消息ID列表
+
+        Returns:
+            List[ChatMessageEntity]: 按输入顺序返回存在的消息
+        """
+        pass
+
+    @abstractmethod
+    def get_children(self, chat_id: str, parent_id: str) -> List[ChatMessageEntity]:
+        """
+        获取某父节点下的直接子消息
+
+        Args:
+            chat_id: 会话UUID
+            parent_id: 父消息ID
+
+        Returns:
+            List[ChatMessageEntity]: 子消息列表
+        """
+        pass
+
+    @abstractmethod
+    def get_active_assistant_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        """返回仍处于 running/streaming 的最新助手消息。"""
+        pass
+
+    @abstractmethod
+    def get_latest_sibling_order(self, chat_id: str, parent_id: str, message_type: str) -> int:
+        """
+        获取同父同角色消息的最大 message_order
+
+        Args:
+            chat_id: 会话UUID
+            parent_id: 父消息ID
+            message_type: 消息类型
+
+        Returns:
+            int: 最大排序值，无结果返回 0
         """
         pass
 

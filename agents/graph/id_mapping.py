@@ -130,3 +130,18 @@ def get_thread_config(
     """
     thread_id = ThreadIDManager.get_thread_id(session_id, conversation_id)
     return {"configurable": {"thread_id": thread_id}}
+
+
+def get_branch_thread_config(
+    session_id: str,
+    conversation_id: Optional[str],
+    branch_node_id: str,
+) -> Dict[str, Dict[str, str]]:
+    """
+    获取分支级 LangGraph 线程配置。
+
+    编辑重发/重新生成会创建新的 active leaf。它们不能复用 conversation 级
+    checkpoint，否则 LangGraph 的 add_messages 会把旧分支后续消息合入本轮输入。
+    """
+    base_thread_id = ThreadIDManager.get_thread_id(session_id, conversation_id)
+    return {"configurable": {"thread_id": f"{base_thread_id}_branch_{branch_node_id}"}}

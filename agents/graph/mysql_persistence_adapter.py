@@ -4,9 +4,14 @@ MySQL 持久化适配器
 实现 PersistenceAdapter 接口，将消息持久化到 MySQL 数据库
 """
 import logging
+from contextvars import ContextVar
 from typing import Optional, Dict, Any, List
 
 from agents.graph.persistence_adapter import PersistenceAdapter
+from application.services.legacy_text_turn_authority import (
+    LegacyTextTurnAuthority,
+    parse_legacy_text_turn_metadata,
+)
 from domain.models.chat_entity import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -27,7 +32,29 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             persistence_service: ChatPersistenceService 实例
         """
         self.service = persistence_service
+        self._pending_assistant_ids: ContextVar[Dict[str, List[str]]] = ContextVar(
+            f"mysql_pending_assistant_ids_{id(self)}",
+            default={},
+        )
         logger.info("[MySQLPersistenceAdapter] 初始化完成")
+
+    def _push_pending_assistant_id(self, chat_id: str, assistant_message_id: str) -> None:
+        pending = {key: value.copy() for key, value in self._pending_assistant_ids.get().items()}
+        pending.setdefault(chat_id, []).append(assistant_message_id)
+        self._pending_assistant_ids.set(pending)
+
+    def _pop_pending_assistant_id(self, chat_id: str) -> Optional[str]:
+        pending = {key: value.copy() for key, value in self._pending_assistant_ids.get().items()}
+        ids = pending.get(chat_id)
+        if not ids:
+            return None
+        assistant_message_id = ids.pop(0)
+        if ids:
+            pending[chat_id] = ids
+        else:
+            pending.pop(chat_id, None)
+        self._pending_assistant_ids.set(pending)
+        return assistant_message_id
 
     def save_user_message(
         self,
@@ -39,31 +66,28 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> str:
         """保存用户消息"""
         try:
-            # 构建 MessageContext
-            msg_context = self._build_user_context(context, is_first_message)
-
-            # 保存消息
-            message = self.service.save_message(
+            ids = self.prepare_normal_turn(
                 chat_id=chat_id,
-                role="user",
                 content=content,
                 sender_id=sender_id,
-                context=msg_context,
-                status="success",
+                context=context,
+                is_first_message=is_first_message,
             )
-
-            # 首条消息更新标题
-            if is_first_message:
-                self.update_conversation_title(chat_id, content)
+            self._push_pending_assistant_id(chat_id, ids["assistant_message_id"])
 
             logger.debug(
                 f"[MySQLPersistenceAdapter] 保存用户消息: chat_id={chat_id}, "
-                f"message_id={message.id}, is_first={is_first_message}"
+                f"message_id={ids['user_message_id']}, is_first={is_first_message}"
             )
-            return message.id
+            return ids["user_message_id"]
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 保存用户消息失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=save_user_message "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             raise
 
     def create_assistant_placeholder(
@@ -73,15 +97,22 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
     ) -> str:
         """创建 AI 回复占位"""
         try:
-            msg_context = self._build_assistant_context(context)
+            pending_id = self._pop_pending_assistant_id(chat_id)
+            if pending_id:
+                logger.debug(
+                    f"[MySQLPersistenceAdapter] 复用 AI 占位: chat_id={chat_id}, "
+                    f"message_id={pending_id}"
+                )
+                return pending_id
 
-            message = self.service.save_message(
+            msg_context = self._build_assistant_context(context)
+            conversation = self.service._must_get_conversation(chat_id)
+            if not conversation.active_node_id:
+                raise ValueError("会话缺少 active_node_id")
+            message = self.service.create_assistant_regeneration(
                 chat_id=chat_id,
-                role="assistant",
-                content="",  # 占位，后续更新
-                sender_id=None,
+                source_assistant_id=conversation.active_node_id,
                 context=msg_context,
-                status="running",
             )
 
             logger.debug(
@@ -91,8 +122,73 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return message.id
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 创建 AI 占位失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=create_assistant_placeholder "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             raise
+
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        msg_context = self._build_user_context(context, is_first_message)
+        user, assistant = self.service.create_turn(chat_id, content, sender_id, msg_context)
+        if is_first_message and content:
+            self.update_conversation_title(chat_id, content)
+        return {"user_message_id": user.id, "assistant_message_id": assistant.id}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional[LegacyTextTurnAuthority] = None,
+    ) -> Dict[str, str]:
+        if not isinstance(expected_authority, LegacyTextTurnAuthority):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        msg_context = self._build_user_context(context, False)
+        user, assistant = self.service.create_legacy_edit_turn(
+            chat_id=chat_id,
+            content=content,
+            sender_id=sender_id,
+            context=msg_context,
+            source_message_id=source_message_id,
+            expected_authority=expected_authority,
+        )
+        return {"user_message_id": user.id, "assistant_message_id": assistant.id}
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional[LegacyTextTurnAuthority] = None,
+    ) -> Dict[str, str]:
+        if (
+            not isinstance(doctor_id, str)
+            or not doctor_id
+            or not isinstance(expected_authority, LegacyTextTurnAuthority)
+        ):
+            raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+        msg_context = self._build_assistant_context(context)
+        assistant = self.service.create_legacy_assistant_regeneration(
+            chat_id=chat_id,
+            source_assistant_id=source_assistant_id,
+            doctor_id=doctor_id,
+            expected_authority=expected_authority,
+            context=msg_context,
+        )
+        return {"assistant_message_id": assistant.id}
 
     def update_assistant_success(
         self,
@@ -100,29 +196,35 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         content: str,
         token_used: Optional[int] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """更新 AI 回复为成功"""
+        """更新 AI 回复为成功，tool_results/citations 由 GraphManager 统一归一化。"""
         try:
             # 构建更新的上下文
             updated_context = None
-            if context or tool_results:
+            if context or tool_results or citations:
                 updated_context = MessageContext(
                     patient_info=None,
                     conversation_stage=context.get("stage") if context else None,
                     tool_results=tool_results if tool_results else None,
+                    citations=citations if citations else None,
                     metadata={
                         "agent_type": context.get("agent_type") if context else None,
                     } if context else None,
                 )
 
-            success = self.service.update_message(
-                message_id=message_id,
-                content=content,
-                status="success",
-                token_used=token_used,
-                context=updated_context,
-            )
+            update_kwargs = {
+                "message_id": message_id,
+                "content": content,
+                "status": "success",
+                "context": updated_context,
+            }
+            # provider 未返回 usage 时保持 token_used 不更新，避免用 None 覆盖已有值。
+            if token_used is not None:
+                update_kwargs["token_used"] = token_used
+
+            success = self.service.update_message(**update_kwargs)
 
             logger.debug(
                 f"[MySQLPersistenceAdapter] 更新 AI 成功: message_id={message_id}, "
@@ -131,7 +233,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return success
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 成功失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_success "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def update_assistant_failed(
@@ -154,8 +261,85 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             return success
 
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新 AI 失败状态失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_failed "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
+
+    def update_assistant_final_status(
+        self,
+        message_id: str,
+        status: str,
+        content: str,
+        error_message: Optional[str] = None,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """更新 AI 回复为最终状态，tool_results/citations 由 GraphManager 统一归一化。"""
+        try:
+            updated_context = None
+            if context or tool_results or citations:
+                updated_context = MessageContext(
+                    patient_info=None,
+                    conversation_stage=context.get("stage") if context else None,
+                    tool_results=tool_results if tool_results else None,
+                    citations=citations if citations else None,
+                    metadata={
+                        "agent_type": context.get("agent_type") if context else None,
+                    } if context else None,
+                )
+
+            update_kwargs = {
+                "message_id": message_id,
+                "content": content,
+                "status": status,
+                "context": updated_context,
+                "error_message": error_message,
+            }
+            # provider 未返回 usage 时保持 token_used 不更新，避免用 None 覆盖已有值。
+            if token_used is not None:
+                update_kwargs["token_used"] = token_used
+
+            success = self.service.update_message(**update_kwargs)
+
+            logger.info(
+                f"[MySQLPersistenceAdapter] 更新 AI 最终状态: message_id={message_id}, status={status}"
+            )
+            return success
+
+        except Exception as e:
+            logger.error(
+                "mysql_persistence_failed operation=update_assistant_final_status "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
+            return False
+
+    def finalize_platform_assistant(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        content: Optional[str] = None,
+        token_used: Optional[int] = None,
+        context: Optional[MessageContext] = None,
+        error_message: Optional[str] = None,
+    ) -> bool:
+        """Prepared graph 专用严格终态入口；事务由 execution service 持有。"""
+        return self.service.finalize_platform_assistant(
+            message_id,
+            status=status,
+            content=content,
+            token_used=token_used,
+            context=context,
+            error_message=error_message,
+        )
 
     def update_conversation_title(
         self,
@@ -168,7 +352,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             logger.debug(f"[MySQLPersistenceAdapter] 更新标题: chat_id={chat_id}")
             return success
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 更新标题失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=update_conversation_title "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def is_first_message(self, chat_id: str) -> bool:
@@ -176,7 +365,12 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         try:
             return self.service.is_first_message(chat_id)
         except Exception as e:
-            logger.error(f"[MySQLPersistenceAdapter] 判断首条消息失败: {e}", exc_info=True)
+            logger.error(
+                "mysql_persistence_failed operation=is_first_message "
+                "exception_class=%s",
+                type(e).__name__,
+                exc_info=None,
+            )
             return False
 
     def _build_user_context(
@@ -197,14 +391,32 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
         if not context:
             return None
 
+        metadata = None
+        if context.get("agent_type"):
+            metadata = {
+                "agent_type": context.get("agent_type"),
+                "patient_id": context.get("patient_id"),
+            }
+            has_configuration = "turn_configuration" in context
+            has_attachments = "attachment_ids" in context
+            if has_configuration != has_attachments:
+                raise ValueError("LEGACY_TURN_CONFIGURATION_INVALID")
+            if has_configuration:
+                metadata.update({
+                    "turn_configuration": context["turn_configuration"],
+                    "attachment_ids": context["attachment_ids"],
+                })
+                metadata = parse_legacy_text_turn_metadata(
+                    metadata,
+                ).to_message_metadata()
+
         return MessageContext(
             # patient_info 仅首条消息保存
             patient_info=context.get("patient_info") if is_first_message else None,
             conversation_stage=context.get("stage"),
             tool_results=None,  # 用户消息无 tool_results
-            metadata={
-                "agent_type": context.get("agent_type"),
-            } if context.get("agent_type") else None,
+            citations=None,  # 用户消息无 citations
+            metadata=metadata,
         )
 
     def _build_assistant_context(
@@ -227,6 +439,7 @@ class MySQLPersistenceAdapter(PersistenceAdapter):
             patient_info=None,  # AI 消息不保存 patient_info
             conversation_stage=context.get("stage"),
             tool_results=None,  # 占位时无结果，成功后更新
+            citations=None,  # 占位时无引用来源，成功后更新
             metadata={
                 "agent_type": context.get("agent_type"),
             } if context.get("agent_type") else None,

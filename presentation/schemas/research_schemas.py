@@ -4,7 +4,7 @@ ResearchAgent API Schemas
 """
 import re
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from datetime import datetime
 
@@ -27,7 +27,10 @@ class ResearchChatRequest(BaseModel):
 
     message: str = Field(..., description="用户消息")
     doctor_id: str = Field(..., description="医生UUID（必需）")
-    patient_id: Optional[str] = Field(None, description="患者UUID（查看特定患者数据时需要）")
+    patient_id: Optional[str] = Field(
+        None,
+        description="科研模式必须为空；字段仅为 wire compatibility 保留",
+    )
     session_id: Optional[str] = Field(None, description="会话ID")
     conversation_id: Optional[str] = Field(None, description="数据库会话ID")
     enable_institution_data: bool = Field(False, description="机构数据库访问开关")
@@ -62,6 +65,22 @@ class ResearchChatRequest(BaseModel):
             if search_type not in valid_types:
                 raise ValueError(f'无效的搜索类型: "{search_type}"，有效值: {valid_types}')
         return v
+
+    @model_validator(mode="after")
+    def validate_no_patient_binding(self):
+        if self.patient_id is not None:
+            raise ValueError("科研模式不得绑定患者")
+        canonical_types = [
+            item
+            for item in ("general", "pubmed", "scholar")
+            if item in self.web_search_types
+        ]
+        if (
+            self.web_search_types != canonical_types
+            or self.enable_web_search != bool(canonical_types)
+        ):
+            raise ValueError("科研检索配置必须使用 canonical 顺序与开关")
+        return self
 
 
 class ResearchChatResponse(BaseModel):

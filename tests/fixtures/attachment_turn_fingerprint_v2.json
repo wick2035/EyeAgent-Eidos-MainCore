@@ -1,0 +1,52 @@
+{
+  "health": {
+    "input": {
+      "version": 2,
+      "operation": "normal",
+      "conversation_id": "conversation-1",
+      "session_id": "session-1",
+      "patient_id": "patient-1",
+      "message": "",
+      "source_message_id": null,
+      "implicit_prompt_id": "attachment-analysis-v1",
+      "attachment_ids": [
+        "att-2",
+        "att-1"
+      ],
+      "agent_type": "health",
+      "attachment_scope": "patient",
+      "research_options": null
+    },
+    "canonical_json": "{\"agent_type\":\"health\",\"attachment_ids\":[\"att-2\",\"att-1\"],\"attachment_scope\":\"patient\",\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":\"attachment-analysis-v1\",\"message\":\"\",\"operation\":\"normal\",\"patient_id\":\"patient-1\",\"research_options\":null,\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":2}",
+    "sha256": "219c43458d06747e5ba2690845ced069a8f0489f6c38fc67203bf6cba76813d7"
+  },
+  "research": {
+    "input": {
+      "version": 2,
+      "operation": "normal",
+      "conversation_id": "conversation-1",
+      "session_id": "session-1",
+      "patient_id": null,
+      "message": "",
+      "source_message_id": null,
+      "implicit_prompt_id": "research-document-analysis-v1",
+      "attachment_ids": [
+        "att-2",
+        "att-1"
+      ],
+      "agent_type": "research",
+      "attachment_scope": "research",
+      "research_options": {
+        "enable_institution_data": true,
+        "enable_web_search": true,
+        "types": [
+          "general",
+          "pubmed",
+          "scholar"
+        ]
+      }
+    },
+    "canonical_json": "{\"agent_type\":\"research\",\"attachment_ids\":[\"att-2\",\"att-1\"],\"attachment_scope\":\"research\",\"conversation_id\":\"conversation-1\",\"implicit_prompt_id\":\"research-document-analysis-v1\",\"message\":\"\",\"operation\":\"normal\",\"patient_id\":null,\"research_options\":{\"enable_institution_data\":true,\"enable_web_search\":true,\"types\":[\"general\",\"pubmed\",\"scholar\"]},\"session_id\":\"session-1\",\"source_message_id\":null,\"version\":2}",
+    "sha256": "34eb09276620ee581a75d4fa5654d2d03b5369a650dc3160808302591bdedbc1"
+  }
+}

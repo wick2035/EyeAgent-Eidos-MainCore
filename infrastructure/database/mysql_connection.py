@@ -9,6 +9,7 @@ import logging
 import functools
 from typing import Optional, Any, List, Dict, Tuple
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -113,6 +114,16 @@ def retry_on_connection_error(max_retries: int = 3, base_delay: float = 0.5, max
                 except Exception as e:
                     last_error = e
 
+                    # 外层事务必须把整个工作单元作为 retry 边界。继续在同一个
+                    # cursor 上重放单条 SQL 会提交不完整的事务，尤其是 deadlock
+                    # 已经使当前 MySQL transaction 失效时。
+                    transaction_cursor = getattr(self, "_transaction_cursor", None)
+                    if (
+                        transaction_cursor is not None
+                        and transaction_cursor.get() is not None
+                    ):
+                        raise
+
                     # 检查是否可重试
                     if not is_retryable_error(e):
                         logger.error(f"[MySQLPool] 不可重试错误: {e}")
@@ -160,6 +171,10 @@ class MySQLConnectionPool:
     def __init__(self):
         """初始化连接池配置"""
         self._pool: Optional[PooledDB] = None
+        self._transaction_cursor: ContextVar[Optional[Any]] = ContextVar(
+            f"mysql_transaction_cursor_{id(self)}",
+            default=None,
+        )
         self._config = {
             "host": os.getenv("DB_HOST", "localhost"),
             "port": int(os.getenv("DB_PORT", 3306)),
@@ -181,6 +196,11 @@ class MySQLConnectionPool:
         }
 
         self._init_pool()
+
+    @property
+    def in_transaction(self) -> bool:
+        """当前执行上下文是否已处于外层数据库事务。"""
+        return self._transaction_cursor.get() is not None
 
     def _init_pool(self):
         """初始化连接池"""
@@ -221,6 +241,11 @@ class MySQLConnectionPool:
         Yields:
             DictCursor: 字典游标对象
         """
+        transaction_cursor = self._transaction_cursor.get()
+        if transaction_cursor is not None:
+            yield transaction_cursor
+            return
+
         connection = None
         cursor = None
         try:
@@ -248,6 +273,28 @@ class MySQLConnectionPool:
                 except Exception:
                     pass
 
+    @contextmanager
+    def transaction(self):
+        """在当前执行上下文中复用同一连接，并仅由最外层提交或回滚。"""
+        transaction_cursor = self._transaction_cursor.get()
+        if transaction_cursor is not None:
+            yield
+            return
+
+        connection = self._get_connection()
+        cursor = connection.cursor()
+        token = self._transaction_cursor.set(cursor)
+        try:
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._transaction_cursor.reset(token)
+            cursor.close()
+            connection.close()
+
     @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def execute(self, sql: str, params: Tuple = None) -> int:
         """
@@ -268,9 +315,11 @@ class MySQLConnectionPool:
                 logger.debug(f"[MySQLPool] 执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
                 return affected_rows
         except pymysql.Error as e:
+            if self._transaction_cursor.get() is not None:
+                raise
             # 重试装饰器会处理可重试错误
             logger.error(f"[MySQLPool] SQL执行失败: {e}")
-            raise DatabaseError(f"SQL执行失败: {str(e)}")
+            raise DatabaseError(f"SQL执行失败: {str(e)}") from e
 
     @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def execute_many(self, sql: str, params_list: List[Tuple]) -> int:
@@ -285,8 +334,10 @@ class MySQLConnectionPool:
                 logger.debug(f"[MySQLPool] 批量执行SQL: {sql[:100]}... 影响行数: {affected_rows}")
                 return affected_rows
         except pymysql.Error as e:
+            if self._transaction_cursor.get() is not None:
+                raise
             logger.error(f"[MySQLPool] 批量SQL执行失败: {e}")
-            raise DatabaseError(f"批量SQL执行失败: {str(e)}")
+            raise DatabaseError(f"批量SQL执行失败: {str(e)}") from e
 
     @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def fetch_one(self, sql: str, params: Tuple = None) -> Optional[Dict[str, Any]]:
@@ -302,8 +353,10 @@ class MySQLConnectionPool:
                 logger.debug(f"[MySQLPool] 查询单条: {sql[:100]}...")
                 return result
         except pymysql.Error as e:
+            if self._transaction_cursor.get() is not None:
+                raise
             logger.error(f"[MySQLPool] 查询失败: {e}")
-            raise DatabaseError(f"查询失败: {str(e)}")
+            raise DatabaseError(f"查询失败: {str(e)}") from e
 
     @retry_on_connection_error(max_retries=3, base_delay=0.5)
     def fetch_all(self, sql: str, params: Tuple = None) -> List[Dict[str, Any]]:
@@ -319,8 +372,10 @@ class MySQLConnectionPool:
                 logger.debug(f"[MySQLPool] 查询多条: {sql[:100]}... 结果数: {len(results)}")
                 return results
         except pymysql.Error as e:
+            if self._transaction_cursor.get() is not None:
+                raise
             logger.error(f"[MySQLPool] 查询失败: {e}")
-            raise DatabaseError(f"查询失败: {str(e)}")
+            raise DatabaseError(f"查询失败: {str(e)}") from e
 
     def fetch_count(self, sql: str, params: Tuple = None) -> int:
         """

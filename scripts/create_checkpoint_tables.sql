@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS langgraph_thread_mapping (
     thread_id VARCHAR(128) PRIMARY KEY COMMENT 'LangGraph线程ID',
     conversation_id VARCHAR(64) DEFAULT NULL COMMENT '关联 chat_conversation.id',
     session_id VARCHAR(64) DEFAULT NULL COMMENT '会话ID',
-    patient_id VARCHAR(64) NOT NULL COMMENT '患者UUID',
+    patient_id VARCHAR(64) DEFAULT NULL COMMENT '患者UUID；科研模式为空',
     doctor_id VARCHAR(64) DEFAULT NULL COMMENT '医生UUID',
     agent_type VARCHAR(32) DEFAULT 'health' COMMENT 'Agent类型',
     status VARCHAR(16) DEFAULT 'active' COMMENT '状态: active/archived/deleted',

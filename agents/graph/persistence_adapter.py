@@ -7,8 +7,13 @@
 - InMemoryPersistenceAdapter: 内存存储（单元测试）
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from application.services.legacy_text_turn_authority import (
+        LegacyTextTurnAuthority,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +73,50 @@ class PersistenceAdapter(ABC):
         pass
 
     @abstractmethod
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        """创建普通用户消息和助手占位。"""
+        pass
+
+    @abstractmethod
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        """创建编辑重发的用户消息和助手占位。"""
+        pass
+
+    @abstractmethod
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        """创建重新生成的助手占位。"""
+        pass
+
+    @abstractmethod
     def update_assistant_success(
         self,
         message_id: str,
         content: str,
         token_used: Optional[int] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
@@ -83,7 +126,8 @@ class PersistenceAdapter(ABC):
             message_id: 消息ID
             content: 完整回复内容
             token_used: Token 消耗数
-            tool_results: 工具调用结果
+            tool_results: 统一后的工具调用结果数组
+            citations: 前端 CitationBlock 引用来源数组
             context: 更新的上下文信息
 
         Returns:
@@ -106,6 +150,26 @@ class PersistenceAdapter(ABC):
 
         Returns:
             bool: 是否更新成功
+        """
+        pass
+
+    @abstractmethod
+    def update_assistant_final_status(
+        self,
+        message_id: str,
+        status: str,
+        content: str,
+        error_message: Optional[str] = None,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        更新 AI 回复为最终状态
+
+        用于取消或异常等非正常完成场景，确保 running 占位不会残留。
+        正常完成仍优先使用 update_assistant_success。
         """
         pass
 
@@ -169,12 +233,45 @@ class NullPersistenceAdapter(PersistenceAdapter):
         logger.debug(f"[NullAdapter] create_assistant_placeholder: chat_id={chat_id}")
         return "null-assistant-id"
 
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        logger.debug(f"[NullAdapter] prepare_normal_turn: chat_id={chat_id}")
+        return {"user_message_id": "null-msg-id", "assistant_message_id": "null-assistant-id"}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
+
     def update_assistant_success(
         self,
         message_id: str,
         content: str,
         token_used: Optional[int] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
         logger.debug(f"[NullAdapter] update_assistant_success: message_id={message_id}")
@@ -186,6 +283,22 @@ class NullPersistenceAdapter(PersistenceAdapter):
         error_message: str,
     ) -> bool:
         logger.debug(f"[NullAdapter] update_assistant_failed: message_id={message_id}")
+        return True
+
+    def update_assistant_final_status(
+        self,
+        message_id: str,
+        status: str,
+        content: str,
+        error_message: Optional[str] = None,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        logger.debug(
+            f"[NullAdapter] update_assistant_final_status: message_id={message_id}, status={status}"
+        )
         return True
 
     def update_conversation_title(
@@ -260,12 +373,52 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
 
         return message_id
 
+    def prepare_normal_turn(
+        self,
+        chat_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        is_first_message: bool = False,
+    ) -> Dict[str, str]:
+        user_message_id = self.save_user_message(
+            chat_id=chat_id,
+            content=content,
+            sender_id=sender_id,
+            context=context,
+            is_first_message=is_first_message,
+        )
+        assistant_message_id = self.create_assistant_placeholder(chat_id=chat_id, context=context)
+        return {"user_message_id": user_message_id, "assistant_message_id": assistant_message_id}
+
+    def prepare_edit_resend_turn(
+        self,
+        chat_id: str,
+        source_message_id: str,
+        content: str,
+        sender_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
+
+    def prepare_regenerate_turn(
+        self,
+        chat_id: str,
+        source_assistant_id: str,
+        context: Optional[Dict[str, Any]] = None,
+        doctor_id: Optional[str] = None,
+        expected_authority: Optional["LegacyTextTurnAuthority"] = None,
+    ) -> Dict[str, str]:
+        raise RuntimeError("LEGACY_BRANCH_PERSISTENCE_UNSUPPORTED")
+
     def update_assistant_success(
         self,
         message_id: str,
         content: str,
         token_used: Optional[int] = None,
         tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if message_id not in self.messages:
@@ -276,6 +429,7 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
             "status": "success",
             "token_used": token_used,
             "tool_results": tool_results,
+            "citations": citations,
         })
 
         if context:
@@ -299,6 +453,34 @@ class InMemoryPersistenceAdapter(PersistenceAdapter):
             "status": "failed",
             "error_message": error_message,
         })
+
+        return True
+
+    def update_assistant_final_status(
+        self,
+        message_id: str,
+        status: str,
+        content: str,
+        error_message: Optional[str] = None,
+        token_used: Optional[int] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if message_id not in self.messages:
+            return False
+
+        self.messages[message_id].update({
+            "content": content,
+            "status": status,
+            "token_used": token_used,
+            "tool_results": tool_results,
+            "citations": citations,
+            "error_message": error_message,
+        })
+
+        if context:
+            self.messages[message_id]["context"] = context
 
         return True
 

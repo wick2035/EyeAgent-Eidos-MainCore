@@ -55,8 +55,6 @@ def get_institution_research_data(
         - 患者姓名、电话、身份证等敏感信息已脱敏
     """
     try:
-        logger.info(f"[ResearchTool] get_institution_research_data: doctor={doctor_id}, type={data_type}")
-
         # 验证data_type
         valid_types = ["patients", "appointments", "prescriptions", "scans", "all"]
         if data_type not in valid_types:
@@ -64,6 +62,10 @@ def get_institution_research_data(
                 "error": True,
                 "message": f"无效的数据类型: {data_type}，有效值: {valid_types}"
             }, ensure_ascii=False)
+        logger.info(
+            "[ResearchTool] get_institution_research_data started, data_type=%s",
+            data_type,
+        )
 
         client = get_api_client()
 
@@ -75,7 +77,6 @@ def get_institution_research_data(
             "status": "pending",
             "message": "机构数据库接口待后端实现，请联系开发团队",
             "request_info": {
-                "doctor_id": doctor_id,
                 "data_type": data_type,
                 "date_range": {
                     "start": date_range_start,
@@ -88,13 +89,23 @@ def get_institution_research_data(
         return json.dumps(result, ensure_ascii=False)
 
     except (APIError, NetworkError) as e:
-        error_msg = f"获取机构数据失败: {str(e)}"
-        logger.error(f"[ResearchTool Error] {error_msg}")
-        return json.dumps({"error": True, "message": error_msg}, ensure_ascii=False)
+        logger.error(
+            "[ResearchTool] get_institution_research_data failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "获取机构数据失败，请稍后再试"},
+            ensure_ascii=False,
+        )
     except Exception as e:
-        error_msg = f"获取机构数据异常: {str(e)}"
-        logger.error(f"[ResearchTool Error] {error_msg}", exc_info=True)
-        return json.dumps({"error": True, "message": error_msg}, ensure_ascii=False)
+        logger.error(
+            "[ResearchTool] get_institution_research_data failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "获取机构数据失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 网页搜索工具 ==========
@@ -145,8 +156,6 @@ def web_search_medical(
         - Scholar搜索适合查找学术论文和引用
     """
     try:
-        logger.info(f"[ResearchTool] web_search_medical: query='{query}', types='{search_types}'")
-
         # 解析搜索类型
         types_list = [t.strip().lower() for t in search_types.split(",") if t.strip()]
         if not types_list:
@@ -156,7 +165,10 @@ def web_search_medical(
         valid_types = {"general", "pubmed", "scholar"}
         invalid_types = [t for t in types_list if t not in valid_types]
         if invalid_types:
-            logger.warning(f"[ResearchTool] 无效的搜索类型将被忽略: {invalid_types}")
+            logger.warning(
+                "[ResearchTool] web_search_medical ignored invalid types, count=%s",
+                len(invalid_types),
+            )
             types_list = [t for t in types_list if t in valid_types]
 
         if not types_list:
@@ -167,6 +179,11 @@ def web_search_medical(
 
         # 限制max_results
         max_results = min(max(1, max_results), 20)
+        logger.info(
+            "[ResearchTool] web_search_medical started, query_length=%s, types=%s",
+            len(query),
+            ",".join(types_list),
+        )
 
         # 使用Search1API进行搜索
         from infrastructure.api.search1api_client import get_search1api_client
@@ -205,13 +222,21 @@ def web_search_medical(
             "results_by_type": formatted_results
         }
 
-        logger.info(f"[ResearchTool] 搜索完成，共{total_count}条结果")
+        logger.info(
+            "[ResearchTool] web_search_medical completed, result_count=%s",
+            total_count,
+        )
         return json.dumps(response, ensure_ascii=False)
 
     except Exception as e:
-        error_msg = f"网页搜索失败: {str(e)}"
-        logger.error(f"[ResearchTool Error] {error_msg}", exc_info=True)
-        return json.dumps({"error": True, "message": error_msg}, ensure_ascii=False)
+        logger.error(
+            "[ResearchTool] web_search_medical failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "网页搜索失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 继承自现有Agent的工具（排除报告生成）==========

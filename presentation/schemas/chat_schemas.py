@@ -3,7 +3,7 @@
 """
 import re
 from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from presentation.schemas.ui_schemas import UIElements
 
@@ -38,7 +38,10 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., description="用户消息")
     session_id: Optional[str] = Field(None, description="会话ID（如果为空会自动生成）")
-    patient_id: str = Field(..., description="患者UUID（必需）")
+    patient_id: Optional[str] = Field(
+        None,
+        description="患者UUID；科研模式必须为空，其他模式必需",
+    )
     doctor_id: Optional[str] = Field(None, description="医生UUID（医生端必需，用于记录医生的会话）")
     agent_type: Optional[str] = Field("health", description="Agent类型 (health/report/reminder/research/compliance/recommendation)")
     role: Optional[str] = Field("patient", description="用户角色 (patient/doctor)")
@@ -47,9 +50,9 @@ class ChatRequest(BaseModel):
 
     @field_validator('patient_id')
     @classmethod
-    def validate_patient_uuid(cls, v: str) -> str:
-        """验证patient_id必须是有效的UUID格式"""
-        if not UUID_PATTERN.match(v):
+    def validate_patient_uuid(cls, v: Optional[str]) -> Optional[str]:
+        """验证非空 patient_id 必须是有效 UUID。"""
+        if v is not None and not UUID_PATTERN.match(v):
             raise ValueError(f'patient_id 必须是有效的UUID格式，收到: "{v}"')
         return v
 
@@ -60,6 +63,18 @@ class ChatRequest(BaseModel):
         if v is not None and not UUID_PATTERN.match(v):
             raise ValueError(f'doctor_id 必须是有效的UUID格式，收到: "{v}"')
         return v
+
+    @model_validator(mode="after")
+    def validate_agent_patient_binding(self):
+        if self.agent_type == "research":
+            if self.patient_id is not None:
+                raise ValueError("科研模式不得绑定患者")
+            if self.role != "doctor" or not self.doctor_id:
+                raise ValueError("科研模式必须绑定医生身份")
+            return self
+        if self.patient_id is None:
+            raise ValueError("非科研模式必须提供 patient_id")
+        return self
     
     class Config:
         json_schema_extra = {
@@ -91,6 +106,51 @@ class ChatRequest(BaseModel):
         }
 
 
+class EditResendRequest(ChatRequest):
+    source_message_id: str = Field(..., description="被编辑的用户消息ID")
+
+
+class RegenerateRequest(BaseModel):
+    session_id: Optional[str] = Field(None, description="会话ID")
+    patient_id: Optional[str] = Field(
+        None,
+        description="患者UUID；科研模式必须为空，其他模式必需",
+    )
+    doctor_id: Optional[str] = Field(None, description="医生UUID")
+    agent_type: Optional[str] = Field("health", description="Agent类型")
+    role: Optional[str] = Field("doctor", description="用户角色")
+    conversation_id: str = Field(..., description="数据库会话ID")
+    source_message_id: str = Field(..., description="被重生成的助手消息ID")
+
+    @field_validator('patient_id')
+    @classmethod
+    def validate_patient_uuid(cls, v: Optional[str]) -> Optional[str]:
+        """验证非空 patient_id 必须是有效 UUID。"""
+        if v is not None and not UUID_PATTERN.match(v):
+            raise ValueError(f'patient_id 必须是有效的UUID格式，收到: "{v}"')
+        return v
+
+    @field_validator('doctor_id')
+    @classmethod
+    def validate_doctor_uuid(cls, v: Optional[str]) -> Optional[str]:
+        """验证doctor_id如果提供必须是有效的UUID格式"""
+        if v is not None and not UUID_PATTERN.match(v):
+            raise ValueError(f'doctor_id 必须是有效的UUID格式，收到: "{v}"')
+        return v
+
+    @model_validator(mode="after")
+    def validate_agent_patient_binding(self):
+        if self.agent_type == "research":
+            if self.patient_id is not None:
+                raise ValueError("科研模式不得绑定患者")
+            if self.role != "doctor" or not self.doctor_id:
+                raise ValueError("科研模式必须绑定医生身份")
+            return self
+        if self.patient_id is None:
+            raise ValueError("非科研模式必须提供 patient_id")
+        return self
+
+
 class ChatResponse(BaseModel):
     """聊天响应"""
 
@@ -118,4 +178,3 @@ class ChatResponse(BaseModel):
                 }
             }
         }
-

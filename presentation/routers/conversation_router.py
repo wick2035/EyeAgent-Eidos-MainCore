@@ -2,14 +2,20 @@
 会话管理路由 - 处理对话历史的查询和管理
 """
 import logging
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, Request, status, Query
 
+from presentation.dependencies.security import (
+    LegacyRouteError,
+    require_legacy_conversation_resource,
+)
 from presentation.schemas.conversation_schemas import (
     ConversationListResponse,
     ConversationSummary,
     ConversationDetailResponse,
     MessageResponse,
-    DeleteConversationResponse
+    MessageSiblingResponse,
+    DeleteConversationResponse,
+    ActiveBranchRequest,
 )
 from application.services.chat_persistence_service import get_chat_persistence_service
 
@@ -77,7 +83,10 @@ async def list_conversations(
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
-async def get_conversation_detail(conversation_id: str) -> ConversationDetailResponse:
+async def get_conversation_detail(
+    conversation_id: str,
+    http_request: Request,
+) -> ConversationDetailResponse:
     """
     获取会话详情和所有消息
 
@@ -91,24 +100,30 @@ async def get_conversation_detail(conversation_id: str) -> ConversationDetailRes
         logger.info(f"[ConversationRouter] 获取会话详情: {conversation_id}")
 
         persistence_service = get_chat_persistence_service()
-        conversation, messages = persistence_service.load_conversation(conversation_id)
+        conversation = persistence_service.get_conversation(conversation_id)
 
         if not conversation:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"会话不存在: {conversation_id}"
+                detail="会话不存在"
             )
+        require_legacy_conversation_resource(
+            http_request,
+            conversation,
+            "conversation:read",
+        )
+        conversation, messages, sibling_map = persistence_service.load_active_path(conversation_id)
 
         # 转换消息为响应模型
         message_responses = []
         for msg in messages:
-            # 解析 context JSON
+            siblings = sibling_map.get(msg.id, [])
             context_list = None
             if msg.context:
                 try:
                     context_list = msg.get_context_dict()
                 except Exception:
-                    pass
+                    context_list = None
 
             message_responses.append(MessageResponse(
                 id=msg.id,
@@ -116,7 +131,20 @@ async def get_conversation_detail(conversation_id: str) -> ConversationDetailRes
                 message_content=msg.message_content,
                 message_type=msg.message_type,
                 create_time=msg.create_time,
-                context=context_list
+                context=context_list,
+                parent_id=msg.parent_id,
+                siblings_group_id=msg.siblings_group_id,
+                status=msg.status,
+                feedback=getattr(msg, "feedback", None),
+                siblings=[
+                    MessageSiblingResponse(
+                        id=s.id,
+                        message_type=s.message_type,
+                        text_preview=s.message_content[:80],
+                        active=s.id == msg.id,
+                    )
+                    for s in siblings
+                ],
             ))
 
         return ConversationDetailResponse(
@@ -131,13 +159,49 @@ async def get_conversation_detail(conversation_id: str) -> ConversationDetailRes
             messages=message_responses
         )
 
-    except HTTPException:
+    except (HTTPException, LegacyRouteError):
         raise
     except Exception as e:
         logger.error(f"[ConversationRouter] 获取会话详情失败: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取会话详情失败: {str(e)}"
+        )
+
+
+@router.put("/{conversation_id}/active-branch")
+async def switch_active_branch(
+    conversation_id: str,
+    request: ActiveBranchRequest,
+    http_request: Request,
+):
+    try:
+        persistence_service = get_chat_persistence_service()
+        conversation = persistence_service.get_conversation(conversation_id)
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="会话不存在",
+            )
+        require_legacy_conversation_resource(
+            http_request,
+            conversation,
+            "conversation:write",
+        )
+        success = persistence_service.switch_active_branch(conversation_id, request.through_message_id)
+        if not success:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="切换分支失败")
+        conversation = persistence_service.get_conversation(conversation_id)
+        active_node_id = conversation.active_node_id if conversation else request.through_message_id
+        return {"success": True, "conversation_id": conversation_id, "active_node_id": active_node_id}
+
+    except (HTTPException, LegacyRouteError):
+        raise
+    except Exception as e:
+        logger.error(f"[ConversationRouter] 切换分支失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="切换分支失败"
         )
 
 

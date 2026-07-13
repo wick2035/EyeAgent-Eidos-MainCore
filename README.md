@@ -180,6 +180,152 @@
 | GET | `/api/info` | API 信息 |
 | GET | `/health` | 系统健康检查 |
 
+医问通医生端 platform 附件的权威接口、双数据面职责及部署/回滚检查统一见[平台附件接口与部署 Preflight](docs/平台附件接口与部署Preflight.md)。
+
+## 内部调用认证边界
+
+MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Java 网关签发的
+短期 RS256 JWT，无需在每个路由重复声明依赖。认证模式由服务端环境变量
+`INTERNAL_AUTH_MODE` 控制：
+
+- `off`：默认值。不构造 verifier、不解析 token，保持现有请求行为；
+- `observe`：验证已携带的 token，并记录缺失、无效或 JWKS 不可用等结果，但仍放行
+  请求，用于上线前观测；
+- `enforce`：仅对下述平台独占路由启用强制认证。缺失或无效 token 返回 `401`，无可用
+  JWKS 时返回 `503`；其他 `/api/**` 路由仍按 `observe` 兼容放行。认证成功后把可信主体
+  写入 `request.state.internal_principal`。中间件同时把 effective mode 写入服务端专用
+  ASGI scope 键 `_internal_auth_effective_mode`；该值不来自客户端，也不包含 token 或主体。
+
+旧版科研 normal/edit/regenerate 路由只在 effective mode 为 `enforce` 时执行
+subject/scope 强校验；`off` 与 `observe` 即使 token 缺失、无效或 scope 不匹配也继续
+按既有行为放行。旧分支仍会独立校验会话 owner 与源用户消息的 canonical agent/patient
+配置，缺失、损坏或冲突时 fail closed，且不创建任何消息节点。
+
+全局配置 `INTERNAL_AUTH_MODE=enforce` 不等于全部 `/api/**` 都强制认证。当前只有以下
+11 条平台独占路由的有效模式为 `enforce`（动态 ID 只匹配一个非空路径段）：
+
+- `GET /api/conversations/{conversation_id}`；
+- `POST /api/chat/edit-resend/stream`；
+- `POST /api/chat/regenerate/stream`；
+- `POST /api/platform/chat/turns/prepare`；
+- `POST /api/platform/chat/turns/execute`；
+- `GET /api/platform/chat/turns/{request_id}`；
+- `POST /api/platform/chat/turns/{request_id}/abort`；
+- `DELETE /api/platform/research-documents/{attachment_id}`；
+- `POST /api/research/chat`；
+- `POST /api/research/chat/stream`；
+- `PUT /api/conversations/{conversation_id}/active-branch`。
+
+以下四类共享或患者兼容路由在全局配置为 `enforce` 时，有效模式仍为 `observe`：
+
+- `POST /api/chat`；
+- `POST /api/chat/stream`；
+- `POST /api/upload`；
+- `POST /api/asr/transcribe`。
+
+其他未盘点 `/api/**`、方法不匹配、额外路径段或尾斜杠变体也默认使用 `observe`，避免
+破坏既有患者调用；已携带合法 JWT 的请求仍会验证并绑定可信主体。
+
+`observe` 和 `enforce` 必须配置 Java 后端的 JWKS URL。默认示例使用 HTTPS：
+
+```env
+INTERNAL_AUTH_MODE=observe
+INTERNAL_JWT_JWKS_URL=https://eye-agent-backend.example/.well-known/eye-agent-internal-jwks.json
+```
+
+默认只允许 HTTPS，或 `localhost`、IPv4/IPv6 loopback HTTP；例如本机联调可使用
+`http://127.0.0.1:8081/.well-known/eye-agent-internal-jwks.json`。非 loopback HTTP 默认拒绝。
+只有部署方已经证明链路位于已认证 service mesh 或其他有书面证据的受信网络边界时，才可
+显式设置：
+
+```env
+INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP=true
+```
+
+该变量默认 `false`，且只接受精确小写 `true`/`false`；空字符串、大小写变体、`1`、
+`yes` 等值都会 fail-fast。此开关只是显式接受明文传输风险，不会让 HTTP 获得加密、端点
+身份认证或防篡改能力，也不能替代生产 HTTPS/mTLS 或已认证 mesh 的部署证据。
+
+认证中间件输出可按 method+规范化 route 聚合的安全事件：
+
+```text
+internal_auth_valid
+internal_auth_missing
+internal_auth_invalid
+internal_auth_unavailable
+internal_auth_internal_error
+jwks_refresh_success
+jwks_refresh_failed
+```
+
+认证事件至少包含 effective `mode`、安全 HTTP `method` 和固定 route template；动态
+`conversation_id/session_id` 不写入日志，未知 API 固定分类为 `/api/{unknown}`。valid 事件
+额外包含白名单 `principal_type` 与已验签 token `kid` 的 16 位 SHA-256 指纹；JWKS success
+只记录 key count 与可信 `kid` 指纹。失败事件不记录 token、subject、攻击者原始 `kid`、
+动态路径参数、异常消息/堆栈或上游响应正文。
+
+建议先确认 JWKS 使用 HTTPS/mTLS、已认证 service mesh、loopback 或等效公钥固定，并且
+Java JWKS 仅可被 MainCore 所在网络边界访问，再按 `off` → `observe` → 路由级 `enforce`
+顺序发布。缺少上述传输证据，或没有访问日志提供“遗留直连请求为零”的流量证据时，不得宣称
+或启用全局 `enforce`；即使配置为 `enforce`，上述共享、患者兼容及未盘点 API 仍保持
+`observe`。
+
+本周期的 surface 边界如下：
+
+- `/health` 是明确公开的业务健康接口，不进入内部 JWT 验证；
+- `/`、测试页面、`/static/**`、`/docs`、`/redoc`、`/openapi.json` 等非
+  `/api/**` surface 保持现状，不属于本周期的安全承诺；
+- `/ws/asr` 是 WebSocket 接口，不进入当前 HTTP JWT 中间件，当前边界保持不变，
+  必须依赖网关与内网访问控制；
+- 生产环境不得把 MainCore 作为公网入口暴露，外部业务请求必须先经过 Java 网关。
+
+### 2026-07-10 自动化验收与部署边界
+
+当前周期已完成平台 7 条 Java 调用与 MainCore 身份桥的代码、本地自动化验收；最终审查
+又补入 `kid` 的 `1..128` UTF-8 字节契约、USER/DOCTOR 登录绑定失败补偿、完整安全遥测和
+Token-Session 单次持久化。仓库外 2048-bit 临时 RSA 密钥签出的 compact JWT 和公开 JWKS
+已通过生产 `CachedJwksProvider`、`RS256JWTVerifier` 的离线跨语言验签；探针断言主体类型、
+`aud` 数组、scope 和 `kid` 契约，未记录临时 `kid`、token 或密钥材料。精确最终测试计数以
+本周期 Task 12 验收报告为准。
+
+第二轮独立复审又补齐 Java 公私钥真实 sign/verify 自检、Python 空白 `kid` 拒绝、至少
+2048-bit RSA JWK 门禁，以及 HTTPS/loopback 默认安全的 JWKS URL 策略。
+
+实际部署只使用以下变量名，secret 值由部署环境提供，不写入 README、镜像或 YAML：
+
+```text
+Java:
+  INTERNAL_JWT_MODE=off
+  INTERNAL_JWT_TTL_SECONDS=300
+  INTERNAL_JWT_KEY_ID
+  INTERNAL_JWT_PRIVATE_KEY_LOCATION
+  INTERNAL_JWT_PUBLIC_KEY_LOCATION
+  INTERNAL_JWT_ADDITIONAL_PUBLIC_JWKS_LOCATION
+
+Python:
+  INTERNAL_AUTH_MODE=off
+  INTERNAL_JWT_JWKS_URL
+  INTERNAL_JWT_CACHE_TTL_SECONDS
+  INTERNAL_JWT_NEGATIVE_CACHE_SECONDS
+  INTERNAL_JWT_REFRESH_COOLDOWN_SECONDS
+  INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS
+  INTERNAL_JWT_CLOCK_SKEW_SECONDS
+  INTERNAL_JWT_ALLOW_INSECURE_NON_LOOPBACK_HTTP=false
+```
+
+`off` 是两端默认配置。“代码与本地自动化完成”不等于“生产 enforce 就绪”。本次没有
+staging/生产访问日志、真实 Sa-Token 或患者流量、部署权限
+及编排环境，因此没有启动任何全局 enforce，也没有完成 staging 30 分钟/生产高峰流量
+gate、真实平台/患者 JSON/SSE 探针、滚动 SSE drain、K1/K2 重叠发布/bake/signer 回滚或
+前滚/回滚演练，也没有提供生产 HTTPS/mTLS、已认证 mesh、loopback 或等效公钥固定证据。
+部署状态应判定为：平台范围代码与本地自动化验收完成，外部部署 gate 和演练待执行。
+
+在外部 gate 完成前，上述 11 条平台独占路由以外的 `POST /api/chat`、
+`POST /api/chat/stream`、`POST /api/upload`、`POST /api/asr/transcribe` 和未知
+`/api/**` 均继续按 observe 兼容；没有患者端零流量或明确下线证据，全局 enforce gate
+明确未满足。回滚顺序仍为 Python enforce → observe，完成实例 unready、在途 SSE drain
+后再将 Java enforce → observe → off；这套部署回滚流程尚未在外部编排环境实际演练。
+
 ## 快速开始
 
 ### 1. 安装依赖

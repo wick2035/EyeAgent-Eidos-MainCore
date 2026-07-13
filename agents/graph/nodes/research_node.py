@@ -7,6 +7,8 @@ import logging
 from typing import Dict, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import StructuredTool
 
 # 兼容不同版本的 langgraph
 try:
@@ -16,27 +18,57 @@ except ImportError:
 
 from agents.graph.state import MedicalState
 from agents.prompts.research_prompts import (
+    PREPARED_RESEARCH_DOCUMENT_SECURITY_DIRECTIVE,
     get_research_system_prompt,
     get_research_stage_prompt,
     build_research_context,
     detect_research_intent,
 )
 from agents.tools.research_tools import RESEARCH_AGENT_TOOLS
+from agents.tools.research_dataset_statistics import (
+    build_research_dataset_statistics_tool,
+)
+from agents.graph.attachment_citations import build_attachment_citation_tool
+from utils.transient_attachment_context import (
+    get_research_document_context,
+    inject_untrusted_research_documents,
+)
 from utils.llm_config import get_llm, get_streaming_llm
 
 logger = logging.getLogger(__name__)
 
+_PATIENT_BOUND_TOOL_NAMES = frozenset(
+    {
+        "get_patient_prescription",
+        "get_doctor_free_time",
+        "reserve_doctor",
+        "get_patient_prescription_limit",
+        "get_patient_prescription_detail",
+        "get_patient_scan_data",
+        "get_patient_reminder",
+        "get_patient_reminder_config",
+        "init_patient_reminder_config",
+        "modify_patient_reminder_config",
+        "create_reminder",
+    }
+)
+_PREPARED_UNBOUND_DATA_TOOL_NAMES = frozenset(
+    {
+        "statistical_analysis",
+        "generate_research_visualization",
+        "export_research_data",
+    }
+)
 
-def research_agent_node(state: MedicalState) -> Dict[str, Any]:
-    """
-    ResearchAgent 节点 - 处理科研助手、文献搜索、统计分析
 
-    Args:
-        state: 当前状态
+class PreparedResearchAgentError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("RESEARCH_AGENT_FAILED")
+        self.error_code = "RESEARCH_AGENT_FAILED"
 
-    Returns:
-        状态更新字典
-    """
+
+def _prepare_research(state: MedicalState, config: RunnableConfig | None = None):
+    """构建 ResearchAgent 的 react agent 与输入消息（sync/async 共用）"""
     role = state.get("role", "doctor")  # 科研模式通常是医生
     stage = state.get("stage", "greeting")
     messages = state.get("messages", [])
@@ -53,9 +85,16 @@ def research_agent_node(state: MedicalState) -> Dict[str, Any]:
 
     # 添加权限限制提示
     permission_note = _build_permission_note(enable_institution_data, enable_web_search)
+    document_security_note = (
+        PREPARED_RESEARCH_DOCUMENT_SECURITY_DIRECTIVE
+        if state.get("platform_prepared")
+        else ""
+    )
 
     # 组合完整提示词
     full_system_prompt = f"""{system_prompt}
+
+{document_security_note}
 
 【当前阶段】{stage_prompt}
 
@@ -63,77 +102,153 @@ def research_agent_node(state: MedicalState) -> Dict[str, Any]:
 
 {permission_note}"""
 
-    logger.debug(f"[ResearchNode] role={role}, stage={stage}, doctor_id={doctor_id}")
+    logger.debug("[ResearchNode] role=%s, stage=%s", role, stage)
 
+    # 根据流式标志选择 LLM
+    is_streaming = state.get("is_streaming", False)
+    llm = get_streaming_llm() if is_streaming else get_llm()
+
+    # 根据权限过滤工具
+    available_tools = _filter_tools_by_permission(
+        RESEARCH_AGENT_TOOLS,
+        enable_institution_data,
+        enable_web_search,
+        patient_id=state.get("patient_id"),
+        platform_prepared=state.get("platform_prepared", False),
+        doctor_id=doctor_id,
+        web_search_types=state.get("web_search_types", []),
+    )
+    research_document_context = None
+    if state.get("platform_prepared"):
+        research_document_context = get_research_document_context()
+        candidates = research_document_context.selection.citation_candidates
+        dataset_statistics_tool = build_research_dataset_statistics_tool(
+            candidates,
+            doctor_id,
+        )
+        if dataset_statistics_tool is not None:
+            available_tools.append(dataset_statistics_tool)
+        if candidates:
+            available_tools = [
+                *available_tools,
+                build_attachment_citation_tool(candidates),
+            ]
+
+    # 创建 ReAct Agent
+    agent = create_react_agent(
+        model=llm,
+        tools=available_tools,
+    )
+
+    # 准备输入消息
+    input_messages = [SystemMessage(content=full_system_prompt)]
+
+    # 添加对话历史
+    for msg in messages:
+        if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+            input_messages.append(msg)
+        elif isinstance(msg, dict):
+            msg_type = msg.get("type", "")
+            content = msg.get("content", "")
+            if msg_type == "human":
+                input_messages.append(HumanMessage(content=content))
+            elif msg_type == "ai":
+                input_messages.append(AIMessage(content=content))
+
+    if state.get("platform_prepared"):
+        input_messages = inject_untrusted_research_documents(
+            input_messages,
+            research_document_context,
+        )
+
+    return agent, input_messages
+
+
+def _finalize_research(state: MedicalState, result: Dict[str, Any], input_messages: list) -> Dict[str, Any]:
+    """处理 ResearchAgent 的执行结果（sync/async 共用）"""
+    # 提取响应
+    response_messages = result.get("messages", [])
+    ai_response = ""
+    tool_calls = []
+
+    for msg in response_messages:
+        if isinstance(msg, AIMessage):
+            if msg.content:
+                ai_response = msg.content
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tool_calls.extend(msg.tool_calls)
+
+    # 检测新阶段
+    last_user_message = _get_last_user_message(state.get("messages", []))
+    new_stage = _detect_research_stage(state, ai_response, tool_calls, last_user_message)
+
+    logger.info(f"[ResearchNode] 响应生成完成, new_stage={new_stage}")
+
+    # 返回状态更新
+    return {
+        "messages": [AIMessage(content=ai_response)] if ai_response else [],
+        "stage": new_stage,
+        "last_response": ai_response,
+    }
+
+
+def _research_error(e: Exception) -> Dict[str, Any]:
+    """ResearchAgent 异常兜底（sync/async 共用）"""
+    logger.error(
+        "[ResearchNode] 处理失败, error_type=%s",
+        type(e).__name__,
+    )
+    error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
+    return {
+        "messages": [AIMessage(content=error_response)],
+        "last_response": error_response,
+        "error": "RESEARCH_AGENT_FAILED",
+    }
+
+
+def research_agent_node(state: MedicalState) -> Dict[str, Any]:
+    """
+    ResearchAgent 节点（同步）- 非流式路径 /api/chat 使用
+
+    Args:
+        state: 当前状态
+
+    Returns:
+        状态更新字典
+    """
     try:
-        # 根据流式标志选择 LLM
-        is_streaming = state.get("is_streaming", False)
-        llm = get_streaming_llm() if is_streaming else get_llm()
-
-        # 根据权限过滤工具
-        available_tools = _filter_tools_by_permission(
-            RESEARCH_AGENT_TOOLS,
-            enable_institution_data,
-            enable_web_search,
-        )
-
-        # 创建 ReAct Agent
-        agent = create_react_agent(
-            model=llm,
-            tools=available_tools,
-        )
-
-        # 准备输入消息
-        input_messages = [SystemMessage(content=full_system_prompt)]
-
-        # 添加对话历史
-        for msg in messages:
-            if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
-                input_messages.append(msg)
-            elif isinstance(msg, dict):
-                msg_type = msg.get("type", "")
-                content = msg.get("content", "")
-                if msg_type == "human":
-                    input_messages.append(HumanMessage(content=content))
-                elif msg_type == "ai":
-                    input_messages.append(AIMessage(content=content))
-
-        # 调用 Agent
+        agent, input_messages = _prepare_research(state)
         result = agent.invoke({"messages": input_messages})
-
-        # 提取响应
-        response_messages = result.get("messages", [])
-        ai_response = ""
-        tool_calls = []
-
-        for msg in response_messages:
-            if isinstance(msg, AIMessage):
-                if msg.content:
-                    ai_response = msg.content
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    tool_calls.extend(msg.tool_calls)
-
-        # 检测新阶段
-        last_user_message = _get_last_user_message(messages)
-        new_stage = _detect_research_stage(state, ai_response, tool_calls, last_user_message)
-
-        logger.info(f"[ResearchNode] 响应生成完成, new_stage={new_stage}")
-
-        # 返回状态更新
-        return {
-            "messages": [AIMessage(content=ai_response)] if ai_response else [],
-            "stage": new_stage,
-            "last_response": ai_response,
-        }
-
+        return _finalize_research(state, result, input_messages)
     except Exception as e:
-        logger.error(f"[ResearchNode] 处理失败: {e}", exc_info=True)
-        error_response = "抱歉，我遇到了一些技术问题，请稍后再试。"
-        return {
-            "messages": [AIMessage(content=error_response)],
-            "last_response": error_response,
-            "error": str(e),
-        }
+        return _research_error(e)
+
+
+async def research_agent_node_async(state: MedicalState, config: RunnableConfig) -> Dict[str, Any]:
+    """
+    ResearchAgent 节点（异步）- 流式路径 /api/chat/stream 使用
+
+    使用 await agent.ainvoke 并显式透传 config，使外层 astream_events 能逐 token 捕获。
+
+    Args:
+        state: 当前状态
+        config: LangGraph 注入的运行配置（携带 astream_events 回调）
+
+    Returns:
+        状态更新字典
+    """
+    try:
+        agent, input_messages = _prepare_research(state, config)
+        result = await agent.ainvoke({"messages": input_messages}, config=config)
+        return _finalize_research(state, result, input_messages)
+    except Exception as e:
+        if state.get("platform_prepared"):
+            logger.error(
+                "[ResearchNode] prepared 处理失败, error_type=%s",
+                type(e).__name__,
+            )
+            raise PreparedResearchAgentError() from None
+        return _research_error(e)
 
 
 def _build_permission_note(enable_institution_data: bool, enable_web_search: bool) -> str:
@@ -157,6 +272,11 @@ def _filter_tools_by_permission(
     tools: list,
     enable_institution_data: bool,
     enable_web_search: bool,
+    patient_id: str | None = None,
+    *,
+    platform_prepared: bool = False,
+    doctor_id: str | None = None,
+    web_search_types: list[str] | None = None,
 ) -> list:
     """
     根据权限过滤工具
@@ -169,22 +289,119 @@ def _filter_tools_by_permission(
     Returns:
         过滤后的工具列表
     """
+    selected_types: tuple[str, ...] = ()
+    if type(platform_prepared) is not bool:
+        raise ValueError("RESEARCH_TOOL_CAPABILITY_INVALID")
+    if platform_prepared:
+        selected_types = _validate_prepared_tool_capability(
+            doctor_id=doctor_id,
+            enable_institution_data=enable_institution_data,
+            enable_web_search=enable_web_search,
+            web_search_types=web_search_types,
+        )
+
     filtered = []
 
     for tool in tools:
         tool_name = getattr(tool, "name", "")
 
-        # 过滤机构数据工具
-        if tool_name == "get_institution_research_data" and not enable_institution_data:
+        if (
+            platform_prepared
+            and tool_name in _PREPARED_UNBOUND_DATA_TOOL_NAMES
+        ):
             continue
 
-        # 过滤网页搜索工具
-        if tool_name == "web_search_medical" and not enable_web_search:
+        if patient_id is None and tool_name in _PATIENT_BOUND_TOOL_NAMES:
             continue
+
+        # 过滤机构数据工具
+        if tool_name == "get_institution_research_data":
+            if not enable_institution_data:
+                continue
+            if platform_prepared:
+                tool = _bind_prepared_institution_tool(tool, doctor_id)
+
+        # 过滤网页搜索工具
+        if tool_name == "web_search_medical":
+            if not enable_web_search or (platform_prepared and not selected_types):
+                continue
+            if platform_prepared:
+                tool = _bind_prepared_web_tool(tool, selected_types)
 
         filtered.append(tool)
 
     return filtered
+
+
+def _validate_prepared_tool_capability(
+    *,
+    doctor_id: str | None,
+    enable_institution_data: bool,
+    enable_web_search: bool,
+    web_search_types: list[str] | None,
+) -> tuple[str, ...]:
+    canonical_order = ("general", "pubmed", "scholar")
+    if (
+        not isinstance(doctor_id, str)
+        or not doctor_id
+        or doctor_id.strip() != doctor_id
+        or type(enable_institution_data) is not bool
+        or type(enable_web_search) is not bool
+        or not isinstance(web_search_types, list)
+        or not all(type(item) is str for item in web_search_types)
+        or len(set(web_search_types)) != len(web_search_types)
+        or tuple(web_search_types)
+        != tuple(item for item in canonical_order if item in web_search_types)
+        or (not enable_web_search and web_search_types)
+    ):
+        raise ValueError("RESEARCH_TOOL_CAPABILITY_INVALID")
+    return tuple(web_search_types)
+
+
+def _bind_prepared_web_tool(source_tool, selected_types: tuple[str, ...]):
+    fixed_types = ",".join(selected_types)
+
+    def prepared_web_search(query: str, max_results: int = 5) -> str:
+        """使用当前科研回合允许的来源搜索医学资料。"""
+        return source_tool.invoke(
+            {
+                "query": query,
+                "search_types": fixed_types,
+                "max_results": max_results,
+                "crawl_content": False,
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=prepared_web_search,
+        name="web_search_medical",
+        description="使用当前科研回合允许的来源搜索医学资料。",
+    )
+
+
+def _bind_prepared_institution_tool(source_tool, doctor_id: str):
+    def prepared_institution_search(
+        data_type: str,
+        date_range_start: str | None = None,
+        date_range_end: str | None = None,
+        limit: int = 100,
+    ) -> str:
+        """以当前医生身份查询获准的机构科研数据。"""
+        return source_tool.invoke(
+            {
+                "doctor_id": doctor_id,
+                "data_type": data_type,
+                "date_range_start": date_range_start,
+                "date_range_end": date_range_end,
+                "limit": limit,
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=prepared_institution_search,
+        name="get_institution_research_data",
+        description="以当前医生身份查询获准的机构科研数据。",
+    )
 
 
 def _get_last_user_message(messages: list) -> str:

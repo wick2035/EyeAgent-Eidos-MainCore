@@ -4,12 +4,12 @@ LangGraph 节点模块
 包含所有图节点的定义和导出。
 """
 from agents.graph.nodes.router_node import router_node
-from agents.graph.nodes.health_node import health_agent_node
-from agents.graph.nodes.report_node import report_agent_node
-from agents.graph.nodes.reminder_node import reminder_agent_node
-from agents.graph.nodes.research_node import research_agent_node
-from agents.graph.nodes.compliance_node import compliance_agent_node
-from agents.graph.nodes.recommendation_node import recommendation_agent_node
+from agents.graph.nodes.health_node import health_agent_node, health_agent_node_async
+from agents.graph.nodes.report_node import report_agent_node, report_agent_node_async
+from agents.graph.nodes.reminder_node import reminder_agent_node, reminder_agent_node_async
+from agents.graph.nodes.research_node import research_agent_node, research_agent_node_async
+from agents.graph.nodes.compliance_node import compliance_agent_node, compliance_agent_node_async
+from agents.graph.nodes.recommendation_node import recommendation_agent_node, recommendation_agent_node_async
 from agents.graph.nodes.response_node import response_node
 # 附件分析注入工具（避免循环导入，定义在 utils 层）
 from utils.attachment_analyzer import inject_attachment_analysis
@@ -18,11 +18,17 @@ from utils.attachment_analyzer import inject_attachment_analysis
 __all__ = [
     "router_node",
     "health_agent_node",
+    "health_agent_node_async",
     "report_agent_node",
+    "report_agent_node_async",
     "reminder_agent_node",
+    "reminder_agent_node_async",
     "research_agent_node",
+    "research_agent_node_async",
     "compliance_agent_node",
+    "compliance_agent_node_async",
     "recommendation_agent_node",
+    "recommendation_agent_node_async",
     "response_node",
     "inject_attachment_analysis",
 ]

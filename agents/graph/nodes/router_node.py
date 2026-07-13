@@ -69,6 +69,16 @@ def router_node(state: MedicalState) -> Dict[str, Any]:
             "messages": [AIMessage(content=HIGH_RISK_RESPONSE)],
         }
 
+    if state.get("platform_prepared"):
+        if current_agent not in {"health", "research"}:
+            raise ValueError("PREPARED_AGENT_TYPE_INVALID")
+        return {
+            "current_agent": current_agent,
+            "stage": stage,
+            "routing_confidence": 1.0,
+            "routing_reason": "prepared agent authority",
+        }
+
     # 构建对话历史（用于上下文理解）
     conversation_history = _build_conversation_history(messages)
 

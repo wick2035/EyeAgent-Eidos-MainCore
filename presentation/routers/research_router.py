@@ -7,10 +7,11 @@
 import uuid
 import json
 import logging
+import asyncio
 import re
 from typing import AsyncGenerator
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from presentation.schemas.research_schemas import (
     ResearchChatRequest,
@@ -20,8 +21,15 @@ from presentation.schemas.research_schemas import (
 )
 from agents.graph_manager import get_graph_manager
 from application.services.chat_persistence_service import get_chat_persistence_service
+from presentation.dependencies.security import (
+    LegacyRouteError,
+    require_legacy_platform_doctor,
+)
 
 logger = logging.getLogger(__name__)
+
+_RESEARCH_ERROR_MESSAGE = "科研对话暂时不可用，请稍后再试。"
+_RESEARCH_INVALID_MESSAGE = "科研请求无效，请检查后重试。"
 
 # 创建路由
 router = APIRouter(prefix="/api/research", tags=["research"])
@@ -49,8 +57,35 @@ def verify_doctor_role(doctor_id: str, patient_id: str = "") -> bool:
     return verified_role == "doctor"
 
 
+def _assert_research_conversation_owner(
+    conversation_id: str | None,
+    doctor_id: str,
+) -> None:
+    if not conversation_id:
+        return
+    try:
+        conversation = get_chat_persistence_service().get_conversation(
+            conversation_id
+        )
+    except Exception as error:
+        logger.error(
+            "research_conversation_owner_check_failed operation=owner_check "
+            "exception_class=%s",
+            type(error).__name__,
+            exc_info=None,
+        )
+        raise LegacyRouteError(409, "LEGACY_CONVERSATION_INVALID") from None
+    if conversation is None:
+        raise LegacyRouteError(409, "LEGACY_CONVERSATION_INVALID")
+    if conversation.user_type != "doctor" or conversation.host_id != doctor_id:
+        raise LegacyRouteError(403, "PLATFORM_DOCTOR_FORBIDDEN")
+
+
 @router.post("/chat", response_model=ResearchChatResponse)
-async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
+async def research_chat(
+    request: ResearchChatRequest,
+    http_request: Request,
+) -> ResearchChatResponse:
     """
     科研对话接口（非流式）
 
@@ -60,6 +95,15 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
     Returns:
         ResearchChatResponse: 对话响应
     """
+    require_legacy_platform_doctor(
+        http_request,
+        request.doctor_id,
+        "research",
+    )
+    _assert_research_conversation_owner(
+        request.conversation_id,
+        request.doctor_id,
+    )
     try:
         logger.info(
             f"[ResearchRouter] 收到请求: doctor={request.doctor_id}, "
@@ -92,7 +136,7 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
 
         # 使用 GraphManager 处理对话
         result = graph_manager.chat(
-            patient_id=request.patient_id or request.doctor_id,
+            patient_id=request.patient_id,
             session_id=session_id,
             message=request.message,
             role="doctor",
@@ -103,6 +147,15 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
             enable_web_search=request.enable_web_search,
             web_search_types=request.web_search_types,
         )
+
+        if result.get("error_code"):
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "code": "RESEARCH_CHAT_FAILED",
+                    "message": _RESEARCH_ERROR_MESSAGE,
+                },
+            )
 
         return ResearchChatResponse(
             response=result["response"],
@@ -118,27 +171,45 @@ async def research_chat(request: ResearchChatRequest) -> ResearchChatResponse:
                 "enable_web_search": request.enable_web_search,
                 "web_search_types": request.web_search_types,
                 "thread_id": result.get("thread_id", ""),
+                "citations": result.get("citations", []),
             }
         )
 
     except HTTPException:
         raise
-    except ValueError as e:
-        logger.error(f"[ResearchRouter] 参数错误: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+    except ValueError as error:
+        logger.error(
+            "research_chat_failed operation=validate exception_class=%s",
+            type(error).__name__,
+            exc_info=None,
         )
-    except Exception as e:
-        logger.error(f"[ResearchRouter] 处理失败: {e}", exc_info=True)
-        raise HTTPException(
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "code": "RESEARCH_REQUEST_INVALID",
+                "message": _RESEARCH_INVALID_MESSAGE,
+            },
+        )
+    except Exception as error:
+        logger.error(
+            "research_chat_failed operation=execute exception_class=%s",
+            type(error).__name__,
+            exc_info=None,
+        )
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"处理请求失败: {str(e)}"
+            content={
+                "code": "RESEARCH_CHAT_FAILED",
+                "message": _RESEARCH_ERROR_MESSAGE,
+            },
         )
 
 
 @router.post("/chat/stream")
-async def research_chat_stream(request: ResearchChatRequest):
+async def research_chat_stream(
+    request: ResearchChatRequest,
+    http_request: Request,
+):
     """
     科研对话接口（SSE流式）
 
@@ -157,6 +228,16 @@ async def research_chat_stream(request: ResearchChatRequest):
     Returns:
         StreamingResponse: SSE流式响应
     """
+    require_legacy_platform_doctor(
+        http_request,
+        request.doctor_id,
+        "research",
+    )
+    _assert_research_conversation_owner(
+        request.conversation_id,
+        request.doctor_id,
+    )
+
     async def generate_sse() -> AsyncGenerator[str, None]:
         """生成 SSE 事件流"""
         try:
@@ -191,9 +272,10 @@ async def research_chat_stream(request: ResearchChatRequest):
             # 调用异步流式对话（Token 级别）
             full_response = ""
             current_stage = "greeting"
+            citations = []
 
             async for chunk in graph_manager.chat_stream_async(
-                patient_id=request.patient_id or request.doctor_id,
+                patient_id=request.patient_id,
                 session_id=session_id,
                 message=request.message,
                 role="doctor",
@@ -225,16 +307,47 @@ async def research_chat_stream(request: ResearchChatRequest):
                 elif event_type == "done":
                     full_response = content
                     current_stage = metadata.get("stage", current_stage)
+                    citations = chunk.get("citations") or metadata.get("citations") or []
 
                 elif event_type == "error":
-                    yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
+                    yield f"data: {json.dumps({'event': 'error', 'code': 'RESEARCH_CHAT_FAILED', 'message': _RESEARCH_ERROR_MESSAGE})}\n\n"
+                    return
 
             # 发送完成事件
-            yield f"data: {json.dumps({'event': 'done', 'response': full_response, 'session_id': session_id, 'conversation_id': conversation_id, 'stage': current_stage, 'agent_type': 'research', 'metadata': {'doctor_id': request.doctor_id, 'patient_id': request.patient_id, 'enable_institution_data': request.enable_institution_data, 'enable_web_search': request.enable_web_search}})}\n\n"
+            done_data = {
+                'event': 'done',
+                'response': full_response,
+                'session_id': session_id,
+                'conversation_id': conversation_id,
+                'stage': current_stage,
+                'agent_type': 'research',
+                'citations': citations,
+                'metadata': {
+                    'doctor_id': request.doctor_id,
+                    'patient_id': request.patient_id,
+                    'enable_institution_data': request.enable_institution_data,
+                    'enable_web_search': request.enable_web_search,
+                    'citations': citations,
+                },
+            }
+            yield f"data: {json.dumps(done_data)}\n\n"
 
-        except Exception as e:
-            logger.error(f"[ResearchRouter] SSE生成错误: {e}", exc_info=True)
-            yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+        except GeneratorExit:
+            logger.info("[ResearchRouter] SSE 生成器关闭，取消科研流式对话")
+            raise
+
+        except asyncio.CancelledError:
+            logger.info("[ResearchRouter] SSE 客户端断开，取消科研流式对话")
+            raise
+
+        except Exception as error:
+            logger.error(
+                "research_chat_stream_failed operation=generate "
+                "exception_class=%s",
+                type(error).__name__,
+                exc_info=None,
+            )
+            yield f"data: {json.dumps({'event': 'error', 'code': 'RESEARCH_CHAT_FAILED', 'message': _RESEARCH_ERROR_MESSAGE})}\n\n"
 
     try:
         logger.info(
@@ -254,11 +367,19 @@ async def research_chat_stream(request: ResearchChatRequest):
             }
         )
 
-    except Exception as e:
-        logger.error(f"[ResearchRouter] SSE处理失败: {e}", exc_info=True)
-        raise HTTPException(
+    except Exception as error:
+        logger.error(
+            "research_chat_stream_failed operation=create_response "
+            "exception_class=%s",
+            type(error).__name__,
+            exc_info=None,
+        )
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"处理请求失败: {str(e)}"
+            content={
+                "code": "RESEARCH_CHAT_FAILED",
+                "message": _RESEARCH_ERROR_MESSAGE,
+            },
         )
 
 

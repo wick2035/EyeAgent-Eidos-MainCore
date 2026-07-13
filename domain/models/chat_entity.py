@@ -2,10 +2,139 @@
 对话持久化实体模型
 映射到数据库表 chat_conversation 和 chat_message
 """
-from typing import Optional, List, Any, Dict
+from typing import Annotated, Literal, Optional, List, Any, Dict, Union
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 import json
+import unicodedata
+
+
+_MAX_SHEET_ROW = 50_000
+
+
+class AttachmentPageLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["page"]
+    page_start: int = Field(strict=True, ge=1)
+    page_end: int = Field(strict=True, ge=1)
+
+    @model_validator(mode="after")
+    def require_ordered_pages(self) -> "AttachmentPageLocator":
+        if self.page_end < self.page_start:
+            raise ValueError("page_end 不得小于 page_start")
+        return self
+
+
+class AttachmentFileLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["file"]
+
+
+class AttachmentSheetRowsLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["sheet_rows"]
+    sheet_name: StrictStr = Field(min_length=1, max_length=128)
+    row_start: int = Field(
+        strict=True,
+        ge=1,
+        le=_MAX_SHEET_ROW,
+    )
+    row_end: int = Field(
+        strict=True,
+        ge=1,
+        le=_MAX_SHEET_ROW,
+    )
+
+    @model_validator(mode="after")
+    def require_valid_sheet_rows(self) -> "AttachmentSheetRowsLocator":
+        if not self.sheet_name.strip() or any(
+            unicodedata.category(character) == "Cc"
+            for character in self.sheet_name
+        ):
+            raise ValueError("sheet_name 不得为空白或包含控制字符")
+        if self.row_end < self.row_start:
+            raise ValueError("row_end 不得小于 row_start")
+        return self
+
+
+AttachmentLocator = Annotated[
+    Union[
+        AttachmentPageLocator,
+        AttachmentFileLocator,
+        AttachmentSheetRowsLocator,
+    ],
+    Field(discriminator="type"),
+]
+
+
+class AttachmentCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_type: Literal["attachment"]
+    attachment_id: StrictStr = Field(min_length=1)
+    document_version: int = Field(strict=True, ge=1)
+    segment_id: StrictStr = Field(min_length=1)
+    locator: AttachmentLocator
+    excerpt: StrictStr = Field(min_length=1, max_length=300)
+
+
+class LegacyWebCitation(BaseModel):
+    """现有 CitationBlock 的 web citation 结构。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: StrictStr = Field(min_length=1)
+    title: StrictStr = Field(min_length=1)
+    sourceType: Literal[
+        "web",
+        "pubmed",
+        "scholar",
+        "local",
+        "record",
+        "unknown",
+    ] | None = None
+    url: StrictStr | None = None
+    snippet: StrictStr | None = Field(default=None, max_length=300)
+
+
+def canonicalize_citations(
+    citations: Any,
+    *,
+    drop_invalid: bool = False,
+) -> list[dict[str, Any]]:
+    """严格校验 citation 联合类型并只保留协议字段。"""
+
+    if citations is None:
+        return []
+    if not isinstance(citations, list):
+        raise ValueError("citations 必须是列表")
+    if len(citations) > 20:
+        raise ValueError("citations 最多 20 条")
+
+    canonical: list[dict[str, Any]] = []
+    for raw in citations:
+        try:
+            if isinstance(raw, dict) and raw.get("source_type") == "attachment":
+                model = AttachmentCitation.model_validate(raw, strict=True)
+            else:
+                model = LegacyWebCitation.model_validate(raw, strict=True)
+        except (TypeError, ValueError, ValidationError):
+            if drop_invalid:
+                continue
+            raise
+        canonical.append(model.model_dump(mode="json", exclude_none=True))
+    return canonical
 
 
 class ChatConversationEntity(BaseModel):
@@ -19,6 +148,7 @@ class ChatConversationEntity(BaseModel):
     title: str = Field(default="Untitled", description="会话标题")
     summary: Optional[str] = Field(default=None, description="会话摘要")
     total_messages: int = Field(default=0, description="消息总数")
+    active_node_id: Optional[str] = Field(default=None, description="当前活跃分支叶子消息ID")
     create_time: datetime = Field(default_factory=datetime.now, description="创建时间")
     create_by: Optional[str] = Field(default=None, description="创建者")
     update_time: datetime = Field(default_factory=datetime.now, description="更新时间")
@@ -50,9 +180,11 @@ class ChatMessageEntity(BaseModel):
     """
     id: str = Field(..., description="消息UUID")
     chat_id: str = Field(..., description="所属会话ID (FK -> chat_conversation)")
+    parent_id: Optional[str] = Field(default=None, description="父消息ID")
+    siblings_group_id: Optional[str] = Field(default=None, description="兄弟消息组ID")
     message_order: int = Field(..., description="消息顺序")
     message_content: str = Field(..., description="消息内容")
-    message_type: str = Field(..., description="消息类型 (user/assistant/system)")
+    message_type: str = Field(..., description="消息类型 (root/user/assistant/system)")
     sender_id: Optional[str] = Field(default=None, description="发送者ID")
     context: Optional[str] = Field(default=None, description="上下文JSON")
     token_used: Optional[int] = Field(default=None, description="使用的token数")
@@ -88,7 +220,7 @@ class ChatMessageEntity(BaseModel):
         解析 context JSON 字符串为列表
 
         Returns:
-            List[Dict]: 上下文列表 [patient_info, stage, tool_results]
+            List[Dict]: 上下文列表 [patient_info, stage, tool_results, citations]
         """
         if not self.context:
             return []
@@ -114,15 +246,23 @@ class MessageContext(BaseModel):
     """
     patient_info: Optional[Dict[str, Any]] = Field(default=None, description="患者信息")
     conversation_stage: Optional[str] = Field(default=None, description="对话阶段")
-    tool_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具调用结果")
+    tool_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="统一结构的工具调用结果")
+    citations: Optional[List[Dict[str, Any]]] = Field(default=None, description="前端 CitationBlock 引用来源")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="其他元数据")
+
+    @field_validator("citations", mode="before")
+    @classmethod
+    def validate_citations(cls, value):
+        if value is None:
+            return None
+        return canonicalize_citations(value)
 
     def to_context_list(self) -> List[Dict[str, Any]]:
         """
         转换为 context 列表格式
 
         Returns:
-            List[Dict]: [{"patient_info": ...}, {"conversation_stage": ...}, {"tool_results": ...}]
+            List[Dict]: [{"patient_info": ...}, {"conversation_stage": ...}, {"tool_results": ...}, {"citations": ...}]
         """
         context_list = []
         if self.patient_info:
@@ -131,6 +271,8 @@ class MessageContext(BaseModel):
             context_list.append({"conversation_stage": self.conversation_stage})
         if self.tool_results:
             context_list.append({"tool_results": self.tool_results})
+        if self.citations:
+            context_list.append({"citations": self.citations})
         if self.metadata:
             context_list.append({"metadata": self.metadata})
         return context_list
@@ -158,6 +300,7 @@ class MessageContext(BaseModel):
         patient_info = None
         conversation_stage = None
         tool_results = None
+        citations = None
         metadata = None
 
         for item in context_list:
@@ -167,6 +310,8 @@ class MessageContext(BaseModel):
                 conversation_stage = item["conversation_stage"]
             elif "tool_results" in item:
                 tool_results = item["tool_results"]
+            elif "citations" in item:
+                citations = item["citations"]
             elif "metadata" in item:
                 metadata = item["metadata"]
 
@@ -174,5 +319,6 @@ class MessageContext(BaseModel):
             patient_info=patient_info,
             conversation_stage=conversation_stage,
             tool_results=tool_results,
+            citations=citations,
             metadata=metadata
         )

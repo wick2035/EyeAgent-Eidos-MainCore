@@ -224,12 +224,21 @@ def assist_paper_writing(
             "伦理声明和利益冲突声明是否完整"
         ]
 
-        logger.info(f"[ResearchToolsV3] 论文写作助手: section={section}, template={template_type}")
+        logger.info(
+            "[ResearchToolsV3] assist_paper_writing completed, input_length=%s",
+            len(research_data),
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 论文写作助手失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"论文写作助手失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] assist_paper_writing failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "论文写作助手失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 临床指南查询 ==========
@@ -400,12 +409,23 @@ def search_clinical_guidelines(
             "D级/Level IV": "专家意见或病例报告"
         }
 
-        logger.info(f"[ResearchToolsV3] 临床指南查询: disease={disease}, org={organization}")
+        logger.info(
+            "[ResearchToolsV3] search_clinical_guidelines completed, "
+            "query_length=%s, result_count=%s",
+            len(disease),
+            len(matching_guidelines),
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 临床指南查询失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"临床指南查询失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] search_clinical_guidelines failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "临床指南查询失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 药物相互作用检查 ==========
@@ -567,12 +587,23 @@ def check_drug_interactions(
         # 提醒
         result["disclaimer"] = "此结果仅供参考，实际用药需由医生根据患者具体情况决定。建议查阅药品说明书和专业药物相互作用数据库。"
 
-        logger.info(f"[ResearchToolsV3] 药物相互作用检查: drugs={drugs}, conditions={conditions}")
+        logger.info(
+            "[ResearchToolsV3] check_drug_interactions completed, "
+            "drug_count=%s, condition_count=%s",
+            len(drugs),
+            len(conditions),
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 药物相互作用检查失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"药物相互作用检查失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] check_drug_interactions failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "药物相互作用检查失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 病例相似度匹配 ==========
@@ -706,12 +737,21 @@ def find_similar_cases(
             "不得用于识别具体患者"
         ]
 
-        logger.info(f"[ResearchToolsV3] 病例相似度匹配指导")
+        logger.info(
+            "[ResearchToolsV3] find_similar_cases completed, input_length=%s",
+            len(case_description),
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 病例相似度匹配失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"病例相似度匹配失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] find_similar_cases failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "病例相似度匹配失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 伦理审查助手 ==========
@@ -907,12 +947,21 @@ def ethics_review_assistant(
             "保险证明（如需要）"
         ]
 
-        logger.info(f"[ResearchToolsV3] 伦理审查助手: study_type={study_type}")
+        logger.info(
+            "[ResearchToolsV3] ethics_review_assistant completed, input_length=%s",
+            len(research_protocol),
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 伦理审查助手失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"伦理审查助手失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] ethics_review_assistant failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "伦理审查助手失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 数据导出工具 ==========
@@ -1084,12 +1133,21 @@ def export_research_data(
             "建议定期删除不再需要的导出文件"
         ]
 
-        logger.info(f"[ResearchToolsV3] 数据导出: format={export_format}, records={record_count}")
+        logger.info(
+            "[ResearchToolsV3] export_research_data completed, record_count=%s",
+            record_count,
+        )
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV3] 数据导出失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"数据导出失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV3] export_research_data failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "数据导出失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 阶段三工具列表 ==========

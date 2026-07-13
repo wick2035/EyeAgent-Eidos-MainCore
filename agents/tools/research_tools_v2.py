@@ -312,14 +312,23 @@ def statistical_analysis(
                 "supported_types": ["descriptive", "correlation", "ttest", "chi_square", "regression", "anova", "survival"]
             }, ensure_ascii=False)
 
-        logger.info(f"[ResearchToolsV2] 统计分析完成: {analysis_type}")
+        logger.info("[ResearchToolsV2] statistical_analysis completed")
         return json.dumps(result, ensure_ascii=False)
 
     except json.JSONDecodeError as e:
-        return json.dumps({"error": True, "message": f"JSON解析失败: {str(e)}"}, ensure_ascii=False)
+        return json.dumps(
+            {"error": True, "message": "JSON 解析失败，请检查输入格式"},
+            ensure_ascii=False,
+        )
     except Exception as e:
-        logger.error(f"[ResearchToolsV2] 统计分析失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"统计分析失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV2] statistical_analysis failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "统计分析失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 文献处理工具 ==========
@@ -459,12 +468,18 @@ def summarize_medical_literature(
                 "supported_types": ["summarize", "extract_key_findings", "translate", "extract_methods", "extract_conclusions"]
             }, ensure_ascii=False)
 
-        logger.info(f"[ResearchToolsV2] 文献处理准备完成: {task_type}")
+        logger.info("[ResearchToolsV2] summarize_medical_literature completed")
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV2] 文献处理失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"文献处理失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV2] summarize_medical_literature failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "文献处理失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 数据可视化工具 ==========
@@ -661,16 +676,28 @@ def generate_research_visualization(
                     result["image_url"] = url
                     logger.info(f"[ResearchToolsV2] 图表已上传到Minio")
         except Exception as e:
-            logger.warning(f"[ResearchToolsV2] Minio上传失败: {e}")
+            logger.warning(
+                "[ResearchToolsV2] visualization upload failed, error_type=%s",
+                type(e).__name__,
+            )
 
-        logger.info(f"[ResearchToolsV2] 可视化生成完成: {chart_type}")
+        logger.info("[ResearchToolsV2] generate_research_visualization completed")
         return json.dumps(result, ensure_ascii=False)
 
     except json.JSONDecodeError as e:
-        return json.dumps({"error": True, "message": f"JSON解析失败: {str(e)}"}, ensure_ascii=False)
+        return json.dumps(
+            {"error": True, "message": "JSON 解析失败，请检查输入格式"},
+            ensure_ascii=False,
+        )
     except Exception as e:
-        logger.error(f"[ResearchToolsV2] 可视化生成失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"可视化生成失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV2] generate_research_visualization failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "可视化生成失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 研究方案设计工具 ==========
@@ -863,12 +890,18 @@ def design_research_protocol(
         if additional_info:
             result["additional_context"] = additional_info
 
-        logger.info(f"[ResearchToolsV2] 研究方案设计完成")
+        logger.info("[ResearchToolsV2] design_research_protocol completed")
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        logger.error(f"[ResearchToolsV2] 研究方案设计失败: {e}", exc_info=True)
-        return json.dumps({"error": True, "message": f"研究方案设计失败: {str(e)}"}, ensure_ascii=False)
+        logger.error(
+            "[ResearchToolsV2] design_research_protocol failed, error_type=%s",
+            type(e).__name__,
+        )
+        return json.dumps(
+            {"error": True, "message": "研究方案设计失败，请稍后再试"},
+            ensure_ascii=False,
+        )
 
 
 # ========== 阶段二工具列表 ==========

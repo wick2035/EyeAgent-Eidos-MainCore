@@ -24,7 +24,7 @@ class MedicalState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
     # ========== 用户身份 ==========
-    patient_id: str                          # 患者UUID
+    patient_id: Optional[str]                # 患者UUID；科研模式为空
     doctor_id: Optional[str]                 # 医生UUID（医生模式/科研模式）
     role: str                                # "patient" | "doctor"
     session_id: str                          # 会话ID
@@ -84,14 +84,16 @@ class MedicalState(TypedDict):
     # ========== 多模态附件 ==========
     attachments: Optional[List[Dict[str, Any]]]  # 附件引用列表（AttachmentRef 序列化）
     attachment_analysis: Optional[str]           # 附件预分析文字结果（由 chat_router 注入）
+    platform_prepared: bool                      # 两阶段平台流；禁止从 state 读取分析正文
 
     # ========== 响应输出 ==========
-    response: str                            # 最终响应文本
+    response: str                            # 最终响应文本（旧字段，保留兼容）
+    last_response: str                       # 各 Agent 节点写入的最终响应文本，response_node / graph_manager 读取
     error: Optional[str]                     # 错误信息
 
 
 def create_initial_state(
-    patient_id: str,
+    patient_id: Optional[str],
     session_id: str,
     role: str = "patient",
     doctor_id: Optional[str] = None,
@@ -179,9 +181,11 @@ def create_initial_state(
         # 多模态附件
         attachments=kwargs.get("attachments", None),
         attachment_analysis=kwargs.get("attachment_analysis", None),
+        platform_prepared=kwargs.get("platform_prepared", False),
 
         # 响应
         response="",
+        last_response="",
         error=None,
     )
 

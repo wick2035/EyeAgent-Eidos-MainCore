@@ -1,0 +1,1170 @@
+import json
+import re
+import unittest
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pymysql
+
+from domain.models.research_dataset import (
+    ExtractedCsvChunk,
+    ExtractedCsvRow,
+    ExtractedResearchCsv,
+    ExtractedResearchXlsx,
+    ExtractedXlsxChunk,
+    ExtractedXlsxRow,
+    ExtractedXlsxSheet,
+    build_research_csv_chunk_payload_sha256,
+    build_research_csv_descriptor_sha256,
+    build_research_dataset_materialization,
+    build_research_xlsx_chunk_payload_sha256,
+    build_research_xlsx_descriptor_sha256,
+    build_research_xlsx_sheet_descriptor_sha256,
+)
+from domain.models.research_document import (
+    IngestionIdentity,
+    ResearchDocumentClaimResult,
+    ResearchDocumentSegmentEntity,
+)
+from infrastructure.repositories.chat_turn_request_repository_impl import (
+    ChatTurnRequestRepositoryImpl,
+)
+from infrastructure.repositories.research_document_repository_impl import (
+    ResearchDocumentFencingError,
+    ResearchDocumentRepositoryImpl,
+)
+
+
+class ScriptedDB:
+    def __init__(
+        self,
+        *,
+        fetch_one_results=None,
+        fetch_all_results=None,
+        execute_results=None,
+        execute_many_results=None,
+    ):
+        self.fetch_one_results = list(fetch_one_results or [])
+        self.fetch_all_results = list(fetch_all_results or [])
+        self.execute_results = list(execute_results or [])
+        self.execute_many_results = list(execute_many_results or [])
+        self.operations = []
+        self.transaction_depth = 0
+        self.transaction_events = []
+
+    @contextmanager
+    def transaction(self):
+        self.transaction_events.append("begin")
+        self.transaction_depth += 1
+        try:
+            yield
+        except Exception:
+            self.transaction_events.append("rollback")
+            raise
+        else:
+            self.transaction_events.append("commit")
+        finally:
+            self.transaction_depth -= 1
+
+    def fetch_one(self, sql, params=None):
+        self.operations.append(("fetch_one", sql, params, self.transaction_depth))
+        return self._next(self.fetch_one_results, None)
+
+    def fetch_all(self, sql, params=None):
+        self.operations.append(("fetch_all", sql, params, self.transaction_depth))
+        return self._next(self.fetch_all_results, [])
+
+    def execute(self, sql, params=None):
+        self.operations.append(("execute", sql, params, self.transaction_depth))
+        return self._next(self.execute_results, 1)
+
+    def execute_many(self, sql, params_list):
+        self.operations.append(
+            ("execute_many", sql, list(params_list), self.transaction_depth)
+        )
+        return self._next(self.execute_many_results, len(params_list))
+
+    @staticmethod
+    def _next(values, default):
+        value = values.pop(0) if values else default
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+def _identity() -> IngestionIdentity:
+    return IngestionIdentity(
+        doctor_id="doctor-1",
+        attachment_id="attachment-1",
+        document_version=3,
+        content_sha256="a" * 64,
+        processor_type="pdf_hybrid_v1",
+        extractor_version="pymupdf_v1",
+        segment_schema_version="segment_v1",
+    )
+
+
+def _ingestion_row(
+    *,
+    status="processing",
+    attempt_count=1,
+    lease_expires_at=None,
+):
+    now = datetime(2026, 7, 11, 9, 0, 0)
+    return {
+        "id": "11111111-1111-5111-8111-111111111111",
+        "doctor_id": "doctor-1",
+        "attachment_id": "attachment-1",
+        "document_version": 3,
+        "content_sha256": "a" * 64,
+        "processor_type": "pdf_hybrid_v1",
+        "extractor_version": "pymupdf_v1",
+        "segment_schema_version": "segment_v1",
+        "status": status,
+        "attempt_count": attempt_count,
+        "lease_expires_at": lease_expires_at,
+        "page_count": 2,
+        "error_code": None,
+        "started_at": now,
+        "completed_at": now if status == "ready" else None,
+        "create_time": now,
+        "update_time": now,
+    }
+
+
+def _csv_ingestion_row(*, status="processing", attempt_count=1):
+    row = _ingestion_row(status=status, attempt_count=attempt_count)
+    row.update(
+        processor_type="csv_dataset_v1",
+        extractor_version="research_csv_v1",
+        page_count=0,
+    )
+    return row
+
+
+def _xlsx_ingestion_row(*, status="processing", attempt_count=1):
+    row = _ingestion_row(status=status, attempt_count=attempt_count)
+    row.update(
+        processor_type="xlsx_dataset_v1",
+        extractor_version="research_xlsx_v1",
+        page_count=0,
+    )
+    return row
+
+
+def _segment(ordinal=0, content="第一段科研材料"):
+    return ResearchDocumentSegmentEntity(
+        ingestion_id="11111111-1111-5111-8111-111111111111",
+        ordinal=ordinal,
+        content=content,
+        page_start=ordinal + 1,
+        page_end=ordinal + 1,
+        token_count=8,
+        metadata={"extraction_mode": "text"},
+    )
+
+
+def _segment_row(metadata_json='{"extraction_mode":"text"}'):
+    segment = _segment()
+    return {
+        "id": segment.id,
+        "ingestion_id": segment.ingestion_id,
+        "ordinal": segment.ordinal,
+        "content": segment.content,
+        "content_sha256": segment.content_sha256,
+        "page_start": segment.page_start,
+        "page_end": segment.page_end,
+        "sheet_name": None,
+        "row_start": None,
+        "row_end": None,
+        "token_count": segment.token_count,
+        "metadata_json": metadata_json,
+    }
+
+
+def _dataset_materialization(
+    ingestion_id="11111111-1111-5111-8111-111111111111",
+):
+    rows = (
+        ExtractedCsvRow(
+            logical_row_number=1,
+            physical_row_start=2,
+            physical_row_end=2,
+            values=("张三", "正常"),
+        ),
+    )
+    chunk_fields = {
+        "ordinal": 1,
+        "logical_row_start": 1,
+        "logical_row_end": 1,
+        "physical_row_start": 2,
+        "physical_row_end": 2,
+        "row_count": 1,
+        "non_empty_cell_count": 2,
+        "formula_like_cell_count": 0,
+        "rows": rows,
+    }
+    chunk = ExtractedCsvChunk(
+        **chunk_fields,
+        payload_sha256=build_research_csv_chunk_payload_sha256(**chunk_fields),
+    )
+    descriptor_fields = {
+        "sheet_name": "CSV",
+        "headers": ("患者", "结果"),
+        "header_row_start": 1,
+        "header_row_end": 1,
+        "physical_line_count": 2,
+        "record_count": 2,
+        "data_row_count": 1,
+        "column_count": 2,
+        "non_empty_cell_count": 4,
+        "formula_like_cell_count": 0,
+        "missing_value_counts": (0, 0),
+    }
+    extracted = ExtractedResearchCsv(
+        **descriptor_fields,
+        chunks=(chunk,),
+        descriptor_sha256=build_research_csv_descriptor_sha256(
+            **descriptor_fields
+        ),
+    )
+    return build_research_dataset_materialization(ingestion_id, extracted)
+
+
+def _xlsx_dataset_materialization(
+    ingestion_id="11111111-1111-5111-8111-111111111111",
+):
+    def row(logical, physical, values, formulas=()):
+        return ExtractedXlsxRow(
+            logical_row_number=logical,
+            physical_row_start=physical,
+            physical_row_end=physical,
+            values=values,
+            formula_cell_indexes=formulas,
+        )
+
+    def sheet(ordinal, name, visibility, headers, rows, merged_count=0):
+        chunk_fields = {
+            "sheet_ordinal": ordinal,
+            "ordinal": 1,
+            "logical_row_start": 1,
+            "logical_row_end": len(rows),
+            "physical_row_start": 2,
+            "physical_row_end": len(rows) + 1,
+            "row_count": len(rows),
+            "non_empty_cell_count": sum(
+                value != "" for current in rows for value in current.values
+            ),
+            "formula_like_cell_count": sum(
+                value.lstrip().startswith(("=", "+", "-", "@"))
+                for current in rows
+                for value in current.values
+            ),
+            "formula_cell_count": sum(
+                len(current.formula_cell_indexes) for current in rows
+            ),
+            "rows": rows,
+        }
+        chunk = ExtractedXlsxChunk(
+            **chunk_fields,
+            payload_sha256=build_research_xlsx_chunk_payload_sha256(
+                **chunk_fields
+            ),
+        )
+        descriptor_fields = {
+            "ordinal": ordinal,
+            "name": name,
+            "visibility": visibility,
+            "headers": headers,
+            "header_row_start": 1,
+            "header_row_end": 1,
+            "physical_line_count": len(rows) + 1,
+            "record_count": len(rows) + 1,
+            "data_row_count": len(rows),
+            "column_count": len(headers),
+            "non_empty_cell_count": len(headers)
+            + chunk.non_empty_cell_count,
+            "formula_like_cell_count": sum(
+                header.lstrip().startswith(("=", "+", "-", "@"))
+                for header in headers
+            )
+            + chunk.formula_like_cell_count,
+            "formula_cell_count": chunk.formula_cell_count,
+            "merged_range_count": merged_count,
+            "missing_value_counts": tuple(
+                sum(current.values[column] == "" for current in rows)
+                for column in range(len(headers))
+            ),
+        }
+        return ExtractedXlsxSheet(
+            **descriptor_fields,
+            chunks=(chunk,),
+            descriptor_sha256=build_research_xlsx_sheet_descriptor_sha256(
+                **descriptor_fields
+            ),
+        )
+
+    sheets = (
+        sheet(
+            0,
+            "Visible",
+            "visible",
+            ("name", "value"),
+            (row(1, 2, ("Alice", "=1+1"), (1,)),),
+            1,
+        ),
+        sheet(
+            1,
+            "Hidden",
+            "veryHidden",
+            ("name", "note"),
+            (row(1, 2, ("Bob", "")),),
+        ),
+    )
+    workbook_fields = {
+        "date_system": "1900",
+        "workbook_sheet_count": 2,
+        "empty_sheet_count": 0,
+        "sheets": sheets,
+        "total_record_count": 4,
+        "total_data_row_count": 2,
+        "total_non_empty_cell_count": 7,
+        "total_formula_like_cell_count": 1,
+        "total_formula_cell_count": 1,
+        "total_merged_range_count": 1,
+    }
+    extracted = ExtractedResearchXlsx(
+        **workbook_fields,
+        descriptor_sha256=build_research_xlsx_descriptor_sha256(
+            **workbook_fields
+        ),
+    )
+    return build_research_dataset_materialization(ingestion_id, extracted)
+
+
+def _csv_segment():
+    return ResearchDocumentSegmentEntity(
+        ingestion_id="11111111-1111-5111-8111-111111111111",
+        ordinal=0,
+        content="CSV 数据集结构摘要",
+        sheet_name="CSV",
+        row_start=1,
+        row_end=1,
+        token_count=10,
+        metadata={"extraction_mode": "structured"},
+    )
+
+
+def _xlsx_segment():
+    return ResearchDocumentSegmentEntity(
+        ingestion_id="11111111-1111-5111-8111-111111111111",
+        ordinal=0,
+        content="XLSX 数据集结构摘要",
+        sheet_name="Visible",
+        row_start=1,
+        row_end=2,
+        token_count=10,
+        metadata={"extraction_mode": "structured_summary"},
+    )
+
+
+class ResearchDocumentSchemaTest(unittest.TestCase):
+    def test_identity_rejects_post_parse_extraction_mode_as_processor_type(self):
+        with self.assertRaisesRegex(ValueError, "processor_type"):
+            IngestionIdentity(
+                doctor_id="doctor-1",
+                attachment_id="attachment-1",
+                document_version=3,
+                content_sha256="a" * 64,
+                processor_type="pdf_mixed",
+                extractor_version="pymupdf_v1",
+                segment_schema_version="segment_v1",
+            )
+
+    def test_schema_uses_full_seven_part_identity_and_cascade(self):
+        sql = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "create_research_document_tables.sql"
+        ).read_text(encoding="utf-8")
+        normalized = re.sub(r"\s+", " ", sql.lower())
+
+        self.assertRegex(
+            normalized,
+            re.compile(
+                r"unique(?: key)? [^(]*\(\s*doctor_id\s*,\s*attachment_id\s*,"
+                r"\s*document_version\s*,\s*content_sha256\s*,\s*processor_type\s*,"
+                r"\s*extractor_version\s*,\s*segment_schema_version\s*\)"
+            ),
+        )
+        self.assertIn("foreign key (ingestion_id)", normalized)
+        self.assertIn("on delete cascade", normalized)
+        self.assertIn("unique", normalized)
+        self.assertIn("(ingestion_id, ordinal)", normalized)
+
+    def test_chat_turn_schema_and_replayable_upgrade_include_ingestion_ids(self):
+        scripts = Path(__file__).parents[1] / "scripts"
+        create_sql = (scripts / "create_chat_turn_request_table.sql").read_text(
+            encoding="utf-8"
+        )
+        upgrade_sql = (scripts / "upgrade_chat_turn_request_v2_research.sql").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertRegex(
+            create_sql.lower(),
+            r"ingestion_ids_json\s+json\s+null",
+        )
+        self.assertRegex(
+            upgrade_sql.lower(),
+            r"information_schema\.columns",
+        )
+        self.assertRegex(
+            upgrade_sql.lower(),
+            r"ingestion_ids_json",
+        )
+
+
+class ResearchDocumentRepositoryTest(unittest.TestCase):
+    def test_duplicate_insert_claim_returns_existing_active_owner(self):
+        lease_until = datetime(2026, 7, 11, 9, 5, 0)
+        existing = _ingestion_row(lease_expires_at=lease_until)
+        db = ScriptedDB(
+            fetch_one_results=[existing],
+            execute_results=[pymysql.err.IntegrityError(1062, "duplicate entry")],
+        )
+        repository = ResearchDocumentRepositoryImpl(db=db)
+
+        claimed = repository.claim(
+            _identity(),
+            now=datetime(2026, 7, 11, 9, 1, 0),
+            lease_until=datetime(2026, 7, 11, 9, 6, 0),
+        )
+
+        self.assertIsInstance(claimed, ResearchDocumentClaimResult)
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.id, existing["id"])
+        self.assertEqual(claimed.entity.attempt_count, 1)
+        self.assertEqual(claimed.entity.lease_expires_at, lease_until)
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+        self.assertEqual(db.operations[0][0], "execute")
+        insert = next(op for op in db.operations if "INSERT INTO" in op[1])
+        self.assertEqual(insert[2][1:8], (
+            "doctor-1",
+            "attachment-1",
+            3,
+            "a" * 64,
+            "pdf_hybrid_v1",
+            "pymupdf_v1",
+            "segment_v1",
+        ))
+
+    def test_claim_retries_entire_transaction_for_1205_and_1213(self):
+        for error_code in (1205, 1213):
+            with self.subTest(error_code=error_code):
+                db = ScriptedDB(
+                    execute_results=[
+                        pymysql.err.OperationalError(error_code, "retryable"),
+                        1,
+                    ]
+                )
+
+                claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+                    _identity(),
+                    now=datetime(2026, 7, 11, 9, 0, 0),
+                    lease_until=datetime(2026, 7, 11, 9, 5, 0),
+                )
+
+                self.assertTrue(claimed.acquired)
+                self.assertEqual(claimed.entity.attempt_count, 1)
+                self.assertEqual(
+                    db.transaction_events,
+                    ["begin", "rollback", "begin", "commit"],
+                )
+
+    def test_claim_retry_exhaustion_stops_after_three_transactions(self):
+        for error_code in (1205, 1213):
+            with self.subTest(error_code=error_code):
+                db = ScriptedDB(
+                    execute_results=[
+                        pymysql.err.OperationalError(error_code, "retryable")
+                        for _ in range(3)
+                    ]
+                )
+
+                with self.assertRaises(pymysql.err.OperationalError) as raised:
+                    ResearchDocumentRepositoryImpl(db=db).claim(
+                        _identity(),
+                        now=datetime(2026, 7, 11, 9, 0, 0),
+                        lease_until=datetime(2026, 7, 11, 9, 5, 0),
+                    )
+
+                self.assertEqual(raised.exception.args[0], error_code)
+                self.assertEqual(
+                    db.transaction_events,
+                    ["begin", "rollback"] * 3,
+                )
+
+    def test_expired_lease_takeover_increments_attempt_fencing_token(self):
+        now = datetime(2026, 7, 11, 9, 10, 0)
+        db = ScriptedDB(
+            fetch_one_results=[
+                _ingestion_row(
+                    attempt_count=4,
+                    lease_expires_at=now - timedelta(microseconds=1),
+                )
+            ],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                1,
+            ],
+        )
+        repository = ResearchDocumentRepositoryImpl(db=db)
+
+        claimed = repository.claim(
+            _identity(),
+            now=now,
+            lease_until=now + timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        self.assertEqual(claimed.entity.attempt_count, 5)
+        update = next(
+            op
+            for op in db.operations
+            if op[1].lstrip().upper().startswith("UPDATE")
+        )
+        normalized = " ".join(update[1].split()).lower()
+        self.assertIn("attempt_count = %s", normalized)
+        self.assertIn("status <> 'ready'", normalized)
+
+    def test_old_attempt_cannot_complete_or_renew_new_attempt(self):
+        row = _ingestion_row(attempt_count=2)
+        complete_db = ScriptedDB(fetch_one_results=[row])
+        repository = ResearchDocumentRepositoryImpl(db=complete_db)
+
+        self.assertFalse(repository.complete(row["id"], 1, [_segment()]))
+        self.assertFalse(any(op[0] == "execute_many" for op in complete_db.operations))
+
+        renew_db = ScriptedDB(execute_results=[0])
+        repository = ResearchDocumentRepositoryImpl(db=renew_db)
+        self.assertFalse(
+            repository.renew_lease(
+                row["id"],
+                1,
+                datetime(2026, 7, 11, 9, 20, 0),
+            )
+        )
+        renew_sql = " ".join(renew_db.operations[0][1].split()).lower()
+        self.assertIn("status = 'processing'", renew_sql)
+        self.assertIn("attempt_count = %s", renew_sql)
+
+    def test_renew_lease_only_accepts_future_extension_by_database_time(self):
+        lease_until = datetime(2026, 7, 11, 9, 30, 0)
+        db = ScriptedDB(execute_results=[0])
+
+        renewed = ResearchDocumentRepositoryImpl(db=db).renew_lease(
+            "11111111-1111-5111-8111-111111111111",
+            2,
+            lease_until,
+        )
+
+        self.assertFalse(renewed)
+        sql = " ".join(db.operations[0][1].split()).lower()
+        self.assertIn("%s > current_timestamp(6)", sql)
+        self.assertIn("%s > lease_expires_at", sql)
+        self.assertEqual(db.operations[0][2].count(lease_until), 3)
+
+    def test_ready_ingestion_never_returns_to_processing_or_failed(self):
+        ready = _ingestion_row(status="ready", attempt_count=3)
+        claim_db = ScriptedDB(
+            fetch_one_results=[ready],
+            execute_results=[pymysql.err.IntegrityError(1062, "duplicate entry")],
+        )
+        repository = ResearchDocumentRepositoryImpl(db=claim_db)
+
+        claimed = repository.claim(
+            _identity(),
+            now=datetime(2026, 7, 11, 10, 0, 0),
+            lease_until=datetime(2026, 7, 11, 10, 5, 0),
+        )
+
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "ready")
+        self.assertFalse(
+            any(
+                op[0] == "execute"
+                and op[1].lstrip().upper().startswith("UPDATE")
+                for op in claim_db.operations
+            )
+        )
+
+        fail_db = ScriptedDB(execute_results=[0])
+        self.assertFalse(
+            ResearchDocumentRepositoryImpl(db=fail_db).fail(
+                ready["id"], ready["attempt_count"], "PARSER_FAILED"
+            )
+        )
+        fail_sql = " ".join(fail_db.operations[0][1].split()).lower()
+        self.assertIn("status = 'processing'", fail_sql)
+
+    def test_insert_claim_is_owned_and_result_is_frozen(self):
+        db = ScriptedDB(execute_results=[1])
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=datetime(2026, 7, 11, 9, 0, 0),
+            lease_until=datetime(2026, 7, 11, 9, 5, 0),
+        )
+
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        with self.assertRaises((AttributeError, TypeError)):
+            claimed.acquired = False
+
+    def test_failed_ingestion_takeover_is_owned(self):
+        now = datetime(2026, 7, 11, 9, 10, 0)
+        db = ScriptedDB(
+            fetch_one_results=[
+                _ingestion_row(
+                    status="failed",
+                    attempt_count=2,
+                    lease_expires_at=None,
+                )
+            ],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                1,
+            ],
+        )
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=now,
+            lease_until=now + timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.acquired)
+        self.assertEqual(claimed.entity.status, "processing")
+        self.assertEqual(claimed.entity.attempt_count, 3)
+
+    def test_takeover_cas_miss_rereads_as_observer(self):
+        now = datetime(2026, 7, 11, 9, 10, 0)
+        expired = _ingestion_row(
+            attempt_count=2,
+            lease_expires_at=now - timedelta(seconds=1),
+        )
+        latest = _ingestion_row(
+            attempt_count=3,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        db = ScriptedDB(
+            fetch_one_results=[expired, latest],
+            execute_results=[
+                pymysql.err.IntegrityError(1062, "duplicate entry"),
+                0,
+            ],
+        )
+
+        claimed = ResearchDocumentRepositoryImpl(db=db).claim(
+            _identity(),
+            now=now,
+            lease_until=now + timedelta(minutes=5),
+        )
+
+        self.assertFalse(claimed.acquired)
+        self.assertEqual(claimed.entity.attempt_count, 3)
+
+    def test_claim_result_rejects_acquired_non_processing_entity(self):
+        from domain.models.research_document import ResearchDocumentIngestionEntity
+
+        ready = ResearchDocumentIngestionEntity.model_validate(
+            _ingestion_row(status="ready")
+        )
+
+        with self.assertRaises(ValueError):
+            ResearchDocumentClaimResult(entity=ready, acquired=True)
+
+    def test_complete_replaces_segments_and_ready_state_in_one_transaction(self):
+        processing = _ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1],
+            execute_many_results=[2],
+        )
+        repository = ResearchDocumentRepositoryImpl(db=db)
+        segments = [_segment(0, "第一段"), _segment(1, "第二段")]
+
+        self.assertTrue(repository.complete(processing["id"], 2, segments))
+
+        writes = [op for op in db.operations if op[0] in {"execute", "execute_many"}]
+        self.assertTrue(all(op[3] == 1 for op in writes))
+        self.assertIn("delete from research_document_segment", writes[0][1].lower())
+        self.assertFalse(
+            any("research_dataset" in operation[1].lower() for operation in writes)
+        )
+        self.assertEqual(writes[1][0], "execute_many")
+        self.assertIn("status = 'ready'", writes[2][1].lower())
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+        self.assertEqual(segments[0].id, _segment(0, "第一段").id)
+        self.assertNotEqual(segments[0].id, segments[1].id)
+        lock_sql = " ".join(db.operations[0][1].split()).lower()
+        self.assertIn("status = 'processing'", lock_sql)
+        self.assertIn("attempt_count = %s", lock_sql)
+        self.assertIn("lease_expires_at > current_timestamp(6)", lock_sql)
+        final_where = " ".join(writes[2][1].split()).lower().split("where", 1)[1]
+        self.assertNotIn("current_timestamp(6)", final_where)
+
+    def test_complete_persists_dataset_graph_with_canonical_json_params(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        dataset = _dataset_materialization()
+        segment = _csv_segment()
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 1],
+            execute_many_results=[1, 1, 1],
+        )
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            processing["id"],
+            2,
+            [segment],
+            dataset,
+        )
+
+        self.assertTrue(completed)
+        normalized_operations = [
+            (operation, " ".join(sql.split()).lower(), params, depth)
+            for operation, sql, params, depth in db.operations
+        ]
+        dataset_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset (" in operation[1]
+        )
+        self.assertEqual(
+            dataset_insert[2],
+            (
+                dataset.dataset.id,
+                dataset.dataset.ingestion_id,
+                "csv",
+                None,
+                None,
+                None,
+                None,
+                1,
+                1,
+                2,
+                4,
+                0,
+                0,
+                0,
+                dataset.dataset.descriptor_sha256,
+            ),
+        )
+        sheet_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_sheet" in operation[1]
+        )
+        self.assertEqual(sheet_insert[2][0][4], "visible")
+        self.assertEqual(sheet_insert[2][0][5], '["患者","结果"]')
+        self.assertEqual(sheet_insert[2][0][12], "[0,0]")
+        chunk_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_row_chunk" in operation[1]
+        )
+        expected_rows_json = json.dumps(
+            [row.model_dump(mode="json") for row in dataset.row_chunks[0].rows],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(chunk_insert[2][0][11], expected_rows_json)
+        self.assertIn("张三", chunk_insert[2][0][11])
+        ready_update = next(
+            operation
+            for operation in normalized_operations
+            if "set status = 'ready'" in operation[1]
+        )
+        self.assertEqual(ready_update[2][0], 0)
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_complete_persists_xlsx_multisheet_formula_merge_graph(self):
+        processing = _xlsx_ingestion_row(attempt_count=2)
+        dataset = _xlsx_dataset_materialization()
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 1],
+            execute_many_results=[2, 2, 1],
+        )
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            processing["id"],
+            2,
+            [_xlsx_segment()],
+            dataset,
+        )
+
+        self.assertTrue(completed)
+        normalized_operations = [
+            (operation, " ".join(sql.split()).lower(), params, depth)
+            for operation, sql, params, depth in db.operations
+        ]
+        dataset_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset (" in operation[1]
+        )
+        self.assertEqual(dataset_insert[2][2], "xlsx")
+        self.assertEqual(dataset_insert[2][3:7], ("1900", 2, 0, 4))
+        self.assertEqual(dataset_insert[2][7:14], (2, 2, 4, 7, 1, 1, 1))
+        sheet_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_sheet" in operation[1]
+        )
+        self.assertEqual(len(sheet_insert[2]), 2)
+        self.assertEqual(
+            [params[4] for params in sheet_insert[2]],
+            ["visible", "veryHidden"],
+        )
+        self.assertEqual([params[15] for params in sheet_insert[2]], [1, 0])
+        self.assertEqual([params[16] for params in sheet_insert[2]], [1, 0])
+        chunk_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_row_chunk" in operation[1]
+        )
+        self.assertEqual([params[10] for params in chunk_insert[2]], [1, 0])
+        self.assertIn('"formula_cell_indexes":[1]', chunk_insert[2][0][11])
+        self.assertTrue(
+            all(
+                operation[3] == 1
+                for operation in db.operations
+                if operation[0] in {"execute", "execute_many"}
+            )
+        )
+        for operation, sql, params, _ in db.operations:
+            if "insert into research_dataset" not in sql.lower():
+                continue
+            sample_params = params[0] if operation == "execute_many" else params
+            self.assertEqual(sql.count("%s"), len(sample_params))
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_complete_active_attempt_miss_with_dataset_performs_no_write(self):
+        db = ScriptedDB(fetch_one_results=[None])
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            "11111111-1111-5111-8111-111111111111",
+            2,
+            [_csv_segment()],
+            _dataset_materialization(),
+        )
+
+        self.assertFalse(completed)
+        self.assertEqual([operation[0] for operation in db.operations], ["fetch_one"])
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_dataset_insert_failure_rolls_back_without_publishing_ready(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, RuntimeError("dataset insert failed")],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "dataset insert failed"):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"],
+                2,
+                [_csv_segment()],
+                _dataset_materialization(),
+            )
+
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+        self.assertFalse(
+            any("status = 'ready'" in operation[1].lower() for operation in db.operations)
+        )
+
+    def test_dataset_complete_cas_loss_rolls_back_all_materialized_rows(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 0],
+            execute_many_results=[1, 1, 1],
+        )
+
+        with self.assertRaises(ResearchDocumentFencingError):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"],
+                2,
+                [_csv_segment()],
+                _dataset_materialization(),
+            )
+
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_rejects_dataset_and_processor_type_mismatch(self):
+        cases = (
+            (_csv_ingestion_row(attempt_count=2), [_csv_segment()], None),
+            (_xlsx_ingestion_row(attempt_count=2), [_xlsx_segment()], None),
+            (_ingestion_row(attempt_count=2), [_segment()], _dataset_materialization()),
+            (
+                _ingestion_row(attempt_count=2),
+                [_segment()],
+                _xlsx_dataset_materialization(),
+            ),
+            (
+                _csv_ingestion_row(attempt_count=2),
+                [_csv_segment()],
+                _xlsx_dataset_materialization(),
+            ),
+            (
+                _xlsx_ingestion_row(attempt_count=2),
+                [_xlsx_segment()],
+                _dataset_materialization(),
+            ),
+        )
+        for processing, segments, dataset in cases:
+            with self.subTest(processor_type=processing["processor_type"]):
+                db = ScriptedDB(fetch_one_results=[processing])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "processor_type|file_type",
+                ):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        processing["id"],
+                        2,
+                        segments,
+                        dataset,
+                    )
+                self.assertEqual(
+                    [operation[0] for operation in db.operations],
+                    ["fetch_one"],
+                )
+                self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_revalidates_dataset_and_target_before_database_access(self):
+        mutated = _dataset_materialization()
+        object.__setattr__(mutated.dataset, "total_data_row_count", 2)
+        foreign = _dataset_materialization(
+            "22222222-2222-5222-8222-222222222222"
+        )
+
+        for dataset in (mutated, foreign):
+            with self.subTest(dataset_id=dataset.dataset.id):
+                db = ScriptedDB()
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        "11111111-1111-5111-8111-111111111111",
+                        2,
+                        [_csv_segment()],
+                        dataset,
+                    )
+                self.assertEqual(db.operations, [])
+
+    def test_segment_failure_rolls_back_without_publishing_ready(self):
+        processing = _ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1],
+            execute_many_results=[RuntimeError("segment write failed")],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "segment write failed"):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"], 2, [_segment()]
+            )
+
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+        self.assertFalse(
+            any(
+                op[0] == "execute" and "status = 'ready'" in op[1].lower()
+                for op in db.operations
+            )
+        )
+
+    def test_complete_cas_loss_rolls_back_replaced_segments(self):
+        processing = _ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 0],
+            execute_many_results=[1],
+        )
+
+        with self.assertRaises(RuntimeError):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"], 2, [_segment()]
+            )
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_revalidates_mutated_segments_before_any_database_write(self):
+        for mutation in ("content", "id", "hash", "metadata"):
+            with self.subTest(mutation=mutation):
+                segment = _segment()
+                if mutation == "content":
+                    segment.content = "构造后被替换的正文"
+                elif mutation == "id":
+                    segment.id = "22222222-2222-5222-8222-222222222222"
+                elif mutation == "hash":
+                    segment.content_sha256 = "b" * 64
+                else:
+                    segment.metadata["url"] = "https://forbidden.example"
+                db = ScriptedDB(fetch_one_results=[_ingestion_row(attempt_count=2)])
+
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        segment.ingestion_id,
+                        2,
+                        [segment],
+                    )
+
+                self.assertEqual(db.operations, [])
+
+    def test_segment_metadata_validates_each_whitelisted_value_type(self):
+        valid_metadata = {
+            "block_index": 0,
+            "extraction_method": "digital_text",
+            "extraction_mode": "text",
+            "heading": "研究结论",
+            "ocr_applied": False,
+            "ocr_page_count": 0,
+            "source_page_numbers": [1, 2],
+        }
+        self.assertEqual(
+            ResearchDocumentSegmentEntity(
+                ingestion_id="11111111-1111-5111-8111-111111111111",
+                ordinal=0,
+                content="正文",
+                token_count=2,
+                metadata=valid_metadata,
+            ).metadata,
+            valid_metadata,
+        )
+
+        invalid_values = {
+            "block_index": "0",
+            "extraction_method": 1,
+            "extraction_mode": [],
+            "heading": 3,
+            "ocr_applied": 1,
+            "ocr_page_count": True,
+            "source_page_numbers": [0],
+        }
+        for key, value in invalid_values.items():
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    ResearchDocumentSegmentEntity(
+                        ingestion_id="11111111-1111-5111-8111-111111111111",
+                        ordinal=0,
+                        content="正文",
+                        token_count=2,
+                        metadata={key: value},
+                    )
+
+    def test_list_segments_uses_requested_ingestion_ids_and_decodes_metadata(self):
+        segment = _segment()
+        db = ScriptedDB(fetch_all_results=[[_segment_row()]])
+
+        loaded = ResearchDocumentRepositoryImpl(db=db).list_segments(
+            [segment.ingestion_id, "22222222-2222-5222-8222-222222222222"]
+        )
+
+        self.assertEqual(loaded, [segment])
+        self.assertEqual(
+            db.operations[0][2],
+            (
+                segment.ingestion_id,
+                "22222222-2222-5222-8222-222222222222",
+            ),
+        )
+
+    def test_list_segments_rejects_non_object_metadata_json(self):
+        for metadata_json in ("[]", "null", [], None):
+            with self.subTest(metadata_json=metadata_json):
+                db = ScriptedDB(
+                    fetch_all_results=[[_segment_row(metadata_json)]]
+                )
+
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).list_segments(
+                        ["11111111-1111-5111-8111-111111111111"]
+                    )
+
+    def test_purge_is_scoped_by_doctor_and_attachment(self):
+        db = ScriptedDB(execute_results=[1])
+
+        ResearchDocumentRepositoryImpl(db=db).purge("doctor-1", "attachment-1")
+
+        operation = db.operations[0]
+        normalized = " ".join(operation[1].split()).lower()
+        self.assertIn("delete from research_document_ingestion", normalized)
+        self.assertIn("doctor_id = %s", normalized)
+        self.assertIn("attachment_id = %s", normalized)
+        self.assertNotIn("processor_type", normalized)
+        self.assertNotIn("file_type", normalized)
+        self.assertNotIn("mime_type", normalized)
+        self.assertEqual(operation[2], ("doctor-1", "attachment-1"))
+
+    def test_same_attachment_purge_is_isolated_across_doctors(self):
+        db = ScriptedDB(execute_results=[0, 1])
+        repository = ResearchDocumentRepositoryImpl(db=db)
+
+        first = repository.purge("doctor-1", "shared-text-attachment")
+        second = repository.purge("doctor-2", "shared-text-attachment")
+
+        self.assertEqual((first, second), (0, 1))
+        self.assertEqual(
+            [operation[2] for operation in db.operations],
+            [
+                ("doctor-1", "shared-text-attachment"),
+                ("doctor-2", "shared-text-attachment"),
+            ],
+        )
+
+
+class ChatTurnIngestionReferencesTest(unittest.TestCase):
+    def test_entity_and_repository_round_trip_ingestion_ids(self):
+        row = {
+            "doctor_id": "doctor-1",
+            "request_id": "request-1",
+            "request_fingerprint": "b" * 64,
+            "protocol_version": 2,
+            "agent_type": "research",
+            "attachment_scope": "research",
+            "research_options_json": "{}",
+            "ingestion_ids_json": '["ingestion-1","ingestion-2"]',
+            "operation": "send",
+            "conversation_id": "conversation-1",
+            "session_id": "session-1",
+            "patient_id": None,
+            "source_message_id": None,
+            "implicit_prompt_id": None,
+            "attachment_ids_json": '["attachment-1"]',
+            "user_message_id": "user-1",
+            "assistant_message_id": "assistant-1",
+            "previous_active_node_id": None,
+            "status": "prepared",
+            "error_code": None,
+            "execute_started_at": None,
+            "deadline_at": None,
+            "create_time": datetime(2026, 7, 11, 9, 0, 0),
+            "update_time": datetime(2026, 7, 11, 9, 0, 0),
+        }
+        entity = ChatTurnRequestRepositoryImpl._row_to_entity(row)
+
+        self.assertEqual(entity.ingestion_ids, ["ingestion-1", "ingestion-2"])
+
+        db = ScriptedDB(execute_results=[1])
+        ChatTurnRequestRepositoryImpl(db=db).insert(entity)
+        insert = db.operations[0]
+        self.assertIn("ingestion_ids_json", insert[1])
+        self.assertIn(row["ingestion_ids_json"], insert[2])
+        self.assertEqual(insert[1].count("%s"), len(insert[2]))
+
+
+if __name__ == "__main__":
+    unittest.main()
