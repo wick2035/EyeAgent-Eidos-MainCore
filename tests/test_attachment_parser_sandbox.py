@@ -114,7 +114,85 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_default_image_uses_research_c2b_tag(self):
-        self.assertEqual(AttachmentParserSandbox()._image, _IMAGE)
+        sandbox = AttachmentParserSandbox(environ={})
+        self.assertEqual(sandbox._image, _IMAGE)
+        self.assertFalse(sandbox._require_digest)
+
+    def test_environment_configures_parser_image_without_changing_dev_default(self):
+        configured_image = (
+            "registry.test:5000/eyeagent/parser@sha256:" + "a" * 64
+        )
+
+        with patch.dict(
+            os.environ,
+            {"PLATFORM_ATTACHMENT_PARSER_IMAGE": configured_image},
+            clear=True,
+        ):
+            sandbox = AttachmentParserSandbox()
+
+        self.assertEqual(sandbox._image, configured_image)
+        self.assertFalse(sandbox._require_digest)
+
+    def test_parser_digest_gate_uses_only_strict_boolean_values(self):
+        configured_image = "registry.test/eyeagent/parser@sha256:" + "b" * 64
+        for raw_value, expected in (("true", True), ("false", False)):
+            with self.subTest(raw_value=raw_value):
+                sandbox = AttachmentParserSandbox(
+                    environ={
+                        "PLATFORM_ATTACHMENT_PARSER_IMAGE": configured_image,
+                        "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST": raw_value,
+                    }
+                )
+                self.assertIs(sandbox._require_digest, expected)
+
+        for invalid_value in ("", "1", "yes", "TRUE", "False", " true "):
+            with self.subTest(invalid_value=invalid_value):
+                with self.assertRaises(AttachmentParserError) as raised:
+                    AttachmentParserSandbox(
+                        environ={
+                            "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST": (
+                                invalid_value
+                            )
+                        }
+                    )
+                self.assertEqual(
+                    raised.exception.error_code,
+                    "ATTACHMENT_SANDBOX_CONFIG_INVALID",
+                )
+                if invalid_value:
+                    self.assertNotIn(invalid_value, str(raised.exception))
+
+    def test_parser_digest_gate_rejects_mutable_or_malformed_references(self):
+        invalid_images = (
+            _IMAGE,
+            "registry.test/eyeagent/parser@sha256:" + "A" * 64,
+            "registry.test/eyeagent/parser@sha256:" + "a" * 63,
+            "registry.test/eyeagent/parser@sha512:" + "a" * 64,
+        )
+        for image in invalid_images:
+            with self.subTest(image=image):
+                with self.assertRaises(AttachmentParserError) as raised:
+                    AttachmentParserSandbox(
+                        environ={
+                            "PLATFORM_ATTACHMENT_PARSER_IMAGE": image,
+                            "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST": "true",
+                        }
+                    )
+                self.assertEqual(
+                    raised.exception.error_code,
+                    "ATTACHMENT_SANDBOX_IMAGE_DIGEST_REQUIRED",
+                )
+                self.assertNotIn(image, str(raised.exception))
+
+        immutable = "registry.test/eyeagent/parser:release@sha256:" + "c" * 64
+        sandbox = AttachmentParserSandbox(
+            environ={
+                "PLATFORM_ATTACHMENT_PARSER_IMAGE": immutable,
+                "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST": "true",
+            }
+        )
+        self.assertEqual(sandbox._image, immutable)
+        self.assertTrue(sandbox._require_digest)
 
     async def test_setup_failure_removes_partially_created_request_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1365,8 +1443,9 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
 
 class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.image = AttachmentParserSandbox()._image
         subprocess.run(
-            ["docker", "image", "inspect", _IMAGE],
+            ["docker", "image", "inspect", self.image],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1444,7 +1523,7 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
             '--user "$(id -u):$(id -g)" --rm --cidfile "$cidfile" '
             f'--label "{_LABEL_KEY}=$label" '
             '-v "$input_dir:/input:ro" -v "$output_bundle:/output.bundle:rw" '
-            f"--entrypoint python {_IMAGE} -c {json.dumps(python_code)}\n",
+            f"--entrypoint python {self.image} -c {json.dumps(python_code)}\n",
             encoding="utf-8",
         )
         os.chmod(path, 0o700)
@@ -1461,7 +1540,14 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         parsed = await sandbox.parse(self.downloaded)
 
         configured_user = subprocess.run(
-            ["docker", "image", "inspect", _IMAGE, "--format", "{{.Config.User}}"],
+            [
+                "docker",
+                "image",
+                "inspect",
+                self.image,
+                "--format",
+                "{{.Config.User}}",
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -1766,7 +1852,7 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
                 f"{bundle}:/output.bundle:rw",
                 "--entrypoint",
                 "python",
-                _IMAGE,
+                self.image,
                 "-c",
                 code,
             ],

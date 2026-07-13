@@ -51,12 +51,21 @@ Browser 可以获得业务所需的附件标识、展示元数据、回合状态
 
 ### 5.1 运行依赖
 
-- **parser image**：部署节点已预取 `eyeagent/attachment-parser:research-c2b`；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。该镜像必须同时通过图片、PDF、TXT和DOCX的无网络沙箱回归。
+- **parser image**：开发环境未配置时默认使用 `eyeagent/attachment-parser:research-c2b`。可通过 `PLATFORM_ATTACHMENT_PARSER_IMAGE` 指定镜像引用；生产必须使用 `repository@sha256:<64位小写十六进制digest>` 的不可变引用，并设置 `PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true`。该布尔变量只接受精确小写 `true` 或 `false`，空值、`1`、`yes` 和大小写变体都会失败关闭。部署节点须预取配置的镜像；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。该镜像必须同时通过图片、PDF、TXT和DOCX的无网络沙箱回归。
 - **download allowlist**：`PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON` 非空且只包含 Java 内部下载端点的精确 scheme/host/port/IP；生产默认保持 `PLATFORM_ATTACHMENT_ALLOW_HTTP=false`，并验证 MainCore 可达、Browser 不可达。
 - **JWT/JWKS**：Java 签名 key、`kid` 和 JWKS 发布一致，MainCore 可从 `INTERNAL_JWT_JWKS_URL` 拉取并刷新公钥；日志、探针和配置中不得出现私钥或 Bearer。
 - **双端时钟**：Java 签发端与 MainCore 验签端均启用时钟同步，验证 `iat`/`exp` 和短期 token TTL；`INTERNAL_JWT_CLOCK_SKEW_SECONDS` 只能容忍小幅抖动，不能替代时钟同步。
 - **数据库**：三张表、索引和应用账号权限已在目标环境验证；迁移先于任何 Java 灰度流量。
 - **可观测性**：能按安全事件、固定 route、回合状态和附件错误码聚合，不记录 download URL、storage key、原文 segment 或内部 Bearer。
+
+生产 parser 镜像配置示例：
+
+```bash
+PLATFORM_ATTACHMENT_PARSER_IMAGE='registry.example.com/eyeagent/attachment-parser@sha256:<64位小写十六进制digest>'
+PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true
+```
+
+`PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST` 未设置时默认为 `false`，仅用于保持本地开发 tag 工作流；生产不得依赖该默认值。digest 门禁只校验不可变引用格式，镜像预取、签名或 provenance 验证仍应由发布流水线完成。
 
 科研文档 claim/接管的真实 MySQL 并发门禁必须显式设置
 `RUN_MYSQL_INTEGRATION=1`，并指向已加载

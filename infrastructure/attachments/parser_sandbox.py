@@ -13,7 +13,7 @@ import tempfile
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from PIL import Image
 
@@ -53,9 +53,12 @@ from utils.pdf_utils import (
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RUNNER = _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
 _DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c2b"
+_PARSER_IMAGE_ENV = "PLATFORM_ATTACHMENT_PARSER_IMAGE"
+_PARSER_REQUIRE_DIGEST_ENV = "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST"
 _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ERROR_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _SAFE_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
+_SHA256_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_STDOUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _LABEL_KEY = "eyeagent.attachment-parser.run"
@@ -77,24 +80,67 @@ class _WorkerOutputLimitError(RuntimeError):
     pass
 
 
+def _parse_strict_environment_boolean(
+    raw_value: str | None,
+    *,
+    default: bool,
+) -> bool:
+    if raw_value is None:
+        return default
+    if raw_value == "true":
+        return True
+    if raw_value == "false":
+        return False
+    raise AttachmentParserError("ATTACHMENT_SANDBOX_CONFIG_INVALID")
+
+
+def _has_immutable_sha256_digest(image: str) -> bool:
+    repository, separator, digest = image.rpartition("@sha256:")
+    return bool(
+        separator
+        and repository
+        and "@" not in repository
+        and _SHA256_DIGEST_PATTERN.fullmatch(digest)
+    )
+
+
 class AttachmentParserSandbox:
     def __init__(
         self,
         *,
         runner_path: Path | str = _DEFAULT_RUNNER,
         docker_binary: str = "docker",
-        image: str = _DEFAULT_IMAGE,
+        image: str | None = None,
+        environ: Mapping[str, str] | None = None,
         temp_root: Path | str | None = None,
         timeout_seconds: float = 120.0,
         uid_getter: Callable[[], int] = os.getuid,
         gid_getter: Callable[[], int] = os.getgid,
         label_factory: Callable[[], str] | None = None,
     ) -> None:
-        if not isinstance(image, str) or not _SAFE_IMAGE_PATTERN.fullmatch(image):
+        source = os.environ if environ is None else environ
+        configured_image = (
+            source.get(_PARSER_IMAGE_ENV, _DEFAULT_IMAGE)
+            if image is None
+            else image
+        )
+        require_digest = _parse_strict_environment_boolean(
+            source.get(_PARSER_REQUIRE_DIGEST_ENV),
+            default=False,
+        )
+        if (
+            not isinstance(configured_image, str)
+            or not _SAFE_IMAGE_PATTERN.fullmatch(configured_image)
+        ):
             raise AttachmentParserError("ATTACHMENT_SANDBOX_IMAGE_INVALID")
+        if require_digest and not _has_immutable_sha256_digest(configured_image):
+            raise AttachmentParserError(
+                "ATTACHMENT_SANDBOX_IMAGE_DIGEST_REQUIRED"
+            )
         self._runner_path = Path(runner_path)
         self._docker_binary = docker_binary
-        self._image = image
+        self._image = configured_image
+        self._require_digest = require_digest
         self._temp_root = (
             Path(temp_root)
             if temp_root is not None
