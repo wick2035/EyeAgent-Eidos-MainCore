@@ -23,6 +23,7 @@ from application.services.research_document_ingestion_service import (
     IMAGE_EXTRACTOR_VERSION,
     PDF_EXTRACTOR_VERSION,
     TEXT_EXTRACTOR_VERSION,
+    DOCX_EXTRACTOR_VERSION,
 )
 from domain.models.research_document import (
     ResearchDocumentIngestionEntity,
@@ -59,6 +60,7 @@ _EXTRACTOR_BY_PROCESSOR = {
     "pdf_hybrid_v1": PDF_EXTRACTOR_VERSION,
     "image_vision_v1": IMAGE_EXTRACTOR_VERSION,
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
+    "docx_text_v1": DOCX_EXTRACTOR_VERSION,
 }
 
 _MAP_PROMPT = (
@@ -580,6 +582,26 @@ def _validate_segment_sources(entity, segments):
                 != {
                     "block_index": segment.ordinal,
                     "extraction_method": "plain_text",
+                    "extraction_mode": "text",
+                }
+            ):
+                raise ResearchDocumentContextError()
+        return
+
+    if entity.processor_type == "docx_text_v1":
+        if entity.page_count != 0:
+            raise ResearchDocumentContextError()
+        for segment in segments:
+            if (
+                segment.page_start is not None
+                or segment.page_end is not None
+                or segment.sheet_name is not None
+                or segment.row_start is not None
+                or segment.row_end is not None
+                or segment.metadata
+                != {
+                    "block_index": segment.ordinal,
+                    "extraction_method": "docx_xml",
                     "extraction_mode": "text",
                 }
             ):

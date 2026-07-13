@@ -20,6 +20,7 @@ from infrastructure.attachments import parser_sandbox as sandbox_module
 from infrastructure.attachments.parser_protocol import AttachmentParserError
 from infrastructure.attachments.parser_protocol import (
     ParsedResearchPdf,
+    ParsedResearchDocx,
     ParsedResearchText,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
@@ -36,7 +37,7 @@ from utils.pdf_utils import RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS, fitz
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_IMAGE = "eyeagent/attachment-parser:research-c2a"
+_IMAGE = "eyeagent/attachment-parser:research-c2b"
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 
 
@@ -112,7 +113,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             path=source,
         )
 
-    def test_default_image_uses_research_c2a_tag(self):
+    def test_default_image_uses_research_c2b_tag(self):
         self.assertEqual(AttachmentParserSandbox()._image, _IMAGE)
 
     async def test_setup_failure_removes_partially_created_request_directory(self):
@@ -1552,6 +1553,54 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(parsed.character_count, len(canonical_text))
         self.assertEqual(self._containers_for_label(label), ())
         self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_docx_extracts_text_in_real_networkless_container(self):
+        source = self.root / "paper.docx"
+        content_types = (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'content-types"><Override PartName="/word/document.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.'
+            'wordprocessingml.document.main+xml"/></Types>'
+        )
+        document = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+            'wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'
+            '真实DOCX正文</w:t></w:r></w:p></w:body></w:document>'
+        )
+        with zipfile.ZipFile(
+            source,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            allowZip64=False,
+        ) as archive:
+            archive.writestr("[Content_Types].xml", content_types)
+            archive.writestr("word/document.xml", document)
+        source.chmod(0o600)
+        payload = source.read_bytes()
+        downloaded = DownloadedAttachment(
+            attachment_id="attachment-docx-integration",
+            analysis_attempt_id="attempt-docx-integration",
+            file_type="docx",
+            filename="paper.docx",
+            mime_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=None,
+            path=source,
+        )
+
+        parsed = await AttachmentParserSandbox(
+            temp_root=self.root / "docx-sandbox"
+        ).parse(downloaded, profile="research_docx_v1")
+
+        self.assertIsInstance(parsed, ParsedResearchDocx)
+        self.assertEqual(parsed.document_version, 1)
+        self.assertEqual(parsed.text, "真实DOCX正文")
+        self.assertEqual(parsed.character_count, len("真实DOCX正文"))
+        self.assertEqual(list((self.root / "docx-sandbox").iterdir()), [])
 
     async def test_research_text_accepts_nfc_expansion_beyond_raw_size_limit(self):
         raw_text = "\u0344" * 250_000

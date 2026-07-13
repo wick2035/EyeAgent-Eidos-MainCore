@@ -51,7 +51,7 @@ Browser 可以获得业务所需的附件标识、展示元数据、回合状态
 
 ### 5.1 运行依赖
 
-- **parser image**：部署节点已预取 `eyeagent/attachment-parser:research-c1`；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。
+- **parser image**：部署节点已预取 `eyeagent/attachment-parser:research-c2b`；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。该镜像必须同时通过图片、PDF、TXT和DOCX的无网络沙箱回归。
 - **download allowlist**：`PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON` 非空且只包含 Java 内部下载端点的精确 scheme/host/port/IP；生产默认保持 `PLATFORM_ATTACHMENT_ALLOW_HTTP=false`，并验证 MainCore 可达、Browser 不可达。
 - **JWT/JWKS**：Java 签名 key、`kid` 和 JWKS 发布一致，MainCore 可从 `INTERNAL_JWT_JWKS_URL` 拉取并刷新公钥；日志、探针和配置中不得出现私钥或 Bearer。
 - **双端时钟**：Java 签发端与 MainCore 验签端均启用时钟同步，验证 `iat`/`exp` 和短期 token TTL；`INTERNAL_JWT_CLOCK_SKEW_SECONDS` 只能容忍小幅抖动，不能替代时钟同步。

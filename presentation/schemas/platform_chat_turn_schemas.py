@@ -60,7 +60,7 @@ class InternalAttachmentDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     attachment_id: str
-    file_type: Literal["image", "pdf", "text"]
+    file_type: Literal["image", "pdf", "text", "docx"]
     filename: str
     mime_type: Literal[
         "image/jpeg",
@@ -68,6 +68,7 @@ class InternalAttachmentDescriptor(BaseModel):
         "image/webp",
         "application/pdf",
         "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]
     size_bytes: int = Field(strict=True, gt=0, le=30 * 1024 * 1024)
     page_count: int | None = Field(default=None, strict=True, ge=1, le=100)
@@ -98,6 +99,15 @@ class InternalAttachmentDescriptor(BaseModel):
                 or self.page_count is not None
             ):
                 raise ValueError("text descriptor invalid")
+        elif self.file_type == "docx":
+            if (
+                "page_count" not in self.model_fields_set
+                or self.mime_type
+                != "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                or self.size_bytes > 10 * 1024 * 1024
+                or self.page_count is not None
+            ):
+                raise ValueError("docx descriptor invalid")
         return self
 
 
@@ -227,14 +237,15 @@ class ExecutePlatformChatTurnRequest(BaseModel):
     def validate_total_attachment_size(self) -> "ExecutePlatformChatTurnRequest":
         self._validate_agent_contract()
         if any(
-            attachment.file_type == "text" for attachment in self.attachments
+            attachment.file_type in {"text", "docx"}
+            for attachment in self.attachments
         ) and (
             self.version != 2
             or self.agent_type != "research"
             or self.attachment_scope != "research"
             or self.patient_id is not None
         ):
-            raise ValueError("text 仅允许 v2 research/research/null-patient")
+            raise ValueError("文本附件仅允许 v2 research/research/null-patient")
         total_size = sum(attachment.size_bytes for attachment in self.attachments)
         if total_size > 40 * 1024 * 1024:
             raise ValueError("附件总量不得超过 40MB")

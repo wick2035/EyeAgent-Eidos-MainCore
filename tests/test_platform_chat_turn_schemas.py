@@ -238,6 +238,57 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
         self.assertIsNone(request.attachments[0].page_count)
         self.assertEqual(request.model_dump(mode="json"), payload)
 
+    def test_v2_research_docx_execute_matches_golden_wire(self):
+        payload = load_fixture(
+            "platform_chat_turn_internal_wire_v2_research_docx.json"
+        )
+        request = ExecutePlatformChatTurnRequest(**payload)
+        self.assertEqual(request.attachments[0].file_type, "docx")
+        self.assertIsNone(request.attachments[0].page_count)
+        self.assertEqual(request.model_dump(mode="json"), payload)
+
+    def test_v2_research_docx_rejects_invalid_contracts(self):
+        invalid_payloads = []
+        for field, value in (
+            ("size_bytes", 10 * 1024 * 1024 + 1),
+            ("page_count", 1),
+            ("mime_type", "application/zip"),
+        ):
+            invalid = load_fixture(
+                "platform_chat_turn_internal_wire_v2_research_docx.json"
+            )
+            invalid["attachments"][0][field] = value
+            invalid_payloads.append(invalid)
+
+        for mutation in ("missing_page_count", "health", "v1", "extra"):
+            invalid = load_fixture(
+                "platform_chat_turn_internal_wire_v2_research_docx.json"
+            )
+            if mutation == "missing_page_count":
+                invalid["attachments"][0].pop("page_count")
+            elif mutation == "health":
+                invalid.update(
+                    patient_id="patient-1",
+                    agent_type="health",
+                    attachment_scope="patient",
+                    research_options=None,
+                )
+            elif mutation == "v1":
+                invalid["version"] = 1
+                invalid["patient_id"] = "patient-1"
+                for field in ("agent_type", "attachment_scope", "research_options"):
+                    invalid.pop(field)
+            else:
+                invalid["attachments"][0]["content"] = "forbidden"
+            invalid_payloads.append(invalid)
+
+        for invalid in invalid_payloads:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValidationError):
+                    ExecutePlatformChatTurnRequest(**invalid)
+
+    def test_v2_research_text_rejects_invalid_contracts(self):
+
         invalid_payloads = []
         for field, value in (
             ("size_bytes", 524289),

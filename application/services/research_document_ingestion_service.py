@@ -31,16 +31,19 @@ from infrastructure.repositories.research_document_repository_impl import (
 PDF_EXTRACTOR_VERSION = "pymupdf_v1"
 IMAGE_EXTRACTOR_VERSION = "research_vision_v1"
 TEXT_EXTRACTOR_VERSION = "research_text_v1"
+DOCX_EXTRACTOR_VERSION = "research_docx_v1"
 
 _PROCESSOR_BY_FILE_TYPE = {
     "pdf": "pdf_hybrid_v1",
     "image": "image_vision_v1",
     "text": "plain_text_v1",
+    "docx": "docx_text_v1",
 }
 _EXTRACTOR_BY_PROCESSOR = {
     "pdf_hybrid_v1": PDF_EXTRACTOR_VERSION,
     "image_vision_v1": IMAGE_EXTRACTOR_VERSION,
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
+    "docx_text_v1": DOCX_EXTRACTOR_VERSION,
 }
 
 _MAX_FILES = 4
@@ -48,6 +51,10 @@ _MAX_TOTAL_BYTES = 40 * 1024 * 1024
 _MAX_PDF_BYTES = 30 * 1024 * 1024
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_TEXT_BYTES = 512 * 1024
+_MAX_DOCX_BYTES = 10 * 1024 * 1024
+_DOCX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 _MAX_PDF_PAGES = 100
 _MAX_TOTAL_PDF_PAGES = 120
 _IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
@@ -57,6 +64,7 @@ _SAFE_ERROR_PREFIXES = (
     "PDF_",
     "RESEARCH_PDF_",
     "RESEARCH_TXT_",
+    "RESEARCH_DOCX_",
     "RESEARCH_DOCUMENT_",
 )
 _INGESTION_TIMEOUT = "RESEARCH_DOCUMENT_INGESTION_TIMEOUT"
@@ -454,6 +462,15 @@ def _validate_metadata(
                 raise ResearchDocumentIngestionError(
                     "RESEARCH_DOCUMENT_CONTENT_LIMIT"
                 )
+        elif item.file_type == "docx":
+            if (
+                item.mime_type != _DOCX_MIME_TYPE
+                or item.size_bytes > _MAX_DOCX_BYTES
+                or item.page_count is not None
+            ):
+                raise ResearchDocumentIngestionError(
+                    "RESEARCH_DOCUMENT_CONTENT_LIMIT"
+                )
         else:
             raise ResearchDocumentIngestionError(
                 "RESEARCH_DOCUMENT_INPUT_INVALID"
@@ -650,6 +667,7 @@ def _safe_processing_error(error: Exception) -> str:
 
 
 __all__ = [
+    "DOCX_EXTRACTOR_VERSION",
     "IMAGE_EXTRACTOR_VERSION",
     "PDF_EXTRACTOR_VERSION",
     "TEXT_EXTRACTOR_VERSION",

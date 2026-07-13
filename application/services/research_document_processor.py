@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from application.services.plain_text_processor import PlainTextProcessor
+from application.services.docx_processor import DocxProcessor
 from application.services.research_document_segmenter import (
     MAX_SEGMENT_TOKENS,
     estimate_tokens_v1,
@@ -161,12 +162,14 @@ class ResearchDocumentProcessor:
         vision_gateway: Any | None = None,
         *,
         plain_text_processor: Any | None = None,
+        docx_processor: Any | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._vision_gateway = vision_gateway or ResearchVisionGateway()
         self._plain_text_processor = plain_text_processor or PlainTextProcessor(
             sandbox
         )
+        self._docx_processor = docx_processor or DocxProcessor(sandbox)
 
     async def process(
         self,
@@ -179,6 +182,8 @@ class ResearchDocumentProcessor:
             return await self.process_image(downloaded)
         if file_type == "text":
             return await self._plain_text_processor.process(downloaded)
+        if file_type == "docx":
+            return await self._docx_processor.process(downloaded)
         raise ResearchDocumentProcessingError("RESEARCH_DOCUMENT_VISION_FAILED")
 
     async def process_pdf(

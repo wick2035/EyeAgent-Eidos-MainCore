@@ -5,12 +5,14 @@ import resource
 import stat
 import sys
 import zipfile
-from pathlib import Path
+import xml.etree.ElementTree as ElementTree
+from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
 from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
+    ResearchDocxManifest,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
     ResearchTextManifest,
@@ -21,6 +23,11 @@ from infrastructure.attachments.parser_protocol import (
 from infrastructure.attachments.research_text_contract import (
     ResearchTextContractError,
     normalize_research_text_bytes,
+)
+from infrastructure.attachments.research_docx_contract import (
+    MAX_RESEARCH_DOCX_BYTES,
+    ResearchDocxContractError,
+    normalize_research_docx_text,
 )
 from utils.pdf_utils import (
     StrictPdfError,
@@ -33,13 +40,52 @@ MAX_IMAGE_PIXELS = 50_000_000
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024
 _MAX_OUTPUT_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_DOCX_ENTRIES = 512
+_MAX_DOCX_ENTRY_BYTES = 16 * 1024 * 1024
+_MAX_DOCX_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_DOCX_COMPRESSION_RATIO = 100
+_MAX_DOCX_XML_BYTES = 16 * 1024 * 1024
+_DOCX_DOCUMENT_PATH = "word/document.xml"
+_DOCX_CONTENT_TYPES_PATH = "[Content_Types].xml"
+_DOCX_MAIN_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.document.main+xml"
+)
+_CONTENT_TYPES_NS = (
+    "http://schemas.openxmlformats.org/package/2006/content-types"
+)
+_RELATIONSHIPS_NS = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
+_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W = f"{{{_WORD_NS}}}"
+_MARKUP_COMPATIBILITY_NS = (
+    "http://schemas.openxmlformats.org/markup-compatibility/2006"
+)
+_MC = f"{{{_MARKUP_COMPATIBILITY_NS}}}"
+_IGNORED_TEXT_SUBTREES = frozenset(
+    {
+        f"{_W}drawing",
+        f"{_W}pict",
+        f"{_W}object",
+        f"{_W}del",
+        f"{_W}moveFrom",
+    }
+)
+_ALLOWED_BLOCK_WRAPPERS = frozenset(
+    {
+        f"{_W}sdt",
+        f"{_W}sdtContent",
+        f"{_W}customXml",
+    }
+)
 
 
 def parse_attachment_file(
     request: WorkerRequest,
     input_dir: Path | str,
     output_dir: Path | str,
-) -> WorkerManifest | ResearchPdfManifest | ResearchTextManifest:
+) -> WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest:
     input_root = _resolve_directory(input_dir)
     output_root = _resolve_directory(output_dir)
     input_path = input_root / request.input_filename
@@ -59,6 +105,8 @@ def parse_attachment_file(
         return _parse_image(request, input_real, output_root)
     if request.profile == "research_text_v1":
         return _parse_research_text(input_real, output_root)
+    if request.profile == "research_docx_v1":
+        return _parse_research_docx(input_real, output_root)
     if request.profile == "research_pdf_v1":
         return _parse_research_pdf(request, input_real, output_root)
     return _parse_pdf(request, input_real, output_root)
@@ -228,6 +276,316 @@ def _parse_research_text(
     )
 
 
+def _parse_research_docx(
+    input_path: Path,
+    output_root: Path,
+) -> ResearchDocxManifest:
+    try:
+        if not 1 <= input_path.stat().st_size <= MAX_RESEARCH_DOCX_BYTES:
+            raise AttachmentParserError("RESEARCH_DOCX_SIZE_LIMIT")
+    except OSError as exc:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID") from exc
+    try:
+        with zipfile.ZipFile(input_path, mode="r", allowZip64=False) as archive:
+            entries = _validate_docx_archive(archive)
+            content_types = _read_docx_entry(
+                archive,
+                entries[_DOCX_CONTENT_TYPES_PATH],
+            )
+            _validate_content_types(content_types)
+            _validate_docx_relationships(archive, entries)
+            document_xml = _read_docx_entry(
+                archive,
+                entries[_DOCX_DOCUMENT_PATH],
+            )
+    except AttachmentParserError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID") from None
+
+    text = _extract_docx_text(document_xml)
+    try:
+        normalized = normalize_research_docx_text(text)
+    except ResearchDocxContractError as exc:
+        raise AttachmentParserError(exc.error_code) from exc
+
+    output_path = output_root / "document.txt"
+    try:
+        file_descriptor = os.open(
+            output_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(file_descriptor, "wb") as output:
+            output.write(normalized.utf8_bytes)
+    except OSError as exc:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_FAILED") from exc
+
+    return ResearchDocxManifest(
+        profile="research_docx_v1",
+        text_relative_path=output_path.name,
+        text_sha256=normalized.sha256,
+        character_count=normalized.character_count,
+    )
+
+
+def _validate_docx_archive(
+    archive: zipfile.ZipFile,
+) -> dict[str, zipfile.ZipInfo]:
+    entries = archive.infolist()
+    if not 1 <= len(entries) <= _MAX_DOCX_ENTRIES:
+        raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+    by_name: dict[str, zipfile.ZipInfo] = {}
+    total_size = 0
+    for entry in entries:
+        name = entry.filename
+        path = PurePosixPath(name)
+        unix_mode = entry.external_attr >> 16
+        if (
+            not name
+            or "\\" in name
+            or path.is_absolute()
+            or ".." in path.parts
+            or name in by_name
+            or stat.S_IFMT(unix_mode) == stat.S_IFLNK
+        ):
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        if entry.flag_bits & 0x1:
+            raise AttachmentParserError("RESEARCH_DOCX_ENCRYPTED")
+        if entry.extract_version >= 45 or _contains_zip64_extra(entry.extra):
+            raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+        if entry.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        if entry.file_size > _MAX_DOCX_ENTRY_BYTES:
+            raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+        total_size += entry.file_size
+        if total_size > _MAX_DOCX_TOTAL_BYTES:
+            raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+        if entry.file_size and (
+            entry.compress_size <= 0
+            or entry.file_size
+            > entry.compress_size * _MAX_DOCX_COMPRESSION_RATIO
+        ):
+            raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+        lowered = name.lower()
+        if (
+            lowered.endswith("vbaproject.bin")
+            or lowered.startswith("word/activex/")
+            or lowered.startswith("word/embeddings/")
+            or "oleobject" in lowered
+        ):
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        by_name[name] = entry
+    if not {_DOCX_CONTENT_TYPES_PATH, _DOCX_DOCUMENT_PATH}.issubset(by_name):
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+    return by_name
+
+
+def _read_docx_entry(
+    archive: zipfile.ZipFile,
+    entry: zipfile.ZipInfo,
+) -> bytes:
+    if entry.is_dir() or entry.file_size > _MAX_DOCX_XML_BYTES:
+        raise AttachmentParserError("RESEARCH_DOCX_STRUCTURE_LIMIT")
+    try:
+        with archive.open(entry, mode="r") as source:
+            content = source.read(entry.file_size + 1)
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID") from None
+    if len(content) != entry.file_size:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+    return content
+
+
+def _contains_zip64_extra(extra: bytes) -> bool:
+    cursor = 0
+    while cursor < len(extra):
+        if cursor + 4 > len(extra):
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        header_id = int.from_bytes(extra[cursor : cursor + 2], "little")
+        field_size = int.from_bytes(extra[cursor + 2 : cursor + 4], "little")
+        cursor += 4
+        if cursor + field_size > len(extra):
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        if header_id == 0x0001:
+            return True
+        cursor += field_size
+    return False
+
+
+def _parse_safe_xml(content: bytes) -> ElementTree.Element:
+    upper = content.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+    try:
+        return ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID") from None
+
+
+def _validate_content_types(content: bytes) -> None:
+    root = _parse_safe_xml(content)
+    if root.tag != f"{{{_CONTENT_TYPES_NS}}}Types":
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+    document_overrides: list[str] = []
+    for node in root:
+        if node.tag not in {
+            f"{{{_CONTENT_TYPES_NS}}}Default",
+            f"{{{_CONTENT_TYPES_NS}}}Override",
+        }:
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        content_type = node.attrib.get("ContentType")
+        if not isinstance(content_type, str) or not content_type:
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        lowered = content_type.lower()
+        if any(
+            token in lowered
+            for token in ("macroenabled", "vbaproject", "oleobject", "activex")
+        ):
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        if (
+            node.tag == f"{{{_CONTENT_TYPES_NS}}}Override"
+            and node.attrib.get("PartName") == "/word/document.xml"
+        ):
+            document_overrides.append(content_type)
+    if document_overrides != [_DOCX_MAIN_CONTENT_TYPE]:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+
+
+def _validate_docx_relationships(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+) -> None:
+    for name, entry in entries.items():
+        if not name.lower().endswith(".rels"):
+            continue
+        root = _parse_safe_xml(_read_docx_entry(archive, entry))
+        if root.tag != f"{{{_RELATIONSHIPS_NS}}}Relationships":
+            raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+        for relationship in root:
+            if relationship.tag != f"{{{_RELATIONSHIPS_NS}}}Relationship":
+                raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+            relationship_type = relationship.attrib.get("Type")
+            target = relationship.attrib.get("Target")
+            relationship_kind = (
+                relationship_type.rsplit("/", 1)[-1].lower()
+                if isinstance(relationship_type, str)
+                else ""
+            )
+            if (
+                not isinstance(relationship_type, str)
+                or not relationship_type
+                or not isinstance(target, str)
+                or not target
+                or (
+                    relationship.attrib.get("TargetMode", "").lower()
+                    == "external"
+                    and relationship_kind != "hyperlink"
+                )
+                or any(
+                    token in relationship_type.lower()
+                    for token in ("vbaproject", "oleobject", "activex")
+                )
+                or relationship_kind == "package"
+            ):
+                raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+
+
+def _extract_docx_text(content: bytes) -> str:
+    root = _parse_safe_xml(content)
+    body = root.find(f".//{_W}body")
+    if body is None:
+        raise AttachmentParserError("RESEARCH_DOCX_INVALID")
+    blocks: list[str] = []
+    _append_docx_blocks(body, blocks)
+    return "\n\n".join(blocks)
+
+
+def _append_docx_blocks(
+    container: ElementTree.Element,
+    blocks: list[str],
+) -> None:
+    for child in container:
+        if child.tag == f"{_W}p":
+            raw = _paragraph_text(child)
+            if raw.strip():
+                blocks.append(raw.rstrip())
+        elif child.tag == f"{_W}tbl":
+            rows: list[str] = []
+            for row in child.findall(f"./{_W}tr"):
+                cells: list[str] = []
+                for cell in row.findall(f"./{_W}tc"):
+                    parts: list[str] = []
+                    for paragraph in cell.findall(f".//{_W}p"):
+                        raw = _paragraph_text(paragraph)
+                        if raw.strip():
+                            parts.append(raw.rstrip())
+                    value = "\n".join(parts)
+                    cells.append(value)
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                blocks.append("\n".join(rows))
+        elif child.tag in _ALLOWED_BLOCK_WRAPPERS:
+            _append_docx_blocks(child, blocks)
+
+
+def _paragraph_text(paragraph: ElementTree.Element) -> str:
+    values: list[str] = []
+    _collect_visible_word_text(paragraph, values)
+    text = "".join(values)
+    numbering = paragraph.find(f"./{_W}pPr/{_W}numPr")
+    if numbering is None or not text.strip():
+        return text
+    level_node = numbering.find(f"./{_W}ilvl")
+    try:
+        level = (
+            int(level_node.attrib.get(f"{_W}val", "0"))
+            if level_node is not None
+            else 0
+        )
+    except (TypeError, ValueError):
+        level = 0
+    return f"{'  ' * min(max(level, 0), 8)}- {text}"
+
+
+def _collect_visible_word_text(
+    node: ElementTree.Element,
+    values: list[str],
+) -> None:
+    if node.tag in _IGNORED_TEXT_SUBTREES:
+        return
+    if node.tag == f"{_MC}AlternateContent":
+        selected = node.find(f"./{_MC}Choice")
+        if selected is None:
+            selected = node.find(f"./{_MC}Fallback")
+        if selected is not None:
+            _collect_visible_word_text(selected, values)
+        return
+    if node.tag == f"{_W}r":
+        run_properties = node.find(f"./{_W}rPr")
+        if run_properties is not None and any(
+            run_properties.find(f"./{_W}{name}") is not None
+            for name in ("vanish", "webHidden", "specVanish")
+        ):
+            return
+    if node.tag == f"{_W}t" and node.text:
+        values.append(node.text)
+        return
+    if node.tag == f"{_W}tab":
+        values.append("\t")
+        return
+    if node.tag in {f"{_W}br", f"{_W}cr"}:
+        values.append("\n")
+        return
+    for child in node:
+        _collect_visible_word_text(child, values)
+
+
 def _resolve_directory(path: Path | str) -> Path:
     candidate = Path(path)
     try:
@@ -241,7 +599,7 @@ def _resolve_directory(path: Path | str) -> Path:
 
 
 def _write_output_bundle(
-    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest,
+    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest,
     output_dir: Path | str,
     bundle_path: Path | str,
 ) -> None:
@@ -295,7 +653,7 @@ def _write_output_bundle(
 
 
 def _manifest_artifacts(
-    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest,
+    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest,
 ) -> tuple[tuple[str, str], ...]:
     if isinstance(manifest, WorkerManifest):
         return tuple(
@@ -303,6 +661,14 @@ def _manifest_artifacts(
         )
     if isinstance(manifest, ResearchTextManifest):
         manifest = ResearchTextManifest(
+            profile=manifest.profile,
+            text_relative_path=manifest.text_relative_path,
+            text_sha256=manifest.text_sha256,
+            character_count=manifest.character_count,
+        )
+        return ((manifest.text_relative_path, manifest.text_sha256),)
+    if isinstance(manifest, ResearchDocxManifest):
+        manifest = ResearchDocxManifest(
             profile=manifest.profile,
             text_relative_path=manifest.text_relative_path,
             text_sha256=manifest.text_sha256,

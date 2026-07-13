@@ -56,7 +56,17 @@ class ResearchDocumentSegmenter:
                 raise ValueError("科研图片必须且只能产生一个提取页")
             return self.segment_image(ingestion_id, extracted[0])
         if processor_type == "plain_text_v1":
-            return self.segment_text(ingestion_id, extracted)
+            return self.segment_text(
+                ingestion_id,
+                extracted,
+                extraction_method="plain_text",
+            )
+        if processor_type == "docx_text_v1":
+            return self.segment_text(
+                ingestion_id,
+                extracted,
+                extraction_method="docx_xml",
+            )
         raise ValueError("不支持的科研文档 processor_type")
 
     def segment_pdf(
@@ -125,9 +135,13 @@ class ResearchDocumentSegmenter:
         self,
         ingestion_id: str,
         extracted: ExtractedResearchText,
+        *,
+        extraction_method: str = "plain_text",
     ) -> list[ResearchDocumentSegmentEntity]:
         if not isinstance(extracted, ExtractedResearchText):
-            raise ValueError("科研 TXT 提取结果无效")
+            raise ValueError("科研文本提取结果无效")
+        if extraction_method not in {"plain_text", "docx_xml"}:
+            raise ValueError("科研文本提取方式无效")
         normalized = _normalize_text(extracted.text)
         chunks = [
             content
@@ -135,7 +149,7 @@ class ResearchDocumentSegmenter:
             if content.strip()
         ]
         if not chunks:
-            raise ValueError("科研 TXT 提取正文不能为空")
+            raise ValueError("科研文本提取正文不能为空")
         return [
             ResearchDocumentSegmentEntity(
                 ingestion_id=ingestion_id,
@@ -149,7 +163,7 @@ class ResearchDocumentSegmenter:
                 token_count=estimate_tokens_v1(content),
                 metadata={
                     "block_index": ordinal,
-                    "extraction_method": "plain_text",
+                    "extraction_method": extraction_method,
                     "extraction_mode": "text",
                 },
             )

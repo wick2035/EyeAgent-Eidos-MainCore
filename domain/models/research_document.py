@@ -12,6 +12,7 @@ ProcessorType = Literal[
     "pdf_hybrid_v1",
     "image_vision_v1",
     "plain_text_v1",
+    "docx_text_v1",
 ]
 IngestionStatus = Literal["pending", "processing", "ready", "failed"]
 

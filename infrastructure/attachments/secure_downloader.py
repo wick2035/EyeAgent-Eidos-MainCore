@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _TOTAL_LIMIT_BYTES = 40 * 1024 * 1024
 _RESEARCH_TEXT_LIMIT_BYTES = 512 * 1024
+_RESEARCH_DOCX_LIMIT_BYTES = 10 * 1024 * 1024
+_DOCX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 _DEFAULT_CHUNK_SIZE = 64 * 1024
 
 
@@ -216,6 +220,7 @@ class SecureAttachmentDownloader:
         expected_size = _strict_descriptor_integer(descriptor, "size_bytes")
         mime_type = str(_value(descriptor, "mime_type"))
         is_research_text = mime_type == "text/plain"
+        is_research_docx = mime_type == _DOCX_MIME_TYPE
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
         received = 0
@@ -251,6 +256,15 @@ class SecureAttachmentDownloader:
                         ):
                             raise AttachmentDownloadError(
                                 "RESEARCH_TXT_SIZE_LIMIT",
+                                attachment_id=attachment_id,
+                                bytes_received=received,
+                            )
+                        if (
+                            is_research_docx
+                            and received > _RESEARCH_DOCX_LIMIT_BYTES
+                        ):
+                            raise AttachmentDownloadError(
+                                "RESEARCH_DOCX_SIZE_LIMIT",
                                 attachment_id=attachment_id,
                                 bytes_received=received,
                             )
@@ -319,7 +333,11 @@ class SecureAttachmentDownloader:
                 )
         elif not _matches_magic(destination, mime_type):
             raise AttachmentDownloadError(
-                "ATTACHMENT_MAGIC_MISMATCH",
+                (
+                    _docx_magic_error(destination)
+                    if is_research_docx
+                    else "ATTACHMENT_MAGIC_MISMATCH"
+                ),
                 attachment_id=attachment_id,
                 bytes_received=received,
             )
@@ -376,6 +394,7 @@ def _safe_suffix(mime_type: str) -> str:
         "image/webp": ".webp",
         "application/pdf": ".pdf",
         "text/plain": ".txt",
+        _DOCX_MIME_TYPE: ".docx",
     }.get(mime_type, ".bin")
 
 
@@ -394,4 +413,19 @@ def _matches_magic(path: Path, mime_type: str) -> bool:
         )
     if mime_type == "application/pdf":
         return header.startswith(b"%PDF-")
+    if mime_type == _DOCX_MIME_TYPE:
+        return header.startswith(b"PK\x03\x04")
     return False
+
+
+def _docx_magic_error(path: Path) -> str:
+    try:
+        with path.open("rb") as source:
+            header = source.read(8)
+    except OSError:
+        return "RESEARCH_DOCX_INVALID"
+    return (
+        "RESEARCH_DOCX_ENCRYPTED"
+        if header == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        else "RESEARCH_DOCX_INVALID"
+    )
