@@ -14,6 +14,7 @@ ProcessorType = Literal[
     "plain_text_v1",
     "docx_text_v1",
     "csv_dataset_v1",
+    "xlsx_dataset_v1",
 ]
 IngestionStatus = Literal["pending", "processing", "ready", "failed"]
 

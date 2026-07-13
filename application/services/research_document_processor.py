@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from application.services.plain_text_processor import PlainTextProcessor
 from application.services.docx_processor import DocxProcessor
 from application.services.csv_processor import CsvProcessor
+from application.services.xlsx_processor import XlsxProcessor
 from application.services.research_document_segmenter import (
     MAX_SEGMENT_TOKENS,
     estimate_tokens_v1,
@@ -20,7 +21,10 @@ from domain.models.research_document import (
     ExtractedResearchPage,
     ExtractedResearchText,
 )
-from domain.models.research_dataset import ExtractedResearchCsv
+from domain.models.research_dataset import (
+    ExtractedResearchCsv,
+    ExtractedResearchXlsx,
+)
 from infrastructure.attachments.parser_protocol import (
     ParsedAttachment,
     ParsedAttachmentPage,
@@ -166,6 +170,7 @@ class ResearchDocumentProcessor:
         plain_text_processor: Any | None = None,
         docx_processor: Any | None = None,
         csv_processor: Any | None = None,
+        xlsx_processor: Any | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._vision_gateway = vision_gateway or ResearchVisionGateway()
@@ -174,6 +179,7 @@ class ResearchDocumentProcessor:
         )
         self._docx_processor = docx_processor or DocxProcessor(sandbox)
         self._csv_processor = csv_processor or CsvProcessor(sandbox)
+        self._xlsx_processor = xlsx_processor or XlsxProcessor(sandbox)
 
     async def process(
         self,
@@ -182,6 +188,7 @@ class ResearchDocumentProcessor:
         list[ExtractedResearchPage]
         | ExtractedResearchText
         | ExtractedResearchCsv
+        | ExtractedResearchXlsx
     ):
         file_type = _value(downloaded, "file_type")
         if file_type == "pdf":
@@ -194,6 +201,8 @@ class ResearchDocumentProcessor:
             return await self._docx_processor.process(downloaded)
         if file_type == "csv":
             return await self._csv_processor.process(downloaded)
+        if file_type == "xlsx":
+            return await self._xlsx_processor.process(downloaded)
         raise ResearchDocumentProcessingError("RESEARCH_DOCUMENT_VISION_FAILED")
 
     async def process_pdf(

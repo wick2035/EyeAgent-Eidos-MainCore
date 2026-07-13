@@ -54,11 +54,11 @@ Browser 可以获得业务所需的附件标识、展示元数据、回合状态
 
 ### 5.1 运行依赖
 
-- **parser image**：开发环境未配置时默认使用 `eyeagent/attachment-parser:research-c3-csv`。可通过 `PLATFORM_ATTACHMENT_PARSER_IMAGE` 指定镜像引用；生产必须使用 `repository@sha256:<64位小写十六进制digest>` 的不可变引用，并设置 `PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true`。该布尔变量只接受精确小写 `true` 或 `false`，空值、`1`、`yes` 和大小写变体都会失败关闭。部署节点须预取配置的镜像；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。该镜像必须同时通过图片、PDF、TXT、DOCX 和 CSV 的无网络沙箱回归。CSV descriptor 必须使用 `text/csv`、不携带 `page_count`且不超过 10 MiB；canonical descriptor/chunk 各不超过 16 MiB，canonical artifact 总量不超过 31 MiB，host 仅接受 stored、non-Zip64、条目集精确匹配 manifest 的 bundle。
+- **parser image**：开发环境未配置时默认使用 `eyeagent/attachment-parser:research-c3-xlsx`。可通过 `PLATFORM_ATTACHMENT_PARSER_IMAGE` 指定镜像引用；生产必须使用 `repository@sha256:<64位小写十六进制digest>` 的不可变引用，并设置 `PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true`。该布尔变量只接受精确小写 `true` 或 `false`，空值、`1`、`yes` 和大小写变体都会失败关闭。部署节点须预取配置的镜像；MainCore 以非 root 用户运行，Docker daemon 可用，`scripts/run_attachment_parser_sandbox.sh` 可执行，镜像配置用户不是 root。该镜像必须同时通过图片、PDF、TXT、DOCX、CSV 和 XLSX 的无网络沙箱回归。CSV descriptor 必须使用 `text/csv`；XLSX descriptor 必须使用精确 MIME `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`；两者均不携带 `page_count`且不超过 10 MiB。XLSX 最多 10 个工作表、全文件 50,000 行和 2,000,000 个非空单元格、每表 100 列；公式只作为字符串读取且不得执行，合并单元格只保留左上角值，日期转换为 ISO 字符串，`visible/hidden/veryHidden` 工作表均必须解析并记录可见性。CSV/XLSX canonical descriptor/chunk 各不超过 16 MiB，canonical artifact 总量不超过 31 MiB，host 仅接受 stored、non-Zip64、条目集精确匹配 manifest 的 bundle。
 - **download allowlist**：`PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON` 非空且只包含 Java 内部下载端点的精确 scheme/host/port/IP；生产默认保持 `PLATFORM_ATTACHMENT_ALLOW_HTTP=false`，并验证 MainCore 可达、Browser 不可达。
 - **JWT/JWKS**：Java 签名 key、`kid` 和 JWKS 发布一致，MainCore 可从 `INTERNAL_JWT_JWKS_URL` 拉取并刷新公钥；日志、探针和配置中不得出现私钥或 Bearer。
 - **双端时钟**：Java 签发端与 MainCore 验签端均启用时钟同步，验证 `iat`/`exp` 和短期 token TTL；`INTERNAL_JWT_CLOCK_SKEW_SECONDS` 只能容忍小幅抖动，不能替代时钟同步。
-- **数据库**：六张表、索引、四级 cascade 和应用账号权限已在目标环境验证；DDL 迁移必须先于 MainCore 新代码部署，更必须先于任何 Java 灰度流量。
+- **数据库**：全新隔离数据库必须执行最新版 `scripts/create_research_document_tables.sql`；已有 C3-1 六表环境必须执行 `scripts/upgrade_research_dataset_c3_2.sql`，确认 `research_dataset_sheet.visibility` 等 C3-2 字段真实存在。随后再验证六张表、索引、四级 cascade 和应用账号权限；DDL 迁移必须先于 MainCore 新代码部署，更必须先于任何 Java 灰度流量。
 - **可观测性**：能按安全事件、固定 route、回合状态和附件错误码聚合，不记录 download URL、storage key、原文 segment 或内部 Bearer。
 
 生产 parser 镜像配置示例：
@@ -83,7 +83,8 @@ DB_USER=<user> DB_PASSWORD=<password> DB_NAME=<database> \
 ```
 
 未设置开关时测试保持 skip，避免普通单元测试误连数据库；正式验收必须明确输出
-`Ran 3 tests`、`OK`，且不能出现 `skipped`。
+`OK`，且不能出现 `skipped`。C3-2 验收还必须覆盖 XLSX 多工作表的同事务发布、
+fencing rollback、重试替换和 cascade purge，不能只复用 CSV 的单工作表成功路径。
 
 生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，不得宣称生产 `enforce` 已完成。
 

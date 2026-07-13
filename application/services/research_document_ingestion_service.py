@@ -25,6 +25,7 @@ from domain.models.research_document import (
 )
 from domain.models.research_dataset import (
     ExtractedResearchCsv,
+    ExtractedResearchXlsx,
     ResearchDatasetMaterialization,
     build_research_dataset_materialization,
 )
@@ -39,6 +40,7 @@ IMAGE_EXTRACTOR_VERSION = "research_vision_v1"
 TEXT_EXTRACTOR_VERSION = "research_text_v1"
 DOCX_EXTRACTOR_VERSION = "research_docx_v1"
 CSV_EXTRACTOR_VERSION = "research_csv_v1"
+XLSX_EXTRACTOR_VERSION = "research_xlsx_v1"
 
 _PROCESSOR_BY_FILE_TYPE = {
     "pdf": "pdf_hybrid_v1",
@@ -46,6 +48,7 @@ _PROCESSOR_BY_FILE_TYPE = {
     "text": "plain_text_v1",
     "docx": "docx_text_v1",
     "csv": "csv_dataset_v1",
+    "xlsx": "xlsx_dataset_v1",
 }
 _EXTRACTOR_BY_PROCESSOR = {
     "pdf_hybrid_v1": PDF_EXTRACTOR_VERSION,
@@ -53,6 +56,7 @@ _EXTRACTOR_BY_PROCESSOR = {
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
     "docx_text_v1": DOCX_EXTRACTOR_VERSION,
     "csv_dataset_v1": CSV_EXTRACTOR_VERSION,
+    "xlsx_dataset_v1": XLSX_EXTRACTOR_VERSION,
 }
 
 _MAX_FILES = 4
@@ -62,10 +66,14 @@ _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_TEXT_BYTES = 512 * 1024
 _MAX_DOCX_BYTES = 10 * 1024 * 1024
 _MAX_CSV_BYTES = 10 * 1024 * 1024
+_MAX_XLSX_BYTES = 10 * 1024 * 1024
 _DOCX_MIME_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
 _CSV_MIME_TYPE = "text/csv"
+_XLSX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
 _MAX_PDF_PAGES = 100
 _MAX_TOTAL_PDF_PAGES = 120
 _IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
@@ -361,7 +369,10 @@ class ResearchDocumentIngestionService:
                 ingestion_id,
                 extracted,
             )
-            if isinstance(extracted, ExtractedResearchCsv)
+            if isinstance(
+                extracted,
+                (ExtractedResearchCsv, ExtractedResearchXlsx),
+            )
             else None
         )
         return _ProcessedDocument(tuple(segments), dataset)
@@ -533,6 +544,15 @@ def _validate_metadata(
             if (
                 item.mime_type != _CSV_MIME_TYPE
                 or item.size_bytes > _MAX_CSV_BYTES
+                or item.page_count is not None
+            ):
+                raise ResearchDocumentIngestionError(
+                    "RESEARCH_DOCUMENT_CONTENT_LIMIT"
+                )
+        elif item.file_type == "xlsx":
+            if (
+                item.mime_type != _XLSX_MIME_TYPE
+                or item.size_bytes > _MAX_XLSX_BYTES
                 or item.page_count is not None
             ):
                 raise ResearchDocumentIngestionError(
@@ -742,6 +762,7 @@ __all__ = [
     "IMAGE_EXTRACTOR_VERSION",
     "PDF_EXTRACTOR_VERSION",
     "TEXT_EXTRACTOR_VERSION",
+    "XLSX_EXTRACTOR_VERSION",
     "ResearchDocumentIngestionError",
     "ResearchDocumentIngestionResult",
     "ResearchDocumentIngestionService",

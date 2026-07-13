@@ -9,6 +9,7 @@ from pathlib import Path
 
 from application.services.research_document_ingestion_service import (
     CSV_EXTRACTOR_VERSION,
+    XLSX_EXTRACTOR_VERSION,
     IMAGE_EXTRACTOR_VERSION,
     PDF_EXTRACTOR_VERSION,
     ResearchDocumentIngestionError,
@@ -36,6 +37,7 @@ from infrastructure.attachments.secure_downloader import DownloadedAttachment
 from infrastructure.repositories.research_document_repository_impl import (
     ResearchDocumentFencingError,
 )
+from tests.test_research_document_segmenter import _xlsx_extracted
 
 
 TXT_SECRET_SENTINEL = "TXT_SECRET_SENTINEL_7f9c"
@@ -235,6 +237,8 @@ class FakeProcessor:
                 )
             if item.file_type == "csv":
                 return _csv_extracted(item.path.read_bytes())
+            if item.file_type == "xlsx":
+                return _xlsx_extracted()
             return [
                 ExtractedResearchPage(
                     page_number=1,
@@ -250,7 +254,7 @@ class FakeProcessor:
 
 
 class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
-    def test_c3_stable_error_codes_are_safe_with_only_csv_registered(self):
+    def test_c3_stable_error_codes_and_dataset_processors_are_registered(self):
         for error_code in (
             "RESEARCH_CSV_UNAVAILABLE",
             "RESEARCH_CSV_SIZE_LIMIT",
@@ -279,7 +283,14 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
             ingestion_module._PROCESSOR_BY_FILE_TYPE["csv"],
             "csv_dataset_v1",
         )
-        self.assertNotIn("xlsx", ingestion_module._PROCESSOR_BY_FILE_TYPE)
+        self.assertEqual(
+            ingestion_module._PROCESSOR_BY_FILE_TYPE["xlsx"],
+            "xlsx_dataset_v1",
+        )
+        self.assertEqual(
+            ingestion_module._EXTRACTOR_BY_PROCESSOR["xlsx_dataset_v1"],
+            XLSX_EXTRACTOR_VERSION,
+        )
 
     def test_unknown_c3_prefixed_errors_fall_back_to_processing_failed(self):
         for error_code in (
@@ -330,6 +341,38 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(CSV_SECRET_SENTINEL, segment.content)
         self.assertEqual(segment.sheet_name, "CSV")
         self.assertEqual((segment.row_start, segment.row_end), (1, 3))
+
+    async def test_xlsx_ingestion_atomically_materializes_hidden_sheet_rows(self):
+        item = _downloaded(
+            self.temp.name,
+            "xlsx-attachment",
+            file_type="xlsx",
+            mime_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            content=b"PK\x03\x04xlsx-fixture",
+        )
+
+        result = await self._service().ingest("doctor-1", [item])
+
+        [entity] = result.entities
+        self.assertEqual(entity.processor_type, "xlsx_dataset_v1")
+        self.assertEqual(entity.extractor_version, XLSX_EXTRACTOR_VERSION)
+        self.assertEqual(entity.page_count, 0)
+        self.assertEqual(len(self.repo.complete_calls[0]), 4)
+        dataset = self.repo.datasets[entity.id]
+        self.assertEqual(dataset.dataset.file_type, "xlsx")
+        self.assertEqual(dataset.sheets[0].ordinal, 1)
+        self.assertEqual(dataset.sheets[0].visibility, "hidden")
+        self.assertEqual(
+            dataset.row_chunks[0].rows[0].values[0],
+            "PRIVATE_XLSX_ROW_SENTINEL",
+        )
+        [segment] = self.repo.segments[entity.id]
+        self.assertNotIn("PRIVATE_XLSX_ROW_SENTINEL", segment.content)
+        self.assertEqual(segment.sheet_name, "隐藏表")
+        self.assertEqual((segment.row_start, segment.row_end), (2, 3))
 
     def tearDown(self):
         self.temp.cleanup()

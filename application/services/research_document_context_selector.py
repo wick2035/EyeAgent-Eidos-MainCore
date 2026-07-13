@@ -19,9 +19,11 @@ from application.services.research_document_segmenter import (
     SEGMENT_SCHEMA_VERSION,
     estimate_tokens_v1,
     validate_csv_structure_summary_content,
+    validate_xlsx_structure_summary_content,
 )
 from application.services.research_document_ingestion_service import (
     CSV_EXTRACTOR_VERSION,
+    XLSX_EXTRACTOR_VERSION,
     IMAGE_EXTRACTOR_VERSION,
     PDF_EXTRACTOR_VERSION,
     TEXT_EXTRACTOR_VERSION,
@@ -64,6 +66,7 @@ _EXTRACTOR_BY_PROCESSOR = {
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
     "docx_text_v1": DOCX_EXTRACTOR_VERSION,
     "csv_dataset_v1": CSV_EXTRACTOR_VERSION,
+    "xlsx_dataset_v1": XLSX_EXTRACTOR_VERSION,
 }
 
 _MAP_PROMPT = (
@@ -589,6 +592,41 @@ def _validate_segment_sources(entity, segments):
             }
         ):
             raise ResearchDocumentContextError()
+        return
+
+    if entity.processor_type == "xlsx_dataset_v1":
+        if entity.page_count != 0 or not 1 <= len(segments) <= 10:
+            raise ResearchDocumentContextError()
+        seen_sheet_names: set[str] = set()
+        previous_sheet_ordinal = -1
+        for segment in segments:
+            try:
+                summary = validate_xlsx_structure_summary_content(
+                    segment.content
+                )
+            except ValueError:
+                raise ResearchDocumentContextError() from None
+            sheet_name = summary["sheet_name"]
+            sheet_ordinal = summary["sheet_ordinal"]
+            casefolded_name = sheet_name.casefold()
+            if (
+                segment.page_start is not None
+                or segment.page_end is not None
+                or segment.sheet_name != sheet_name
+                or segment.row_start != summary["header_row_start"]
+                or segment.row_end != summary["physical_line_count"]
+                or segment.metadata
+                != {
+                    "block_index": segment.ordinal,
+                    "extraction_method": "xlsx_structured",
+                    "extraction_mode": "structured_summary",
+                }
+                or sheet_ordinal <= previous_sheet_ordinal
+                or casefolded_name in seen_sheet_names
+            ):
+                raise ResearchDocumentContextError()
+            previous_sheet_ordinal = sheet_ordinal
+            seen_sheet_names.add(casefolded_name)
         return
 
     if entity.processor_type == "plain_text_v1":

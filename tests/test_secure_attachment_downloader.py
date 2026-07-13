@@ -26,6 +26,10 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"safe-image"
 _MIB = 1024 * 1024
 _TXT_LIMIT_BYTES = 512 * 1024
 _CSV_LIMIT_BYTES = 10 * 1024 * 1024
+_XLSX_LIMIT_BYTES = 10 * 1024 * 1024
+_XLSX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
 
 
 def _descriptor(url: str, payload: bytes = _PNG, **overrides):
@@ -64,6 +68,18 @@ def _csv_descriptor(url: str, payload: bytes, **overrides):
         file_type="csv",
         filename="dataset.csv",
         mime_type="text/csv",
+        page_count=None,
+        **overrides,
+    )
+
+
+def _xlsx_descriptor(url: str, payload: bytes, **overrides):
+    return _descriptor(
+        url,
+        payload,
+        file_type="xlsx",
+        filename="dataset.xlsx",
+        mime_type=_XLSX_MIME_TYPE,
         page_count=None,
         **overrides,
     )
@@ -108,6 +124,9 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
 
     def test_text_csv_uses_csv_suffix(self):
         self.assertEqual(_safe_suffix("text/csv"), ".csv")
+
+    def test_xlsx_mime_uses_xlsx_suffix(self):
+        self.assertEqual(_safe_suffix(_XLSX_MIME_TYPE), ".xlsx")
 
     async def test_valid_csv_requires_exact_mime_and_skips_binary_magic(self):
         payload = b"Name,Value\nA,1"
@@ -202,6 +221,136 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.exception.error_code, "RESEARCH_CSV_SIZE_LIMIT")
         self.assertEqual(captured.exception.bytes_received, len(payload))
         self._assert_no_request_directories()
+
+    async def test_valid_xlsx_requires_exact_descriptor_and_zip_magic(self):
+        payload = b"PK\x03\x04safe-xlsx"
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type=_XLSX_MIME_TYPE)
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port),
+            temp_root=self.temp_root,
+        )
+        descriptor = _xlsx_descriptor(
+            f"http://storage.test:{port}/dataset.xlsx",
+            payload,
+        ).model_dump()
+        descriptor["filename"] = "DATASET.XLSX"
+
+        async with downloader.download_all(
+            [descriptor],
+            "request-valid-xlsx",
+        ) as items:
+            self.assertEqual(items[0].file_type, "xlsx")
+            self.assertEqual(items[0].mime_type, _XLSX_MIME_TYPE)
+            self.assertIsNone(items[0].page_count)
+            self.assertEqual(items[0].path.suffix, ".xlsx")
+            self.assertEqual(items[0].path.read_bytes(), payload)
+
+        self._assert_no_request_directories()
+
+    async def test_xlsx_descriptor_rejects_mime_page_and_size_before_network(self):
+        settings = AttachmentDownloadSettings.from_env(
+            {
+                "PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON": json.dumps(
+                    [["https", "storage.test", 443, "192.0.2.10"]]
+                )
+            }
+        )
+        downloader = SecureAttachmentDownloader(settings, temp_root=self.temp_root)
+        base = _xlsx_descriptor(
+            "https://storage.test/dataset.xlsx",
+            b"PK\x03\x04xlsx",
+        ).model_dump()
+        cases = (
+            ({**base, "mime_type": "application/zip"}, "ATTACHMENT_DESCRIPTOR_INVALID"),
+            ({**base, "page_count": 1}, "ATTACHMENT_DESCRIPTOR_INVALID"),
+            ({**base, "filename": "dataset.csv"}, "ATTACHMENT_DESCRIPTOR_INVALID"),
+            (
+                {**base, "filename": "nested/dataset.xlsx"},
+                "ATTACHMENT_DESCRIPTOR_INVALID",
+            ),
+            (
+                {**base, "filename": r"nested\dataset.xlsx"},
+                "ATTACHMENT_DESCRIPTOR_INVALID",
+            ),
+            (
+                {**base, "size_bytes": _XLSX_LIMIT_BYTES + 1},
+                "RESEARCH_XLSX_SIZE_LIMIT",
+            ),
+        )
+
+        for descriptor, error_code in cases:
+            with self.subTest(error_code=error_code):
+                with self.assertRaisesRegex(AttachmentDownloadError, error_code):
+                    async with downloader.download_all(
+                        [descriptor],
+                        f"request-{error_code}",
+                    ):
+                        self.fail("invalid XLSX must fail before networking")
+                self._assert_no_request_directories()
+
+    async def test_xlsx_stream_returns_size_limit_after_ten_mib(self):
+        payload = b"PK\x03\x04" + b"a" * (_XLSX_LIMIT_BYTES - 3)
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type=_XLSX_MIME_TYPE)
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port),
+            temp_root=self.temp_root,
+        )
+        descriptor = _xlsx_descriptor(
+            f"http://storage.test:{port}/oversized.xlsx",
+            payload[:_XLSX_LIMIT_BYTES],
+        )
+
+        with self.assertRaises(AttachmentDownloadError) as captured:
+            async with downloader.download_all(
+                [descriptor],
+                "request-xlsx-stream-limit",
+            ):
+                self.fail("XLSX stream overflow must fail before yielding")
+
+        self.assertEqual(captured.exception.error_code, "RESEARCH_XLSX_SIZE_LIMIT")
+        self.assertEqual(captured.exception.bytes_received, len(payload))
+        self._assert_no_request_directories()
+
+    async def test_xlsx_invalid_and_cfb_magic_map_to_stable_codes(self):
+        cfb = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1encrypted"
+        payloads = {
+            "/invalid": b"not-an-xlsx",
+            "/encrypted": cfb,
+        }
+
+        async def handler(request):
+            return web.Response(body=payloads[request.path])
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port),
+            temp_root=self.temp_root,
+        )
+        cases = (
+            ("/invalid", "RESEARCH_XLSX_INVALID"),
+            ("/encrypted", "RESEARCH_XLSX_ENCRYPTED"),
+        )
+        for path, error_code in cases:
+            with self.subTest(error_code=error_code):
+                descriptor = _xlsx_descriptor(
+                    f"http://storage.test:{port}{path}",
+                    payloads[path],
+                )
+                with self.assertRaisesRegex(AttachmentDownloadError, error_code):
+                    async with downloader.download_all(
+                        [descriptor],
+                        f"request-{error_code}",
+                    ):
+                        self.fail("invalid XLSX must fail before yielding")
+                self._assert_no_request_directories()
 
     async def test_valid_text_preserves_raw_bytes_and_skips_binary_magic(self):
         payload = b"\xef\xbb\xbfCafe\xcc\x81\r\nline\r"

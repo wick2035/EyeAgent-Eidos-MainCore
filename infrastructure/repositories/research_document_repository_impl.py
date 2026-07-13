@@ -31,6 +31,10 @@ class ResearchDocumentClaimTransactionBoundaryError(RuntimeError):
 
 class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
     _CLAIM_MAX_TRANSACTION_ATTEMPTS = 3
+    _DATASET_FILE_TYPE_BY_PROCESSOR = {
+        "csv_dataset_v1": "csv",
+        "xlsx_dataset_v1": "xlsx",
+    }
 
     _INGESTION_COLUMNS = """
         id, doctor_id, attachment_id, document_version, content_sha256,
@@ -159,11 +163,18 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 or row["attempt_count"] != attempt_count
             ):
                 return False
-            is_csv_ingestion = row["processor_type"] == "csv_dataset_v1"
-            if is_csv_ingestion != (dataset is not None):
+            expected_dataset_file_type = self._DATASET_FILE_TYPE_BY_PROCESSOR.get(
+                row["processor_type"]
+            )
+            if (expected_dataset_file_type is None) != (dataset is None):
                 raise ValueError("dataset 必须与 ingestion processor_type 匹配")
-            if dataset is not None and dataset.dataset.file_type != "csv":
-                raise ValueError("CSV ingestion 只能发布 CSV dataset")
+            if (
+                dataset is not None
+                and dataset.dataset.file_type != expected_dataset_file_type
+            ):
+                raise ValueError(
+                    "dataset file_type 必须与 ingestion processor_type 严格匹配"
+                )
 
             self.db.execute(
                 """
@@ -183,12 +194,18 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 self.db.execute(
                     """
                         INSERT INTO research_dataset (
-                            id, ingestion_id, file_type, sheet_count,
+                            id, ingestion_id, file_type, date_system,
+                            workbook_sheet_count, empty_sheet_count,
+                            total_record_count, sheet_count,
                             total_data_row_count, total_column_count,
                             total_non_empty_cell_count,
-                            total_formula_like_cell_count, descriptor_sha256
+                            total_formula_like_cell_count,
+                            total_formula_cell_count,
+                            total_merged_range_count, descriptor_sha256
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s
                         )
                     """,
                     self._dataset_params(dataset),
@@ -196,15 +213,18 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 self.db.execute_many(
                     """
                         INSERT INTO research_dataset_sheet (
-                            id, dataset_id, ordinal, name, header_json,
+                            id, dataset_id, ordinal, name, visibility,
+                            header_json,
                             header_row_start, header_row_end,
                             physical_line_count, record_count, data_row_count,
                             column_count, missing_value_counts_json,
                             non_empty_cell_count, formula_like_cell_count,
+                            formula_cell_count, merged_range_count,
                             descriptor_sha256
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s
                         )
                     """,
                     [self._dataset_sheet_params(sheet) for sheet in dataset.sheets],
@@ -217,10 +237,11 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                                 physical_row_end, logical_row_start,
                                 logical_row_end, row_count,
                                 non_empty_cell_count, formula_like_cell_count,
+                                formula_cell_count,
                                 rows_json, payload_sha256
                             ) VALUES (
                                 %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s
                             )
                         """,
                         [
@@ -525,15 +546,34 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
     @staticmethod
     def _dataset_params(dataset: ResearchDatasetMaterialization) -> tuple:
         entity = dataset.dataset
+        xlsx_metadata = dataset.xlsx_metadata
         return (
             entity.id,
             entity.ingestion_id,
             entity.file_type,
+            xlsx_metadata.date_system if xlsx_metadata is not None else None,
+            (
+                xlsx_metadata.workbook_sheet_count
+                if xlsx_metadata is not None
+                else None
+            ),
+            (
+                xlsx_metadata.empty_sheet_count
+                if xlsx_metadata is not None
+                else None
+            ),
+            (
+                xlsx_metadata.total_record_count
+                if xlsx_metadata is not None
+                else None
+            ),
             entity.sheet_count,
             entity.total_data_row_count,
             entity.total_column_count,
             entity.total_non_empty_cell_count,
             entity.total_formula_like_cell_count,
+            entity.total_formula_cell_count,
+            entity.total_merged_range_count,
             entity.descriptor_sha256,
         )
 
@@ -544,6 +584,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             sheet.dataset_id,
             sheet.ordinal,
             sheet.name,
+            sheet.visibility,
             cls._canonical_json(sheet.headers),
             sheet.header_row_start,
             sheet.header_row_end,
@@ -554,6 +595,8 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             cls._canonical_json(sheet.missing_value_counts),
             sheet.non_empty_cell_count,
             sheet.formula_like_cell_count,
+            sheet.formula_cell_count,
+            sheet.merged_range_count,
             sheet.descriptor_sha256,
         )
 
@@ -573,6 +616,7 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
             chunk.row_count,
             chunk.non_empty_cell_count,
             chunk.formula_like_cell_count,
+            chunk.formula_cell_count,
             cls._canonical_json(
                 [row.model_dump(mode="json") for row in chunk.rows]
             ),

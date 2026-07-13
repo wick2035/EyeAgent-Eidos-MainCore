@@ -164,6 +164,26 @@ class ResearchDocumentProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(csv_processor.calls, [downloaded])
         self.assertEqual(gateway.calls, [])
 
+    async def test_xlsx_dispatches_to_structured_processor_without_vision(self):
+        downloaded = _downloaded(
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content=b"xlsx",
+        )
+        extracted = object()
+        xlsx_processor = FakePlainTextProcessor(extracted)
+        gateway = FakeGateway()
+
+        result = await ResearchDocumentProcessor(
+            FakeSandbox(object()),
+            gateway,
+            xlsx_processor=xlsx_processor,
+        ).process(downloaded)
+
+        self.assertIs(result, extracted)
+        self.assertEqual(xlsx_processor.calls, [downloaded])
+        self.assertEqual(gateway.calls, [])
+
     async def test_digital_pdf_uses_research_profile_without_llm(self):
         sandbox = FakeSandbox(_parsed_pdf(_pdf_page(1, "第一页"), _pdf_page(2, "第二页")))
         gateway = FakeGateway()

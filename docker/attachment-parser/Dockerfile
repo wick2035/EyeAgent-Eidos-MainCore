@@ -18,6 +18,8 @@ COPY --chown=65532:65532 infrastructure/attachments/attachment_parser_worker.py 
 COPY --chown=65532:65532 infrastructure/attachments/research_text_contract.py /app/infrastructure/attachments/research_text_contract.py
 COPY --chown=65532:65532 infrastructure/attachments/research_docx_contract.py /app/infrastructure/attachments/research_docx_contract.py
 COPY --chown=65532:65532 infrastructure/attachments/research_csv_contract.py /app/infrastructure/attachments/research_csv_contract.py
+COPY --chown=65532:65532 infrastructure/attachments/research_xlsx_contract.py /app/infrastructure/attachments/research_xlsx_contract.py
+COPY --chown=65532:65532 infrastructure/attachments/research_xlsx_parser.py /app/infrastructure/attachments/research_xlsx_parser.py
 COPY --chown=65532:65532 utils/pdf_utils.py /app/utils/pdf_utils.py
 
 USER 65532:65532

@@ -26,10 +26,12 @@ from infrastructure.attachments.parser_protocol import (
     ParsedResearchPdf,
     ParsedResearchPdfPage,
     ParsedResearchText,
+    ParsedResearchXlsx,
     ResearchCsvManifest,
     ResearchDocxManifest,
     ResearchPdfManifest,
     ResearchTextManifest,
+    ResearchXlsxManifest,
     WorkerManifest,
     WorkerRequest,
 )
@@ -40,6 +42,13 @@ from infrastructure.attachments.research_csv_contract import (
     NormalizedResearchCsv,
     ResearchCsvContractError,
     rebuild_research_csv_from_canonical_bytes,
+)
+from infrastructure.attachments.research_xlsx_contract import (
+    MAX_RESEARCH_XLSX_CHUNK_BYTES,
+    MAX_RESEARCH_XLSX_DESCRIPTOR_BYTES,
+    NormalizedResearchXlsx,
+    ResearchXlsxContractError,
+    rebuild_research_xlsx_from_canonical_bytes,
 )
 from infrastructure.attachments.research_text_contract import (
     NormalizedResearchText,
@@ -62,7 +71,7 @@ from utils.pdf_utils import (
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RUNNER = _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
-_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c3-csv"
+_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c3-xlsx"
 _PARSER_IMAGE_ENV = "PLATFORM_ATTACHMENT_PARSER_IMAGE"
 _PARSER_REQUIRE_DIGEST_ENV = "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST"
 _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -74,6 +83,21 @@ _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _MAX_RESEARCH_CSV_BUNDLE_BYTES = 32 * 1024 * 1024
 _MAX_RESEARCH_CSV_DESCRIPTOR_BYTES = MAX_RESEARCH_CSV_DESCRIPTOR_BYTES
 _MAX_RESEARCH_CSV_CHUNK_BYTES = MAX_RESEARCH_CSV_CHUNK_BYTES
+_MAX_RESEARCH_XLSX_BUNDLE_BYTES = 32 * 1024 * 1024
+_MAX_RESEARCH_XLSX_DESCRIPTOR_BYTES = MAX_RESEARCH_XLSX_DESCRIPTOR_BYTES
+_MAX_RESEARCH_XLSX_CHUNK_BYTES = MAX_RESEARCH_XLSX_CHUNK_BYTES
+_STABLE_RESEARCH_XLSX_ERROR_CODES = frozenset(
+    {
+        "RESEARCH_XLSX_UNAVAILABLE",
+        "RESEARCH_XLSX_SIZE_LIMIT",
+        "RESEARCH_XLSX_INVALID",
+        "RESEARCH_XLSX_ENCRYPTED",
+        "RESEARCH_XLSX_STRUCTURE_LIMIT",
+        "RESEARCH_XLSX_FORMULA_UNSUPPORTED",
+        "RESEARCH_XLSX_CONTENT_LIMIT",
+        "RESEARCH_XLSX_PARSE_FAILED",
+    }
+)
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 _STARTUP_CLEANUP_WAIT_SECONDS = 2.0
 _ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
@@ -206,6 +230,7 @@ class AttachmentParserSandbox:
         | ParsedResearchText
         | ParsedResearchDocx
         | ParsedResearchCsv
+        | ParsedResearchXlsx
     ):
         await self.preflight()
         self._ensure_temp_root()
@@ -298,7 +323,10 @@ class AttachmentParserSandbox:
                 raise
 
             if process.returncode != 0:
-                raise AttachmentParserError(_worker_error_code(stderr))
+                error_code = _worker_error_code(stderr)
+                if profile == "research_xlsx_v1":
+                    error_code = _safe_research_xlsx_error_code(error_code)
+                raise AttachmentParserError(error_code)
             if profile == "research_pdf_v1":
                 research_pages = _read_validated_research_bundle(
                     output_bundle,
@@ -343,6 +371,17 @@ class AttachmentParserSandbox:
                     stdout,
                 )
                 return ParsedResearchCsv(
+                    attachment_id=str(_value(downloaded, "attachment_id")),
+                    document_version=_value(downloaded, "document_version"),
+                    mime_type=str(_value(downloaded, "mime_type")),
+                    normalized=normalized,
+                )
+            if profile == "research_xlsx_v1":
+                normalized = _read_validated_research_xlsx_bundle(
+                    output_bundle,
+                    stdout,
+                )
+                return ParsedResearchXlsx(
                     attachment_id=str(_value(downloaded, "attachment_id")),
                     document_version=_value(downloaded, "document_version"),
                     mime_type=str(_value(downloaded, "mime_type")),
@@ -1023,6 +1062,136 @@ def _read_validated_research_csv_bundle(
     return normalized
 
 
+def _read_validated_research_xlsx_bundle(
+    output_bundle: Path,
+    stdout: bytes,
+) -> NormalizedResearchXlsx:
+    if len(stdout) > _MAX_STDOUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    manifest = ResearchXlsxManifest.from_json_bytes(stdout)
+    try:
+        metadata = output_bundle.lstat()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    if (
+        output_bundle.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if metadata.st_size > _MAX_RESEARCH_XLSX_BUNDLE_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+
+    expected_names = {manifest.descriptor_relative_path}
+    expected_names.update(chunk.relative_path for chunk in manifest.chunks)
+    _preflight_zip_bundle(
+        output_bundle,
+        file_size=metadata.st_size,
+        expected_names=expected_names,
+    )
+
+    descriptor_bytes: bytes
+    chunk_bytes: list[bytes] = []
+    total_artifact_bytes = 0
+    try:
+        with zipfile.ZipFile(output_bundle, mode="r") as archive:
+            entries = archive.infolist()
+            actual_names = {entry.filename for entry in entries}
+            if (
+                len(entries) != len(actual_names)
+                or actual_names != expected_names
+            ):
+                raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+            entries_by_name = {entry.filename: entry for entry in entries}
+            descriptor_bytes = _read_research_csv_artifact(
+                archive,
+                entries_by_name[manifest.descriptor_relative_path],
+                expected_byte_count=manifest.descriptor_byte_count,
+                expected_sha256=manifest.descriptor_sha256,
+                artifact_limit=_MAX_RESEARCH_XLSX_DESCRIPTOR_BYTES,
+            )
+            total_artifact_bytes += len(descriptor_bytes)
+            for chunk in manifest.chunks:
+                content = _read_research_csv_artifact(
+                    archive,
+                    entries_by_name[chunk.relative_path],
+                    expected_byte_count=chunk.byte_count,
+                    expected_sha256=chunk.sha256,
+                    artifact_limit=_MAX_RESEARCH_XLSX_CHUNK_BYTES,
+                )
+                total_artifact_bytes += len(content)
+                if total_artifact_bytes > _MAX_RESEARCH_XLSX_BUNDLE_BYTES:
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+                chunk_bytes.append(content)
+    except AttachmentParserError:
+        raise
+    except Exception as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+
+    try:
+        normalized = rebuild_research_xlsx_from_canonical_bytes(
+            descriptor_bytes,
+            chunk_bytes,
+            descriptor_sha256=manifest.descriptor_sha256,
+            chunk_sha256s=tuple(chunk.sha256 for chunk in manifest.chunks),
+        )
+    except ResearchXlsxContractError as exc:
+        error_code = _safe_research_xlsx_error_code(exc.error_code)
+        raise AttachmentParserError(error_code) from None
+    except Exception:
+        raise AttachmentParserError("RESEARCH_XLSX_PARSE_FAILED") from None
+
+    descriptor = normalized.descriptor
+    if (
+        descriptor.date_system != manifest.date_system
+        or descriptor.workbook_sheet_count != manifest.workbook_sheet_count
+        or descriptor.empty_sheet_count != manifest.empty_sheet_count
+        or descriptor.total_record_count != manifest.total_record_count
+        or descriptor.total_data_row_count != manifest.total_data_row_count
+        or descriptor.total_non_empty_cell_count
+        != manifest.total_non_empty_cell_count
+        or descriptor.total_formula_like_cell_count
+        != manifest.total_formula_like_cell_count
+        or descriptor.total_formula_cell_count
+        != manifest.total_formula_cell_count
+        or descriptor.total_merged_range_count
+        != manifest.total_merged_range_count
+        or len(normalized.chunks) != len(manifest.chunks)
+    ):
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+
+    for parsed_chunk, declared_chunk in zip(
+        normalized.chunks,
+        manifest.chunks,
+    ):
+        if (
+            parsed_chunk.sheet_ordinal != declared_chunk.sheet_ordinal
+            or parsed_chunk.ordinal != declared_chunk.ordinal
+            or parsed_chunk.row_count != declared_chunk.row_count
+            or parsed_chunk.logical_row_start
+            != declared_chunk.logical_row_start
+            or parsed_chunk.logical_row_end != declared_chunk.logical_row_end
+            or parsed_chunk.physical_row_start
+            != declared_chunk.physical_row_start
+            or parsed_chunk.physical_row_end
+            != declared_chunk.physical_row_end
+            or parsed_chunk.non_empty_cell_count
+            != declared_chunk.non_empty_cell_count
+            or parsed_chunk.formula_like_cell_count
+            != declared_chunk.formula_like_cell_count
+            or parsed_chunk.formula_cell_count
+            != declared_chunk.formula_cell_count
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    return normalized
+
+
+def _safe_research_xlsx_error_code(error_code: object) -> str:
+    if error_code in _STABLE_RESEARCH_XLSX_ERROR_CODES:
+        return str(error_code)
+    return "RESEARCH_XLSX_PARSE_FAILED"
+
+
 def _read_research_csv_artifact(
     archive: zipfile.ZipFile,
     entry: zipfile.ZipInfo,
@@ -1073,7 +1242,7 @@ def _preflight_zip_bundle(
     if (
         type(file_size) is not int
         or file_size < _ZIP_EOCD.size
-        or not 1 <= expected_entry_count <= 120
+        or not 1 <= expected_entry_count <= 512
         or any(type(name) is not str for name in expected_names)
     ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")

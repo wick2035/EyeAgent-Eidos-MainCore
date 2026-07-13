@@ -31,8 +31,12 @@ _TOTAL_LIMIT_BYTES = 40 * 1024 * 1024
 _RESEARCH_TEXT_LIMIT_BYTES = 512 * 1024
 _RESEARCH_DOCX_LIMIT_BYTES = 10 * 1024 * 1024
 _RESEARCH_CSV_LIMIT_BYTES = 10 * 1024 * 1024
+_RESEARCH_XLSX_LIMIT_BYTES = 10 * 1024 * 1024
 _DOCX_MIME_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+_XLSX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 _DEFAULT_CHUNK_SIZE = 64 * 1024
 
@@ -147,6 +151,7 @@ class SecureAttachmentDownloader:
                 allow_none=True,
             )
             file_type = str(_value(item, "file_type"))
+            filename = _value(item, "filename")
             mime_type = str(_value(item, "mime_type"))
             if file_type == "csv" or mime_type == "text/csv":
                 if (
@@ -161,6 +166,22 @@ class SecureAttachmentDownloader:
                 if size_bytes > _RESEARCH_CSV_LIMIT_BYTES:
                     raise AttachmentDownloadError(
                         "RESEARCH_CSV_SIZE_LIMIT",
+                        attachment_id=str(_value(item, "attachment_id")),
+                    )
+            if file_type == "xlsx" or mime_type == _XLSX_MIME_TYPE:
+                if (
+                    file_type != "xlsx"
+                    or mime_type != _XLSX_MIME_TYPE
+                    or page_count is not None
+                    or not _has_basename_suffix(filename, ".xlsx")
+                ):
+                    raise AttachmentDownloadError(
+                        "ATTACHMENT_DESCRIPTOR_INVALID",
+                        attachment_id=str(_value(item, "attachment_id")),
+                    )
+                if size_bytes > _RESEARCH_XLSX_LIMIT_BYTES:
+                    raise AttachmentDownloadError(
+                        "RESEARCH_XLSX_SIZE_LIMIT",
                         attachment_id=str(_value(item, "attachment_id")),
                     )
         if declared_total > _TOTAL_LIMIT_BYTES:
@@ -245,6 +266,7 @@ class SecureAttachmentDownloader:
         is_research_text = mime_type == "text/plain"
         is_research_docx = mime_type == _DOCX_MIME_TYPE
         is_research_csv = mime_type == "text/csv"
+        is_research_xlsx = mime_type == _XLSX_MIME_TYPE
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
         received = 0
@@ -298,6 +320,15 @@ class SecureAttachmentDownloader:
                         ):
                             raise AttachmentDownloadError(
                                 "RESEARCH_CSV_SIZE_LIMIT",
+                                attachment_id=attachment_id,
+                                bytes_received=received,
+                            )
+                        if (
+                            is_research_xlsx
+                            and received > _RESEARCH_XLSX_LIMIT_BYTES
+                        ):
+                            raise AttachmentDownloadError(
+                                "RESEARCH_XLSX_SIZE_LIMIT",
                                 attachment_id=attachment_id,
                                 bytes_received=received,
                             )
@@ -369,7 +400,11 @@ class SecureAttachmentDownloader:
                 (
                     _docx_magic_error(destination)
                     if is_research_docx
-                    else "ATTACHMENT_MAGIC_MISMATCH"
+                    else (
+                        _xlsx_magic_error(destination)
+                        if is_research_xlsx
+                        else "ATTACHMENT_MAGIC_MISMATCH"
+                    )
                 ),
                 attachment_id=attachment_id,
                 bytes_received=received,
@@ -429,7 +464,19 @@ def _safe_suffix(mime_type: str) -> str:
         "text/plain": ".txt",
         "text/csv": ".csv",
         _DOCX_MIME_TYPE: ".docx",
+        _XLSX_MIME_TYPE: ".xlsx",
     }.get(mime_type, ".bin")
+
+
+def _has_basename_suffix(value: Any, suffix: str) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) > len(suffix)
+        and "/" not in value
+        and "\\" not in value
+        and "\x00" not in value
+        and value.casefold().endswith(suffix.casefold())
+    )
 
 
 def _matches_magic(path: Path, mime_type: str) -> bool:
@@ -449,6 +496,8 @@ def _matches_magic(path: Path, mime_type: str) -> bool:
         return header.startswith(b"%PDF-")
     if mime_type == _DOCX_MIME_TYPE:
         return header.startswith(b"PK\x03\x04")
+    if mime_type == _XLSX_MIME_TYPE:
+        return header.startswith(b"PK\x03\x04")
     return False
 
 
@@ -462,4 +511,17 @@ def _docx_magic_error(path: Path) -> str:
         "RESEARCH_DOCX_ENCRYPTED"
         if header == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
         else "RESEARCH_DOCX_INVALID"
+    )
+
+
+def _xlsx_magic_error(path: Path) -> str:
+    try:
+        with path.open("rb") as source:
+            header = source.read(8)
+    except OSError:
+        return "RESEARCH_XLSX_INVALID"
+    return (
+        "RESEARCH_XLSX_ENCRYPTED"
+        if header == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        else "RESEARCH_XLSX_INVALID"
     )

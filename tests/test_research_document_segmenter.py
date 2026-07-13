@@ -19,6 +19,13 @@ from domain.models.research_dataset import (
     ExtractedCsvChunk,
     ExtractedCsvRow,
     ExtractedResearchCsv,
+    ExtractedResearchXlsx,
+    ExtractedXlsxChunk,
+    ExtractedXlsxRow,
+    ExtractedXlsxSheet,
+    build_research_xlsx_chunk_payload_sha256,
+    build_research_xlsx_descriptor_sha256,
+    build_research_xlsx_sheet_descriptor_sha256,
 )
 from infrastructure.attachments.research_csv_contract import (
     parse_research_csv_bytes,
@@ -73,6 +80,77 @@ def _csv_extracted(raw: bytes) -> ExtractedResearchCsv:
                 payload_sha256=chunk.sha256,
             )
             for chunk in normalized.chunks
+        ),
+    )
+
+
+def _xlsx_extracted() -> ExtractedResearchXlsx:
+    row = ExtractedXlsxRow(
+        logical_row_number=1,
+        physical_row_start=3,
+        physical_row_end=3,
+        values=("PRIVATE_XLSX_ROW_SENTINEL", "=1+1"),
+        formula_cell_indexes=(1,),
+    )
+    chunk_fields = {
+        "sheet_ordinal": 1,
+        "ordinal": 1,
+        "logical_row_start": 1,
+        "logical_row_end": 1,
+        "physical_row_start": 3,
+        "physical_row_end": 3,
+        "row_count": 1,
+        "non_empty_cell_count": 2,
+        "formula_like_cell_count": 1,
+        "formula_cell_count": 1,
+        "rows": (row,),
+    }
+    chunk = ExtractedXlsxChunk(
+        **chunk_fields,
+        payload_sha256=build_research_xlsx_chunk_payload_sha256(
+            **chunk_fields
+        ),
+    )
+    sheet_fields = {
+        "ordinal": 1,
+        "name": "隐藏表",
+        "visibility": "hidden",
+        "headers": ("患者", "结果"),
+        "header_row_start": 2,
+        "header_row_end": 2,
+        "physical_line_count": 3,
+        "record_count": 2,
+        "data_row_count": 1,
+        "column_count": 2,
+        "non_empty_cell_count": 4,
+        "formula_like_cell_count": 1,
+        "formula_cell_count": 1,
+        "merged_range_count": 1,
+        "missing_value_counts": (0, 0),
+    }
+    sheet = ExtractedXlsxSheet(
+        **sheet_fields,
+        chunks=(chunk,),
+        descriptor_sha256=build_research_xlsx_sheet_descriptor_sha256(
+            **sheet_fields
+        ),
+    )
+    workbook_fields = {
+        "date_system": "1900",
+        "workbook_sheet_count": 2,
+        "empty_sheet_count": 1,
+        "sheets": (sheet,),
+        "total_record_count": 2,
+        "total_data_row_count": 1,
+        "total_non_empty_cell_count": 4,
+        "total_formula_like_cell_count": 1,
+        "total_formula_cell_count": 1,
+        "total_merged_range_count": 1,
+    }
+    return ExtractedResearchXlsx(
+        **workbook_fields,
+        descriptor_sha256=build_research_xlsx_descriptor_sha256(
+            **workbook_fields
         ),
     )
 
@@ -196,6 +274,30 @@ class ResearchDocumentSegmenterTest(unittest.TestCase):
             },
         )
         self.assertLessEqual(segment.token_count, MAX_SEGMENT_TOKENS)
+
+    def test_xlsx_hidden_sheet_generates_summary_without_private_rows(self):
+        [segment] = self.segmenter.segment(
+            self.ingestion_id,
+            _xlsx_extracted(),
+            processor_type="xlsx_dataset_v1",
+        )
+
+        self.assertNotIn("PRIVATE_XLSX_ROW_SENTINEL", segment.content)
+        self.assertNotIn("=1+1", segment.content)
+        self.assertIn('"visibility":"hidden"', segment.content)
+        self.assertIn('"formula_cell_count":1', segment.content)
+        self.assertEqual(segment.sheet_name, "隐藏表")
+        self.assertEqual((segment.row_start, segment.row_end), (2, 3))
+        self.assertIsNone(segment.page_start)
+        self.assertIsNone(segment.page_end)
+        self.assertEqual(
+            segment.metadata,
+            {
+                "block_index": 0,
+                "extraction_method": "xlsx_structured",
+                "extraction_mode": "structured_summary",
+            },
+        )
 
     def test_text_segments_have_stable_ids_no_locators_and_exact_metadata(self):
         extracted = ExtractedResearchText(

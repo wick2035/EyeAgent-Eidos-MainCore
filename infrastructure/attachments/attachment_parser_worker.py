@@ -18,6 +18,8 @@ from infrastructure.attachments.parser_protocol import (
     ResearchPdfManifest,
     ResearchPdfPageManifest,
     ResearchTextManifest,
+    ResearchXlsxChunkManifest,
+    ResearchXlsxManifest,
     WorkerManifest,
     WorkerPageManifest,
     WorkerRequest,
@@ -27,6 +29,12 @@ from infrastructure.attachments.research_csv_contract import (
     RESEARCH_CSV_ERROR_CODES,
     ResearchCsvContractError,
     parse_research_csv_bytes,
+)
+from infrastructure.attachments.research_xlsx_contract import (
+    ResearchXlsxContractError,
+)
+from infrastructure.attachments.research_xlsx_parser import (
+    parse_research_xlsx_path,
 )
 from infrastructure.attachments.research_text_contract import (
     ResearchTextContractError,
@@ -58,6 +66,18 @@ _DOCX_CONTENT_TYPES_PATH = "[Content_Types].xml"
 _DOCX_MAIN_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument."
     "wordprocessingml.document.main+xml"
+)
+_STABLE_RESEARCH_XLSX_ERROR_CODES = frozenset(
+    {
+        "RESEARCH_XLSX_UNAVAILABLE",
+        "RESEARCH_XLSX_SIZE_LIMIT",
+        "RESEARCH_XLSX_INVALID",
+        "RESEARCH_XLSX_ENCRYPTED",
+        "RESEARCH_XLSX_STRUCTURE_LIMIT",
+        "RESEARCH_XLSX_FORMULA_UNSUPPORTED",
+        "RESEARCH_XLSX_CONTENT_LIMIT",
+        "RESEARCH_XLSX_PARSE_FAILED",
+    }
 )
 _CONTENT_TYPES_NS = (
     "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -99,6 +119,7 @@ def parse_attachment_file(
     | ResearchTextManifest
     | ResearchDocxManifest
     | ResearchCsvManifest
+    | ResearchXlsxManifest
 ):
     input_root = _resolve_directory(input_dir)
     output_root = _resolve_directory(output_dir)
@@ -117,6 +138,8 @@ def parse_attachment_file(
 
     if request.profile == "research_csv_v1":
         return _parse_research_csv(input_real, output_root)
+    if request.profile == "research_xlsx_v1":
+        return _parse_research_xlsx(input_real, output_root)
     if request.file_type == "image":
         return _parse_image(request, input_real, output_root)
     if request.profile == "research_text_v1":
@@ -449,6 +472,112 @@ def _remove_research_csv_artifacts(paths: list[Path]) -> None:
             pass
 
 
+def _parse_research_xlsx(
+    input_path: Path,
+    output_root: Path,
+) -> ResearchXlsxManifest:
+    created_paths: list[Path] = []
+    try:
+        normalized = parse_research_xlsx_path(input_path)
+
+        descriptor_bytes = normalized.descriptor_canonical_json_bytes
+        descriptor_path = output_root / "descriptor.json"
+        _write_research_xlsx_artifact(descriptor_path, descriptor_bytes)
+        created_paths.append(descriptor_path)
+
+        chunks: list[ResearchXlsxChunkManifest] = []
+        for chunk, chunk_bytes in zip(
+            normalized.chunks,
+            normalized.chunk_canonical_json_bytes,
+        ):
+            relative_path = (
+                f"sheet-{chunk.sheet_ordinal:03d}-"
+                f"chunk-{chunk.ordinal:05d}.json"
+            )
+            output_path = output_root / relative_path
+            _write_research_xlsx_artifact(output_path, chunk_bytes)
+            created_paths.append(output_path)
+            chunks.append(
+                ResearchXlsxChunkManifest(
+                    sheet_ordinal=chunk.sheet_ordinal,
+                    ordinal=chunk.ordinal,
+                    relative_path=relative_path,
+                    sha256=hashlib.sha256(chunk_bytes).hexdigest(),
+                    byte_count=len(chunk_bytes),
+                    row_count=chunk.row_count,
+                    logical_row_start=chunk.logical_row_start,
+                    logical_row_end=chunk.logical_row_end,
+                    physical_row_start=chunk.physical_row_start,
+                    physical_row_end=chunk.physical_row_end,
+                    non_empty_cell_count=chunk.non_empty_cell_count,
+                    formula_like_cell_count=chunk.formula_like_cell_count,
+                    formula_cell_count=chunk.formula_cell_count,
+                )
+            )
+
+        descriptor = normalized.descriptor
+        return ResearchXlsxManifest(
+            profile="research_xlsx_v1",
+            descriptor_relative_path=descriptor_path.name,
+            descriptor_sha256=hashlib.sha256(descriptor_bytes).hexdigest(),
+            descriptor_byte_count=len(descriptor_bytes),
+            chunks=tuple(chunks),
+            date_system=descriptor.date_system,
+            workbook_sheet_count=descriptor.workbook_sheet_count,
+            empty_sheet_count=descriptor.empty_sheet_count,
+            total_record_count=descriptor.total_record_count,
+            total_data_row_count=descriptor.total_data_row_count,
+            total_non_empty_cell_count=descriptor.total_non_empty_cell_count,
+            total_formula_like_cell_count=(
+                descriptor.total_formula_like_cell_count
+            ),
+            total_formula_cell_count=descriptor.total_formula_cell_count,
+            total_merged_range_count=descriptor.total_merged_range_count,
+        )
+    except ResearchXlsxContractError as exc:
+        _remove_research_xlsx_artifacts(created_paths)
+        error_code = _safe_research_xlsx_error_code(exc.error_code)
+        raise AttachmentParserError(error_code) from None
+    except AttachmentParserError as exc:
+        _remove_research_xlsx_artifacts(created_paths)
+        error_code = _safe_research_xlsx_error_code(exc.error_code)
+        raise AttachmentParserError(error_code) from None
+    except Exception:
+        _remove_research_xlsx_artifacts(created_paths)
+        raise AttachmentParserError("RESEARCH_XLSX_PARSE_FAILED") from None
+
+
+def _write_research_xlsx_artifact(path: Path, content: bytes) -> None:
+    try:
+        file_descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(file_descriptor, "wb") as output:
+            output.write(content)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise AttachmentParserError("RESEARCH_XLSX_PARSE_FAILED") from None
+
+
+def _remove_research_xlsx_artifacts(paths: list[Path]) -> None:
+    for path in reversed(paths):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _safe_research_xlsx_error_code(error_code: object) -> str:
+    if error_code in _STABLE_RESEARCH_XLSX_ERROR_CODES:
+        return str(error_code)
+    return "RESEARCH_XLSX_PARSE_FAILED"
+
+
 def _validate_docx_archive(
     archive: zipfile.ZipFile,
 ) -> dict[str, zipfile.ZipInfo]:
@@ -721,6 +850,7 @@ def _write_output_bundle(
         | ResearchTextManifest
         | ResearchDocxManifest
         | ResearchCsvManifest
+        | ResearchXlsxManifest
     ),
     output_dir: Path | str,
     bundle_path: Path | str,
@@ -788,6 +918,7 @@ def _manifest_artifacts(
         | ResearchTextManifest
         | ResearchDocxManifest
         | ResearchCsvManifest
+        | ResearchXlsxManifest
     ),
 ) -> tuple[tuple[str, str, int | None], ...]:
     if isinstance(manifest, WorkerManifest):
@@ -823,6 +954,37 @@ def _manifest_artifacts(
             column_count=manifest.column_count,
             non_empty_cell_count=manifest.non_empty_cell_count,
             formula_like_cell_count=manifest.formula_like_cell_count,
+        )
+        artifacts = [
+            (
+                manifest.descriptor_relative_path,
+                manifest.descriptor_sha256,
+                manifest.descriptor_byte_count,
+            )
+        ]
+        artifacts.extend(
+            (chunk.relative_path, chunk.sha256, chunk.byte_count)
+            for chunk in manifest.chunks
+        )
+        return tuple(artifacts)
+    if isinstance(manifest, ResearchXlsxManifest):
+        manifest = ResearchXlsxManifest(
+            profile=manifest.profile,
+            descriptor_relative_path=manifest.descriptor_relative_path,
+            descriptor_sha256=manifest.descriptor_sha256,
+            descriptor_byte_count=manifest.descriptor_byte_count,
+            chunks=tuple(manifest.chunks),
+            date_system=manifest.date_system,
+            workbook_sheet_count=manifest.workbook_sheet_count,
+            empty_sheet_count=manifest.empty_sheet_count,
+            total_record_count=manifest.total_record_count,
+            total_data_row_count=manifest.total_data_row_count,
+            total_non_empty_cell_count=manifest.total_non_empty_cell_count,
+            total_formula_like_cell_count=(
+                manifest.total_formula_like_cell_count
+            ),
+            total_formula_cell_count=manifest.total_formula_cell_count,
+            total_merged_range_count=manifest.total_merged_range_count,
         )
         artifacts = [
             (
@@ -931,17 +1093,24 @@ def main() -> int:
             and error_code not in RESEARCH_CSV_ERROR_CODES
         ):
             error_code = "RESEARCH_CSV_PARSE_FAILED"
+        if (
+            request is not None
+            and request.profile == "research_xlsx_v1"
+            and error_code not in _STABLE_RESEARCH_XLSX_ERROR_CODES
+        ):
+            error_code = _safe_research_xlsx_error_code(error_code)
         sys.stderr.write(
             json.dumps({"error_code": error_code}, separators=(",", ":"))
             + "\n"
         )
         return 2
     except BaseException:
-        error_code = (
-            "RESEARCH_CSV_PARSE_FAILED"
-            if request is not None and request.profile == "research_csv_v1"
-            else "ATTACHMENT_WORKER_FAILED"
-        )
+        if request is not None and request.profile == "research_csv_v1":
+            error_code = "RESEARCH_CSV_PARSE_FAILED"
+        elif request is not None and request.profile == "research_xlsx_v1":
+            error_code = "RESEARCH_XLSX_PARSE_FAILED"
+        else:
+            error_code = "ATTACHMENT_WORKER_FAILED"
         sys.stderr.write(
             json.dumps({"error_code": error_code}, separators=(",", ":"))
             + "\n"

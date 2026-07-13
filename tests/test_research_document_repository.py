@@ -11,9 +11,16 @@ from domain.models.research_dataset import (
     ExtractedCsvChunk,
     ExtractedCsvRow,
     ExtractedResearchCsv,
+    ExtractedResearchXlsx,
+    ExtractedXlsxChunk,
+    ExtractedXlsxRow,
+    ExtractedXlsxSheet,
     build_research_csv_chunk_payload_sha256,
     build_research_csv_descriptor_sha256,
     build_research_dataset_materialization,
+    build_research_xlsx_chunk_payload_sha256,
+    build_research_xlsx_descriptor_sha256,
+    build_research_xlsx_sheet_descriptor_sha256,
 )
 from domain.models.research_document import (
     IngestionIdentity,
@@ -136,6 +143,16 @@ def _csv_ingestion_row(*, status="processing", attempt_count=1):
     return row
 
 
+def _xlsx_ingestion_row(*, status="processing", attempt_count=1):
+    row = _ingestion_row(status=status, attempt_count=attempt_count)
+    row.update(
+        processor_type="xlsx_dataset_v1",
+        extractor_version="research_xlsx_v1",
+        page_count=0,
+    )
+    return row
+
+
 def _segment(ordinal=0, content="第一段科研材料"):
     return ResearchDocumentSegmentEntity(
         ingestion_id="11111111-1111-5111-8111-111111111111",
@@ -215,6 +232,117 @@ def _dataset_materialization(
     return build_research_dataset_materialization(ingestion_id, extracted)
 
 
+def _xlsx_dataset_materialization(
+    ingestion_id="11111111-1111-5111-8111-111111111111",
+):
+    def row(logical, physical, values, formulas=()):
+        return ExtractedXlsxRow(
+            logical_row_number=logical,
+            physical_row_start=physical,
+            physical_row_end=physical,
+            values=values,
+            formula_cell_indexes=formulas,
+        )
+
+    def sheet(ordinal, name, visibility, headers, rows, merged_count=0):
+        chunk_fields = {
+            "sheet_ordinal": ordinal,
+            "ordinal": 1,
+            "logical_row_start": 1,
+            "logical_row_end": len(rows),
+            "physical_row_start": 2,
+            "physical_row_end": len(rows) + 1,
+            "row_count": len(rows),
+            "non_empty_cell_count": sum(
+                value != "" for current in rows for value in current.values
+            ),
+            "formula_like_cell_count": sum(
+                value.lstrip().startswith(("=", "+", "-", "@"))
+                for current in rows
+                for value in current.values
+            ),
+            "formula_cell_count": sum(
+                len(current.formula_cell_indexes) for current in rows
+            ),
+            "rows": rows,
+        }
+        chunk = ExtractedXlsxChunk(
+            **chunk_fields,
+            payload_sha256=build_research_xlsx_chunk_payload_sha256(
+                **chunk_fields
+            ),
+        )
+        descriptor_fields = {
+            "ordinal": ordinal,
+            "name": name,
+            "visibility": visibility,
+            "headers": headers,
+            "header_row_start": 1,
+            "header_row_end": 1,
+            "physical_line_count": len(rows) + 1,
+            "record_count": len(rows) + 1,
+            "data_row_count": len(rows),
+            "column_count": len(headers),
+            "non_empty_cell_count": len(headers)
+            + chunk.non_empty_cell_count,
+            "formula_like_cell_count": sum(
+                header.lstrip().startswith(("=", "+", "-", "@"))
+                for header in headers
+            )
+            + chunk.formula_like_cell_count,
+            "formula_cell_count": chunk.formula_cell_count,
+            "merged_range_count": merged_count,
+            "missing_value_counts": tuple(
+                sum(current.values[column] == "" for current in rows)
+                for column in range(len(headers))
+            ),
+        }
+        return ExtractedXlsxSheet(
+            **descriptor_fields,
+            chunks=(chunk,),
+            descriptor_sha256=build_research_xlsx_sheet_descriptor_sha256(
+                **descriptor_fields
+            ),
+        )
+
+    sheets = (
+        sheet(
+            0,
+            "Visible",
+            "visible",
+            ("name", "value"),
+            (row(1, 2, ("Alice", "=1+1"), (1,)),),
+            1,
+        ),
+        sheet(
+            1,
+            "Hidden",
+            "veryHidden",
+            ("name", "note"),
+            (row(1, 2, ("Bob", "")),),
+        ),
+    )
+    workbook_fields = {
+        "date_system": "1900",
+        "workbook_sheet_count": 2,
+        "empty_sheet_count": 0,
+        "sheets": sheets,
+        "total_record_count": 4,
+        "total_data_row_count": 2,
+        "total_non_empty_cell_count": 7,
+        "total_formula_like_cell_count": 1,
+        "total_formula_cell_count": 1,
+        "total_merged_range_count": 1,
+    }
+    extracted = ExtractedResearchXlsx(
+        **workbook_fields,
+        descriptor_sha256=build_research_xlsx_descriptor_sha256(
+            **workbook_fields
+        ),
+    )
+    return build_research_dataset_materialization(ingestion_id, extracted)
+
+
 def _csv_segment():
     return ResearchDocumentSegmentEntity(
         ingestion_id="11111111-1111-5111-8111-111111111111",
@@ -225,6 +353,19 @@ def _csv_segment():
         row_end=1,
         token_count=10,
         metadata={"extraction_mode": "structured"},
+    )
+
+
+def _xlsx_segment():
+    return ResearchDocumentSegmentEntity(
+        ingestion_id="11111111-1111-5111-8111-111111111111",
+        ordinal=0,
+        content="XLSX 数据集结构摘要",
+        sheet_name="Visible",
+        row_start=1,
+        row_end=2,
+        token_count=10,
+        metadata={"extraction_mode": "structured_summary"},
     )
 
 
@@ -609,10 +750,16 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
                 dataset.dataset.id,
                 dataset.dataset.ingestion_id,
                 "csv",
+                None,
+                None,
+                None,
+                None,
                 1,
                 1,
                 2,
                 4,
+                0,
+                0,
                 0,
                 dataset.dataset.descriptor_sha256,
             ),
@@ -622,8 +769,9 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             for operation in normalized_operations
             if "insert into research_dataset_sheet" in operation[1]
         )
-        self.assertEqual(sheet_insert[2][0][4], '["患者","结果"]')
-        self.assertEqual(sheet_insert[2][0][11], "[0,0]")
+        self.assertEqual(sheet_insert[2][0][4], "visible")
+        self.assertEqual(sheet_insert[2][0][5], '["患者","结果"]')
+        self.assertEqual(sheet_insert[2][0][12], "[0,0]")
         chunk_insert = next(
             operation
             for operation in normalized_operations
@@ -635,14 +783,76 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
             sort_keys=True,
             separators=(",", ":"),
         )
-        self.assertEqual(chunk_insert[2][0][10], expected_rows_json)
-        self.assertIn("张三", chunk_insert[2][0][10])
+        self.assertEqual(chunk_insert[2][0][11], expected_rows_json)
+        self.assertIn("张三", chunk_insert[2][0][11])
         ready_update = next(
             operation
             for operation in normalized_operations
             if "set status = 'ready'" in operation[1]
         )
         self.assertEqual(ready_update[2][0], 0)
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_complete_persists_xlsx_multisheet_formula_merge_graph(self):
+        processing = _xlsx_ingestion_row(attempt_count=2)
+        dataset = _xlsx_dataset_materialization()
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 1],
+            execute_many_results=[2, 2, 1],
+        )
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            processing["id"],
+            2,
+            [_xlsx_segment()],
+            dataset,
+        )
+
+        self.assertTrue(completed)
+        normalized_operations = [
+            (operation, " ".join(sql.split()).lower(), params, depth)
+            for operation, sql, params, depth in db.operations
+        ]
+        dataset_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset (" in operation[1]
+        )
+        self.assertEqual(dataset_insert[2][2], "xlsx")
+        self.assertEqual(dataset_insert[2][3:7], ("1900", 2, 0, 4))
+        self.assertEqual(dataset_insert[2][7:14], (2, 2, 4, 7, 1, 1, 1))
+        sheet_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_sheet" in operation[1]
+        )
+        self.assertEqual(len(sheet_insert[2]), 2)
+        self.assertEqual(
+            [params[4] for params in sheet_insert[2]],
+            ["visible", "veryHidden"],
+        )
+        self.assertEqual([params[15] for params in sheet_insert[2]], [1, 0])
+        self.assertEqual([params[16] for params in sheet_insert[2]], [1, 0])
+        chunk_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_row_chunk" in operation[1]
+        )
+        self.assertEqual([params[10] for params in chunk_insert[2]], [1, 0])
+        self.assertIn('"formula_cell_indexes":[1]', chunk_insert[2][0][11])
+        self.assertTrue(
+            all(
+                operation[3] == 1
+                for operation in db.operations
+                if operation[0] in {"execute", "execute_many"}
+            )
+        )
+        for operation, sql, params, _ in db.operations:
+            if "insert into research_dataset" not in sql.lower():
+                continue
+            sample_params = params[0] if operation == "execute_many" else params
+            self.assertEqual(sql.count("%s"), len(sample_params))
         self.assertEqual(db.transaction_events, ["begin", "commit"])
 
     def test_complete_active_attempt_miss_with_dataset_performs_no_write(self):
@@ -700,12 +910,31 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
     def test_complete_rejects_dataset_and_processor_type_mismatch(self):
         cases = (
             (_csv_ingestion_row(attempt_count=2), [_csv_segment()], None),
+            (_xlsx_ingestion_row(attempt_count=2), [_xlsx_segment()], None),
             (_ingestion_row(attempt_count=2), [_segment()], _dataset_materialization()),
+            (
+                _ingestion_row(attempt_count=2),
+                [_segment()],
+                _xlsx_dataset_materialization(),
+            ),
+            (
+                _csv_ingestion_row(attempt_count=2),
+                [_csv_segment()],
+                _xlsx_dataset_materialization(),
+            ),
+            (
+                _xlsx_ingestion_row(attempt_count=2),
+                [_xlsx_segment()],
+                _dataset_materialization(),
+            ),
         )
         for processing, segments, dataset in cases:
             with self.subTest(processor_type=processing["processor_type"]):
                 db = ScriptedDB(fetch_one_results=[processing])
-                with self.assertRaisesRegex(ValueError, "processor_type"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "processor_type|file_type",
+                ):
                     ResearchDocumentRepositoryImpl(db=db).complete(
                         processing["id"],
                         2,
