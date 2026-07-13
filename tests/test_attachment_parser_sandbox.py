@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -19,8 +20,10 @@ from infrastructure.attachments import parser_sandbox as sandbox_module
 from infrastructure.attachments.parser_protocol import AttachmentParserError
 from infrastructure.attachments.parser_protocol import (
     ParsedResearchPdf,
+    ParsedResearchText,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
+    ResearchTextManifest,
 )
 from infrastructure.attachments.parser_sandbox import (
     AttachmentParserSandbox,
@@ -33,7 +36,7 @@ from utils.pdf_utils import RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS, fitz
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_IMAGE = "eyeagent/attachment-parser:research-c1"
+_IMAGE = "eyeagent/attachment-parser:research-c2a"
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 
 
@@ -108,6 +111,9 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             page_count=None,
             path=source,
         )
+
+    def test_default_image_uses_research_c2a_tag(self):
+        self.assertEqual(AttachmentParserSandbox()._image, _IMAGE)
 
     async def test_setup_failure_removes_partially_created_request_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -701,6 +707,171 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                     expected_page_count=1,
                 )
 
+    async def test_host_validates_research_text_manifest_and_canonical_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_bundle = root / "output.bundle"
+            canonical_text = "Caf\u00e9\nline"
+            canonical = canonical_text.encode("utf-8")
+            manifest = ResearchTextManifest(
+                profile="research_text_v1",
+                text_relative_path="document.txt",
+                text_sha256=hashlib.sha256(canonical).hexdigest(),
+                character_count=len(canonical_text),
+            )
+
+            def write_bundle(content=canonical, *, extra=False):
+                with zipfile.ZipFile(
+                    output_bundle,
+                    mode="w",
+                    compression=zipfile.ZIP_STORED,
+                ) as archive:
+                    archive.writestr("document.txt", content)
+                    if extra:
+                        archive.writestr("extra.bin", b"extra")
+                os.chmod(output_bundle, 0o600)
+
+            write_bundle()
+            parsed = sandbox_module._read_validated_research_text_bundle(
+                output_bundle,
+                manifest.to_json_bytes(),
+            )
+            self.assertEqual(parsed.text, canonical_text)
+            self.assertEqual(parsed.utf8_bytes, canonical)
+            self.assertEqual(parsed.sha256, manifest.text_sha256)
+            self.assertEqual(parsed.character_count, manifest.character_count)
+
+            decoded = json.loads(manifest.to_json_bytes())
+            invalid_manifests = (
+                (
+                    {**decoded, "profile": "research_pdf_v1"},
+                    "ATTACHMENT_WORKER_MANIFEST_INVALID",
+                ),
+                (
+                    {**decoded, "unknown": True},
+                    "ATTACHMENT_WORKER_MANIFEST_INVALID",
+                ),
+                (
+                    {**decoded, "text_relative_path": "../document.txt"},
+                    "ATTACHMENT_OUTPUT_PATH_INVALID",
+                ),
+                (
+                    {**decoded, "text_sha256": "0" * 64},
+                    "ATTACHMENT_OUTPUT_HASH_MISMATCH",
+                ),
+                (
+                    {**decoded, "character_count": len(canonical_text) + 1},
+                    "ATTACHMENT_OUTPUT_TEXT_INVALID",
+                ),
+            )
+            for mutation, error_code in invalid_manifests:
+                with self.subTest(mutation=mutation):
+                    write_bundle()
+                    with self.assertRaisesRegex(AttachmentParserError, error_code):
+                        sandbox_module._read_validated_research_text_bundle(
+                            output_bundle,
+                            json.dumps(mutation).encode("utf-8"),
+                        )
+
+            invalid_utf8 = b"\xff"
+            invalid_utf8_manifest = ResearchTextManifest(
+                profile="research_text_v1",
+                text_relative_path="document.txt",
+                text_sha256=hashlib.sha256(invalid_utf8).hexdigest(),
+                character_count=1,
+            )
+            write_bundle(invalid_utf8)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "RESEARCH_TXT_ENCODING_UNSUPPORTED",
+            ):
+                sandbox_module._read_validated_research_text_bundle(
+                    output_bundle,
+                    invalid_utf8_manifest.to_json_bytes(),
+                )
+
+            noncanonical = b"Cafe\xcc\x81\r\nline"
+            noncanonical_manifest = ResearchTextManifest(
+                profile="research_text_v1",
+                text_relative_path="document.txt",
+                text_sha256=hashlib.sha256(noncanonical).hexdigest(),
+                character_count=len(noncanonical.decode("utf-8")),
+            )
+            write_bundle(noncanonical)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_TEXT_INVALID",
+            ):
+                sandbox_module._read_validated_research_text_bundle(
+                    output_bundle,
+                    noncanonical_manifest.to_json_bytes(),
+                )
+
+            write_bundle(extra=True)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_PATH_INVALID",
+            ):
+                sandbox_module._read_validated_research_text_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                )
+
+            write_bundle()
+            with patch(
+                "infrastructure.attachments.parser_sandbox._MAX_OUTPUT_BYTES",
+                output_bundle.stat().st_size - 1,
+            ):
+                with self.assertRaisesRegex(
+                    AttachmentParserError,
+                    "ATTACHMENT_OUTPUT_LIMIT",
+                ):
+                    sandbox_module._read_validated_research_text_bundle(
+                        output_bundle,
+                        manifest.to_json_bytes(),
+                    )
+
+    async def test_host_accepts_canonical_text_expanded_beyond_raw_size_limit(self):
+        raw_text = "\u0344" * 250_000
+        raw = raw_text.encode("utf-8")
+        canonical_text = unicodedata.normalize("NFC", raw_text)
+        canonical = canonical_text.encode("utf-8")
+        self.assertEqual(len(raw), 500_000)
+        self.assertEqual(len(canonical_text), 500_000)
+        self.assertEqual(len(canonical), 1_000_000)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_bundle = Path(temporary) / "output.bundle"
+            manifest = ResearchTextManifest(
+                profile="research_text_v1",
+                text_relative_path="document.txt",
+                text_sha256=hashlib.sha256(canonical).hexdigest(),
+                character_count=len(canonical_text),
+            )
+            with zipfile.ZipFile(
+                output_bundle,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+            ) as archive:
+                archive.writestr("document.txt", canonical)
+            os.chmod(output_bundle, 0o600)
+
+            try:
+                parsed = sandbox_module._read_validated_research_text_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                )
+            except AttachmentParserError as error:
+                self.fail(
+                    "canonical TXT artifact within the character limit "
+                    f"must be accepted: {error.error_code}"
+                )
+
+        self.assertEqual(parsed.text, canonical_text)
+        self.assertEqual(parsed.utf8_bytes, canonical)
+        self.assertEqual(parsed.sha256, manifest.text_sha256)
+        self.assertEqual(parsed.character_count, 500_000)
+
     async def test_host_rejects_more_than_twenty_research_ocr_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             output_bundle = Path(temporary) / "output.bundle"
@@ -1051,6 +1222,69 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(parsed.pages[0].ocr_image_content, image)
             self.assertEqual(list((root / "sandbox").iterdir()), [])
 
+    async def test_parse_research_text_profile_returns_canonical_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.txt"
+            source.write_bytes("Caf\u00e9\nline".encode("utf-8"))
+            runner = root / "research-text-runner.py"
+            runner.write_text(
+                "#!" + sys.executable + "\n"
+                "import hashlib, json, sys, zipfile\n"
+                "request = json.loads(sys.stdin.buffer.read())\n"
+                "if request != {'input_filename': 'attachment.bin', 'file_type': 'text', "
+                "'mime_type': 'text/plain', 'declared_page_count': None, "
+                "'profile': 'research_text_v1'}:\n"
+                "    raise SystemExit(9)\n"
+                "text = 'Caf\\u00e9\\nline'.encode('utf-8')\n"
+                "with zipfile.ZipFile(sys.argv[2], 'w', compression=zipfile.ZIP_STORED) as archive:\n"
+                "    archive.writestr('document.txt', text)\n"
+                "manifest = {'profile': 'research_text_v1', 'text_relative_path': 'document.txt', "
+                "'text_sha256': hashlib.sha256(text).hexdigest(), 'character_count': 9}\n"
+                "sys.stdout.write(json.dumps(manifest, separators=(',', ':')))\n",
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o700)
+            payload = source.read_bytes()
+            downloaded = DownloadedAttachment(
+                attachment_id="research-text-attachment",
+                analysis_attempt_id="research-text-attempt",
+                file_type="text",
+                filename="notes.txt",
+                mime_type="text/plain",
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                page_count=None,
+                path=source,
+                document_version=7,
+            )
+            sandbox = AttachmentParserSandbox(
+                runner_path=runner,
+                docker_binary="true",
+                temp_root=root / "sandbox",
+            )
+            sandbox.preflight = AsyncMock()
+            with patch(
+                "infrastructure.attachments.parser_sandbox._cleanup_container",
+                new=AsyncMock(),
+            ):
+                parsed = await sandbox.parse(
+                    downloaded,
+                    profile="research_text_v1",
+                )
+
+            self.assertIsInstance(parsed, ParsedResearchText)
+            self.assertEqual(parsed.attachment_id, "research-text-attachment")
+            self.assertEqual(parsed.document_version, 7)
+            self.assertEqual(parsed.mime_type, "text/plain")
+            self.assertEqual(parsed.text, "Caf\u00e9\nline")
+            self.assertEqual(
+                parsed.text_sha256,
+                hashlib.sha256(payload).hexdigest(),
+            )
+            self.assertEqual(parsed.character_count, len("Caf\u00e9\nline"))
+            self.assertEqual(list((root / "sandbox").iterdir()), [])
+
     async def test_research_worker_error_code_is_preserved_by_host(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1281,6 +1515,96 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(parsed.pages[1].text, "")
         self.assertTrue(parsed.pages[1].ocr_image_content.startswith(b"\xff\xd8"))
         self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_text_returns_normalized_utf8_and_metadata(self):
+        source = self.root / "research-notes.txt"
+        source.write_bytes(b"\xef\xbb\xbfCafe\xcc\x81\r\nline")
+        os.chmod(source, 0o600)
+        payload = source.read_bytes()
+        downloaded = DownloadedAttachment(
+            attachment_id="research-text-integration",
+            analysis_attempt_id="research-text-integration-attempt",
+            file_type="text",
+            filename="notes.txt",
+            mime_type="text/plain",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=None,
+            path=source,
+            document_version=11,
+        )
+        label = "integration-research-text"
+        sandbox_root = self.root / "sandbox-research-text"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: label,
+        )
+
+        parsed = await sandbox.parse(downloaded, profile="research_text_v1")
+
+        canonical_text = "Caf\u00e9\nline"
+        canonical = canonical_text.encode("utf-8")
+        self.assertIsInstance(parsed, ParsedResearchText)
+        self.assertEqual(parsed.document_version, 11)
+        self.assertEqual(parsed.text, canonical_text)
+        self.assertEqual(parsed.text_sha256, hashlib.sha256(canonical).hexdigest())
+        self.assertEqual(parsed.character_count, len(canonical_text))
+        self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
+
+    async def test_research_text_accepts_nfc_expansion_beyond_raw_size_limit(self):
+        raw_text = "\u0344" * 250_000
+        payload = raw_text.encode("utf-8")
+        canonical_text = unicodedata.normalize("NFC", raw_text)
+        canonical = canonical_text.encode("utf-8")
+        self.assertEqual(len(payload), 500_000)
+        self.assertEqual(len(canonical_text), 500_000)
+        self.assertEqual(len(canonical), 1_000_000)
+
+        source = self.root / "research-nfc-expansion.txt"
+        source.write_bytes(payload)
+        os.chmod(source, 0o600)
+        downloaded = DownloadedAttachment(
+            attachment_id="research-text-nfc-expansion",
+            analysis_attempt_id="research-text-nfc-expansion-attempt",
+            file_type="text",
+            filename="nfc-expansion.txt",
+            mime_type="text/plain",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=None,
+            path=source,
+            document_version=12,
+        )
+        sandbox_root = self.root / "sandbox-research-text-nfc-expansion"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: "integration-research-text-nfc-expansion",
+        )
+
+        try:
+            parsed = await sandbox.parse(
+                downloaded,
+                profile="research_text_v1",
+            )
+        except AttachmentParserError as error:
+            self.fail(
+                "raw TXT within the upload and character limits "
+                f"must survive canonical expansion: {error.error_code}"
+            )
+
+        self.assertIsInstance(parsed, ParsedResearchText)
+        self.assertEqual(parsed.document_version, 12)
+        self.assertEqual(parsed.text, canonical_text)
+        self.assertEqual(parsed.text_sha256, hashlib.sha256(canonical).hexdigest())
+        self.assertEqual(parsed.character_count, 500_000)
+        self.assertEqual(
+            self._containers_for_label(
+                "integration-research-text-nfc-expansion"
+            ),
+            (),
+        )
         self.assertEqual(list(sandbox_root.iterdir()), [])
 
     async def test_research_empty_password_encrypted_pdf_preserves_error_code(self):

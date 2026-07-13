@@ -23,9 +23,16 @@ from infrastructure.attachments.parser_protocol import (
     ParsedAttachmentPage,
     ParsedResearchPdf,
     ParsedResearchPdfPage,
+    ParsedResearchText,
     ResearchPdfManifest,
+    ResearchTextManifest,
     WorkerManifest,
     WorkerRequest,
+)
+from infrastructure.attachments.research_text_contract import (
+    NormalizedResearchText,
+    ResearchTextContractError,
+    validate_canonical_research_text_bytes,
 )
 from utils.pdf_utils import (
     RESEARCH_PDF_MAX_OCR_PAGES,
@@ -38,7 +45,7 @@ from utils.pdf_utils import (
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RUNNER = _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
-_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c1"
+_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c2a"
 _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ERROR_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _SAFE_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
@@ -127,7 +134,7 @@ class AttachmentParserSandbox:
         self,
         downloaded: Any,
         profile: str = "assistant_visual_v1",
-    ) -> ParsedAttachment | ParsedResearchPdf:
+    ) -> ParsedAttachment | ParsedResearchPdf | ParsedResearchText:
         await self.preflight()
         self._ensure_temp_root()
         request_directory: Path | None = None
@@ -231,6 +238,19 @@ class AttachmentParserSandbox:
                     document_version=_value(downloaded, "document_version"),
                     mime_type=str(_value(downloaded, "mime_type")),
                     pages=research_pages,
+                )
+            if profile == "research_text_v1":
+                research_text = _read_validated_research_text_bundle(
+                    output_bundle,
+                    stdout,
+                )
+                return ParsedResearchText(
+                    attachment_id=str(_value(downloaded, "attachment_id")),
+                    document_version=_value(downloaded, "document_version"),
+                    mime_type=str(_value(downloaded, "mime_type")),
+                    text=research_text.text,
+                    text_sha256=research_text.sha256,
+                    character_count=research_text.character_count,
                 )
             pages = _read_validated_bundle(
                 output_bundle,
@@ -677,6 +697,60 @@ def _read_validated_research_bundle(
     except Exception as exc:
         raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
     return tuple(parsed_pages)
+
+
+def _read_validated_research_text_bundle(
+    output_bundle: Path,
+    stdout: bytes,
+) -> NormalizedResearchText:
+    if len(stdout) > _MAX_STDOUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    manifest = ResearchTextManifest.from_json_bytes(stdout)
+    try:
+        metadata = output_bundle.lstat()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    if (
+        output_bundle.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if metadata.st_size > _MAX_OUTPUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+
+    expected_names = {manifest.text_relative_path}
+    _preflight_zip_bundle(
+        output_bundle,
+        file_size=metadata.st_size,
+        expected_names=expected_names,
+    )
+    try:
+        with zipfile.ZipFile(output_bundle, mode="r") as archive:
+            entries = archive.infolist()
+            actual_names = {entry.filename for entry in entries}
+            if len(entries) != 1 or actual_names != expected_names:
+                raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+            content = _read_research_bundle_entry(archive, entries[0])
+    except AttachmentParserError:
+        raise
+    except Exception as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != manifest.text_sha256:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
+    try:
+        normalized = validate_canonical_research_text_bytes(content)
+    except ResearchTextContractError as exc:
+        raise AttachmentParserError(exc.error_code) from exc
+    if (
+        normalized.utf8_bytes != content
+        or normalized.sha256 != manifest.text_sha256
+        or normalized.character_count != manifest.character_count
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_TEXT_INVALID")
+    return normalized
 
 
 def _read_research_bundle_entry(

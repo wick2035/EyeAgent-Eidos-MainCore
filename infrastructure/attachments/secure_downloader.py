@@ -19,11 +19,16 @@ from infrastructure.attachments.config import (
     AttachmentConfigurationError,
     AttachmentDownloadSettings,
 )
+from infrastructure.attachments.research_text_contract import (
+    ResearchTextContractError,
+    normalize_research_text_bytes,
+)
 
 
 logger = logging.getLogger(__name__)
 
 _TOTAL_LIMIT_BYTES = 40 * 1024 * 1024
+_RESEARCH_TEXT_LIMIT_BYTES = 512 * 1024
 _DEFAULT_CHUNK_SIZE = 64 * 1024
 
 
@@ -210,6 +215,7 @@ class SecureAttachmentDownloader:
         attachment_id = str(_value(descriptor, "attachment_id"))
         expected_size = _strict_descriptor_integer(descriptor, "size_bytes")
         mime_type = str(_value(descriptor, "mime_type"))
+        is_research_text = mime_type == "text/plain"
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
         received = 0
@@ -239,7 +245,19 @@ class SecureAttachmentDownloader:
                 with os.fdopen(file_descriptor, "wb") as output:
                     async for chunk in response.content.iter_chunked(self._chunk_size):
                         received += len(chunk)
-                        if received > expected_size or received > _TOTAL_LIMIT_BYTES:
+                        if (
+                            is_research_text
+                            and received > _RESEARCH_TEXT_LIMIT_BYTES
+                        ):
+                            raise AttachmentDownloadError(
+                                "RESEARCH_TXT_SIZE_LIMIT",
+                                attachment_id=attachment_id,
+                                bytes_received=received,
+                            )
+                        if (
+                            received > expected_size
+                            or received > _TOTAL_LIMIT_BYTES
+                        ):
                             raise AttachmentDownloadError(
                                 "ATTACHMENT_STREAM_LIMIT_EXCEEDED",
                                 attachment_id=attachment_id,
@@ -274,7 +292,32 @@ class SecureAttachmentDownloader:
                 attachment_id=attachment_id,
                 bytes_received=received,
             )
-        if not _matches_magic(destination, mime_type):
+        if is_research_text:
+            text_content: bytes | None = None
+            try:
+                with destination.open("rb") as source:
+                    text_content = source.read(_RESEARCH_TEXT_LIMIT_BYTES)
+            except OSError:
+                pass
+            if text_content is None:
+                raise AttachmentDownloadError(
+                    "ATTACHMENT_DOWNLOAD_FAILED",
+                    attachment_id=attachment_id,
+                    bytes_received=received,
+                )
+
+            text_error_code: str | None = None
+            try:
+                normalize_research_text_bytes(text_content)
+            except ResearchTextContractError as exc:
+                text_error_code = exc.error_code
+            if text_error_code is not None:
+                raise AttachmentDownloadError(
+                    text_error_code,
+                    attachment_id=attachment_id,
+                    bytes_received=received,
+                )
+        elif not _matches_magic(destination, mime_type):
             raise AttachmentDownloadError(
                 "ATTACHMENT_MAGIC_MISMATCH",
                 attachment_id=attachment_id,
@@ -332,6 +375,7 @@ def _safe_suffix(mime_type: str) -> str:
         "image/png": ".png",
         "image/webp": ".webp",
         "application/pdf": ".pdf",
+        "text/plain": ".txt",
     }.get(mime_type, ".bin")
 
 

@@ -9,11 +9,15 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
+from application.services.plain_text_processor import PlainTextProcessor
 from application.services.research_document_segmenter import (
     MAX_SEGMENT_TOKENS,
     estimate_tokens_v1,
 )
-from domain.models.research_document import ExtractedResearchPage
+from domain.models.research_document import (
+    ExtractedResearchPage,
+    ExtractedResearchText,
+)
 from infrastructure.attachments.parser_protocol import (
     ParsedAttachment,
     ParsedAttachmentPage,
@@ -151,16 +155,30 @@ class ResearchVisionGateway:
 
 
 class ResearchDocumentProcessor:
-    def __init__(self, sandbox: Any, vision_gateway: Any | None = None) -> None:
+    def __init__(
+        self,
+        sandbox: Any,
+        vision_gateway: Any | None = None,
+        *,
+        plain_text_processor: Any | None = None,
+    ) -> None:
         self._sandbox = sandbox
         self._vision_gateway = vision_gateway or ResearchVisionGateway()
+        self._plain_text_processor = plain_text_processor or PlainTextProcessor(
+            sandbox
+        )
 
-    async def process(self, downloaded: Any) -> list[ExtractedResearchPage]:
+    async def process(
+        self,
+        downloaded: Any,
+    ) -> list[ExtractedResearchPage] | ExtractedResearchText:
         file_type = _value(downloaded, "file_type")
         if file_type == "pdf":
             return await self.process_pdf(downloaded)
         if file_type == "image":
             return await self.process_image(downloaded)
+        if file_type == "text":
+            return await self._plain_text_processor.process(downloaded)
         raise ResearchDocumentProcessingError("RESEARCH_DOCUMENT_VISION_FAILED")
 
     async def process_pdf(

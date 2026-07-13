@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 from agents.graph.attachment_citations import (
     CITATION_TOOL_NAME,
     AttachmentCitationSelection,
+    build_attachment_citation_fallback,
     build_attachment_citation_tool,
     build_attachment_citations,
 )
@@ -18,7 +20,11 @@ from application.services.research_document_context_selector import (
     ResearchContextBlock,
     ResearchDocumentContextSelection,
 )
+from application.services.research_document_segmenter import (
+    ResearchDocumentSegmenter,
+)
 from domain.models.chat_entity import MessageContext
+from domain.models.research_document import ExtractedResearchText
 from utils.transient_attachment_context import (
     TransientResearchDocumentContext,
     bind_research_document_context,
@@ -49,6 +55,54 @@ def _candidate(
 
 
 class AttachmentCitationBuilderTest(unittest.TestCase):
+    def test_plain_text_whitespace_chunks_do_not_break_fallback(self):
+        text = " " * 7500 + "evidence"
+        extracted = ExtractedResearchText(
+            text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            character_count=len(text),
+        )
+        segments = ResearchDocumentSegmenter().segment_text(
+            "11111111-1111-5111-8111-111111111111",
+            extracted,
+        )
+        candidates = tuple(
+            _candidate(
+                segment.id,
+                attachment_id="attachment-text",
+                page_start=None,
+                page_end=None,
+                content=segment.content,
+            )
+            for segment in segments
+        )
+
+        citations = build_attachment_citation_fallback(candidates)
+
+        self.assertEqual(
+            [citation["excerpt"] for citation in citations],
+            ["evidence"],
+        )
+
+    def test_plain_text_candidate_uses_file_locator_without_page_fields(self):
+        [citation] = build_attachment_citations(
+            ["segment-text"],
+            (
+                _candidate(
+                    "segment-text",
+                    attachment_id="attachment-text",
+                    document_version=9,
+                    page_start=None,
+                    page_end=None,
+                    content="TXT 科研正文",
+                ),
+            ),
+        )
+
+        self.assertEqual(citation["locator"], {"type": "file"})
+        self.assertNotIn("page_start", citation["locator"])
+        self.assertNotIn("page_end", citation["locator"])
+
     def test_page_file_mapping_excerpt_cap_and_stable_selected_order(self):
         long_content = "  " + "证 据\n" * 100 + "尾部"
         candidates = (

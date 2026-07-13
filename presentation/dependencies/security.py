@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -34,6 +36,40 @@ async def legacy_route_error_handler(
 
 def get_current_principal(request: Request) -> CurrentPrincipal | None:
     return getattr(request.state, "internal_principal", None)
+
+
+ConversationScope = Literal["conversation:read", "conversation:write"]
+
+
+def require_legacy_conversation_resource(
+    request: Request,
+    conversation,
+    required_scope: ConversationScope,
+) -> CurrentPrincipal | None:
+    effective_mode = request.scope.get(
+        INTERNAL_AUTH_EFFECTIVE_MODE_SCOPE_KEY,
+        "enforce",
+    )
+    if effective_mode != "enforce":
+        return get_current_principal(request)
+
+    principal = get_current_principal(request)
+    if principal is None:
+        raise LegacyRouteError(401, "INTERNAL_AUTH_REQUIRED")
+
+    allowed_types = {
+        "doctor": frozenset({"doctor"}),
+        "patient": frozenset({"patient", "user"}),
+    }
+    if (
+        getattr(conversation, "user_type", None) not in allowed_types
+        or principal.principal_type
+        not in allowed_types[getattr(conversation, "user_type", None)]
+        or principal.subject != getattr(conversation, "host_id", None)
+        or required_scope not in principal.scopes
+    ):
+        raise LegacyRouteError(403, "CONVERSATION_FORBIDDEN")
+    return principal
 
 
 def scope_for_platform_agent(agent_type: str | None) -> str:

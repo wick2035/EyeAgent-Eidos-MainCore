@@ -30,11 +30,24 @@ from infrastructure.repositories.research_document_repository_impl import (
 
 PDF_EXTRACTOR_VERSION = "pymupdf_v1"
 IMAGE_EXTRACTOR_VERSION = "research_vision_v1"
+TEXT_EXTRACTOR_VERSION = "research_text_v1"
+
+_PROCESSOR_BY_FILE_TYPE = {
+    "pdf": "pdf_hybrid_v1",
+    "image": "image_vision_v1",
+    "text": "plain_text_v1",
+}
+_EXTRACTOR_BY_PROCESSOR = {
+    "pdf_hybrid_v1": PDF_EXTRACTOR_VERSION,
+    "image_vision_v1": IMAGE_EXTRACTOR_VERSION,
+    "plain_text_v1": TEXT_EXTRACTOR_VERSION,
+}
 
 _MAX_FILES = 4
 _MAX_TOTAL_BYTES = 40 * 1024 * 1024
 _MAX_PDF_BYTES = 30 * 1024 * 1024
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
+_MAX_TEXT_BYTES = 512 * 1024
 _MAX_PDF_PAGES = 100
 _MAX_TOTAL_PDF_PAGES = 120
 _IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
@@ -43,6 +56,7 @@ _SAFE_ERROR_PREFIXES = (
     "ATTACHMENT_",
     "PDF_",
     "RESEARCH_PDF_",
+    "RESEARCH_TXT_",
     "RESEARCH_DOCUMENT_",
 )
 _INGESTION_TIMEOUT = "RESEARCH_DOCUMENT_INGESTION_TIMEOUT"
@@ -431,6 +445,15 @@ def _validate_metadata(
                 raise ResearchDocumentIngestionError(
                     "RESEARCH_DOCUMENT_CONTENT_LIMIT"
                 )
+        elif item.file_type == "text":
+            if (
+                item.mime_type != "text/plain"
+                or item.size_bytes > _MAX_TEXT_BYTES
+                or item.page_count is not None
+            ):
+                raise ResearchDocumentIngestionError(
+                    "RESEARCH_DOCUMENT_CONTENT_LIMIT"
+                )
         else:
             raise ResearchDocumentIngestionError(
                 "RESEARCH_DOCUMENT_INPUT_INVALID"
@@ -444,16 +467,14 @@ def _build_identity(
     doctor_id: str,
     item: DownloadedAttachment,
 ) -> IngestionIdentity:
-    is_pdf = item.file_type == "pdf"
+    processor_type = _PROCESSOR_BY_FILE_TYPE[item.file_type]
     return IngestionIdentity(
         doctor_id=doctor_id,
         attachment_id=item.attachment_id,
         document_version=item.document_version,
         content_sha256=item.content_sha256,
-        processor_type="pdf_hybrid_v1" if is_pdf else "image_vision_v1",
-        extractor_version=(
-            PDF_EXTRACTOR_VERSION if is_pdf else IMAGE_EXTRACTOR_VERSION
-        ),
+        processor_type=processor_type,
+        extractor_version=_EXTRACTOR_BY_PROCESSOR[processor_type],
         segment_schema_version=SEGMENT_SCHEMA_VERSION,
     )
 
@@ -631,6 +652,7 @@ def _safe_processing_error(error: Exception) -> str:
 __all__ = [
     "IMAGE_EXTRACTOR_VERSION",
     "PDF_EXTRACTOR_VERSION",
+    "TEXT_EXTRACTOR_VERSION",
     "ResearchDocumentIngestionError",
     "ResearchDocumentIngestionResult",
     "ResearchDocumentIngestionService",

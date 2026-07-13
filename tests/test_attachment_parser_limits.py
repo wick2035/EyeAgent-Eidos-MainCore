@@ -178,6 +178,78 @@ class AttachmentParserLimitsTest(unittest.TestCase):
                         json.dumps(mutation).encode("utf-8")
                     )
 
+    def test_research_text_request_and_manifest_contract_are_exact(self):
+        request = self._request(
+            profile="research_text_v1",
+            file_type="text",
+            mime_type="text/plain",
+            declared_page_count=None,
+        )
+        self.assertEqual(
+            WorkerRequest.from_json_bytes(request.to_json_bytes()),
+            request,
+        )
+
+        invalid_contracts = (
+            {"profile": "research_text_v1"},
+            {
+                "profile": "research_text_v1",
+                "file_type": "text",
+                "mime_type": "application/octet-stream",
+            },
+            {
+                "profile": "research_text_v1",
+                "file_type": "text",
+                "mime_type": "text/plain",
+                "declared_page_count": 1,
+            },
+            {
+                "profile": "assistant_visual_v1",
+                "file_type": "text",
+                "mime_type": "text/plain",
+            },
+        )
+        for overrides in invalid_contracts:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(AttachmentParserError):
+                    self._request(**overrides)
+
+        manifest_type = protocol.ResearchTextManifest
+        manifest = manifest_type(
+            profile="research_text_v1",
+            text_relative_path="document.txt",
+            text_sha256="a" * 64,
+            character_count=10,
+        )
+        self.assertEqual(
+            json.loads(manifest.to_json_bytes()),
+            {
+                "profile": "research_text_v1",
+                "text_relative_path": "document.txt",
+                "text_sha256": "a" * 64,
+                "character_count": 10,
+            },
+        )
+        self.assertEqual(
+            manifest_type.from_json_bytes(manifest.to_json_bytes()),
+            manifest,
+        )
+
+        decoded = json.loads(manifest.to_json_bytes())
+        invalid_manifests = (
+            {**decoded, "profile": "research_pdf_v1"},
+            {**decoded, "unknown": True},
+            {**decoded, "text_relative_path": "../document.txt"},
+            {**decoded, "text_sha256": "a" * 63},
+            {**decoded, "character_count": 0},
+        )
+        for mutation in invalid_manifests:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AttachmentParserError):
+                    manifest_type.from_json_bytes(
+                        json.dumps(mutation).encode("utf-8")
+                    )
+
     def test_research_manifest_is_independent_and_validates_all_artifacts(self):
         page_type = protocol.ResearchPdfPageManifest
         manifest_type = protocol.ResearchPdfManifest
@@ -594,6 +666,84 @@ class AttachmentParserLimitsTest(unittest.TestCase):
             self.output_dir.resolve(),
             declared_page_count=1,
         )
+
+    def test_worker_research_text_writes_canonical_private_document(self):
+        raw = b"\xef\xbb\xbfCafe\xcc\x81\r\nline"
+        (self.input_dir / "attachment.bin").write_bytes(raw)
+        request = self._request(
+            profile="research_text_v1",
+            file_type="text",
+            mime_type="text/plain",
+            declared_page_count=None,
+        )
+
+        manifest = parse_attachment_file(
+            request,
+            self.input_dir,
+            self.output_dir,
+        )
+
+        canonical = "Caf\u00e9\nline".encode("utf-8")
+        document = self.output_dir / "document.txt"
+        self.assertIsInstance(manifest, protocol.ResearchTextManifest)
+        self.assertEqual(manifest.text_relative_path, "document.txt")
+        self.assertEqual(manifest.text_sha256, hashlib.sha256(canonical).hexdigest())
+        self.assertEqual(manifest.character_count, len("Caf\u00e9\nline"))
+        self.assertEqual(document.read_bytes(), canonical)
+        self.assertEqual(stat.S_IMODE(document.stat().st_mode), 0o600)
+
+        with self.assertRaisesRegex(
+            AttachmentParserError,
+            "ATTACHMENT_OUTPUT_FAILED",
+        ):
+            parse_attachment_file(request, self.input_dir, self.output_dir)
+        self.assertEqual(document.read_bytes(), canonical)
+
+        invalid_input = self.input_dir / "invalid.bin"
+        invalid_input.write_bytes(b"safe\x00text")
+        with self.assertRaisesRegex(AttachmentParserError, "RESEARCH_TXT_BINARY"):
+            parse_attachment_file(
+                WorkerRequest(
+                    input_filename=invalid_input.name,
+                    file_type="text",
+                    mime_type="text/plain",
+                    declared_page_count=None,
+                    profile="research_text_v1",
+                ),
+                self.input_dir,
+                self.output_dir,
+            )
+
+    def test_worker_bundles_only_research_text_document(self):
+        from infrastructure.attachments.attachment_parser_worker import (
+            _write_output_bundle,
+        )
+
+        content = "Caf\u00e9\nline".encode("utf-8")
+        document = self.output_dir / "document.txt"
+        document.write_bytes(content)
+        document.chmod(0o600)
+        bundle = self.root / "output.bundle"
+        bundle.touch(mode=0o600)
+        manifest = protocol.ResearchTextManifest(
+            profile="research_text_v1",
+            text_relative_path=document.name,
+            text_sha256=hashlib.sha256(content).hexdigest(),
+            character_count=len("Caf\u00e9\nline"),
+        )
+
+        _write_output_bundle(manifest, self.output_dir, bundle)
+
+        with zipfile.ZipFile(bundle) as archive:
+            self.assertEqual(
+                [entry.filename for entry in archive.infolist()],
+                ["document.txt"],
+            )
+            self.assertEqual(
+                archive.getinfo("document.txt").compress_type,
+                zipfile.ZIP_STORED,
+            )
+            self.assertEqual(archive.read("document.txt"), content)
 
     def test_worker_bundles_exact_research_artifact_set_without_compression(self):
         from infrastructure.attachments.attachment_parser_worker import (

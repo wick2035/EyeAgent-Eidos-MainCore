@@ -47,6 +47,10 @@ from utils.transient_attachment_context import (
 )
 
 
+TXT_SECRET_SENTINEL = "TXT_SECRET_SENTINEL_7f9c"
+SAFE_CITATION_EXCERPT = "可公开引用的独立摘要文本"
+
+
 class FakeDB:
     def __init__(self):
         self.depth = 0
@@ -384,6 +388,36 @@ def execute_request(request_id="request-1", **overrides):
     return ExecutePlatformChatTurnRequest(**payload)
 
 
+def text_descriptor(attachment_id):
+    return {
+        "attachment_id": attachment_id,
+        "file_type": "text",
+        "filename": "notes.txt",
+        "mime_type": "text/plain",
+        "size_bytes": 128,
+        "page_count": None,
+        "content_sha256": "e" * 64,
+        "document_version": 3,
+        "analysis_attempt_id": f"attempt-{attachment_id}",
+        "download_url": f"https://storage.example/{attachment_id}",
+    }
+
+
+def image_descriptor(attachment_id):
+    return {
+        "attachment_id": attachment_id,
+        "file_type": "image",
+        "filename": "fundus.png",
+        "mime_type": "image/png",
+        "size_bytes": 128,
+        "page_count": None,
+        "content_sha256": "d" * 64,
+        "document_version": 2,
+        "analysis_attempt_id": f"attempt-{attachment_id}",
+        "download_url": f"https://storage.example/{attachment_id}",
+    }
+
+
 def turn_for(request):
     return ChatTurnRequestEntity(
         doctor_id=request.doctor_id,
@@ -592,6 +626,146 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(statuses, ["processing", "ready"])
 
+    async def test_txt_only_text_txt_and_image_txt_share_research_execution(self):
+        cases = (
+            (
+                "txt-only",
+                "",
+                [text_descriptor("attachment-txt-only")],
+                "research-document-analysis-v1",
+            ),
+            (
+                "text-and-txt",
+                "请总结重点",
+                [text_descriptor("attachment-text-and-txt")],
+                None,
+            ),
+            (
+                "image-and-txt",
+                "请结合图像与记录分析",
+                [
+                    image_descriptor("attachment-image-mixed"),
+                    text_descriptor("attachment-txt-mixed"),
+                ],
+                None,
+            ),
+        )
+
+        for request_id, question, attachments, implicit_prompt_id in cases:
+            with self.subTest(request_id=request_id):
+                request = execute_request(
+                    request_id,
+                    version=2,
+                    patient_id=None,
+                    agent_type="research",
+                    attachment_scope="research",
+                    research_options={
+                        "enable_institution_data": False,
+                        "enable_web_search": False,
+                        "types": [],
+                    },
+                    attachments=attachments,
+                )
+                citation = {
+                    "source_type": "attachment",
+                    "attachment_id": attachments[-1]["attachment_id"],
+                    "document_version": attachments[-1]["document_version"],
+                    "segment_id": f"segment-{request_id}",
+                    "locator": {"type": "file"},
+                    "excerpt": SAFE_CITATION_EXCERPT,
+                }
+                ingestion = FakeResearchIngestion()
+                selector = FakeResearchSelector()
+                graph = FakeGraphManager(citations=[citation])
+                service, turns, messages, _, _ = make_service(
+                    [request],
+                    graph=graph,
+                    research_ingestion=ingestion,
+                    research_selector=selector,
+                )
+                turn = turns.get("doctor-1", request.request_id)
+                turn.implicit_prompt_id = implicit_prompt_id
+                messages.get_by_id(request.user_message_id).message_content = (
+                    question
+                )
+
+                events = await collect(
+                    service.stream(
+                        request,
+                        principal(scopes={"ai:research"}),
+                    )
+                )
+
+                self.assertEqual(events[-1]["event"], "done")
+                self.assertEqual(events[-1]["citations"], [citation])
+                self.assertEqual(service.analyzer.calls, [])
+                self.assertEqual(
+                    [item.file_type for item in ingestion.calls[0][1]],
+                    [item["file_type"] for item in attachments],
+                )
+                self.assertEqual(selector.calls[0][2], question)
+                self.assertEqual(
+                    graph.contexts[0].implicit_prompt_id,
+                    implicit_prompt_id,
+                )
+
+    async def test_txt_content_failure_fails_whole_turn_without_answer_or_body(self):
+        request = execute_request(
+            "txt-content-failure",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+            attachments=[text_descriptor("attachment-txt-failure")],
+        )
+
+        class FailingTxtIngestion:
+            @staticmethod
+            async def ingest(_doctor_id, _downloaded, *, deadline=None):
+                error = RuntimeError(
+                    f"invalid text body: {TXT_SECRET_SENTINEL}"
+                )
+                error.error_code = "RESEARCH_TXT_CONTENT_LIMIT"
+                raise error
+
+        graph = FakeGraphManager()
+        service, turns, messages, _, _ = make_service(
+            [request],
+            graph=graph,
+            research_ingestion=FailingTxtIngestion(),
+        )
+
+        events = await collect(
+            service.stream(request, principal(scopes={"ai:research"}))
+        )
+
+        self.assertFalse(any(event["event"] == "token" for event in events))
+        self.assertEqual(graph.calls, [])
+        self.assertEqual(events[-1]["error_code"], "RESEARCH_TXT_CONTENT_LIMIT")
+        self.assertEqual(
+            turns.get("doctor-1", request.request_id).status,
+            "failed",
+        )
+        assistant = messages.get_by_id(request.assistant_message_id)
+        self.assertEqual(assistant.status, "failed")
+        exposed = json.dumps(
+            {
+                "events": events,
+                "turn": turns.get("doctor-1", request.request_id).model_dump(
+                    mode="json"
+                ),
+                "assistant": vars(assistant),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        self.assertNotIn(TXT_SECRET_SENTINEL, exposed)
+
     async def test_research_regenerate_keeps_canonical_turn_configuration(self):
         request = execute_request(
             "research-regenerate-context",
@@ -779,6 +953,51 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             turns.get("doctor-1", request.request_id).status,
             "cancelled",
+        )
+
+    async def test_txt_abort_cancels_ingestion_and_emits_no_body(self):
+        request = execute_request(
+            "research-txt-abort",
+            version=2,
+            patient_id=None,
+            agent_type="research",
+            attachment_scope="research",
+            research_options={
+                "enable_institution_data": False,
+                "enable_web_search": False,
+                "types": [],
+            },
+            attachments=[text_descriptor("attachment-txt-abort")],
+        )
+        ingestion = FakeResearchIngestion(block=True)
+        service, turns, messages, graph, _ = make_service(
+            [request],
+            research_ingestion=ingestion,
+            heartbeat_interval=0.001,
+        )
+        stream = service.stream(request, principal(scopes={"ai:research"}))
+        observed = [await stream.__anext__(), await stream.__anext__()]
+        pending = asyncio.create_task(stream.__anext__())
+        await asyncio.wait_for(ingestion.started.wait(), timeout=1)
+
+        service.registry.signal("doctor-1", request.request_id)
+        with self.assertRaises(StopAsyncIteration):
+            await asyncio.wait_for(pending, timeout=1)
+        await stream.aclose()
+
+        self.assertTrue(ingestion.cancelled)
+        self.assertEqual(graph.calls, [])
+        self.assertEqual(
+            turns.get("doctor-1", request.request_id).status,
+            "cancelled",
+        )
+        self.assertEqual(
+            messages.get_by_id(request.assistant_message_id).status,
+            "cancelled",
+        )
+        self.assertNotIn(
+            TXT_SECRET_SENTINEL,
+            json.dumps(observed, ensure_ascii=False),
         )
 
     async def test_cancel_race_retrieves_completed_analysis_failure(self):

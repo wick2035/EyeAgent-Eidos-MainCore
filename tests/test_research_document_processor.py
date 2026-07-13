@@ -17,6 +17,7 @@ from infrastructure.attachments.parser_protocol import (
     ParsedResearchPdf,
     ParsedResearchPdfPage,
 )
+from domain.models.research_document import ExtractedResearchText
 
 
 def _digest(value: bytes) -> str:
@@ -92,6 +93,16 @@ class FakeGateway:
         return output
 
 
+class FakePlainTextProcessor:
+    def __init__(self, output):
+        self.output = output
+        self.calls = []
+
+    async def process(self, downloaded):
+        self.calls.append(downloaded)
+        return self.output
+
+
 class FakeModel:
     def __init__(self, output=None, error=None, delay=0, response_metadata=None):
         self.output = output
@@ -117,6 +128,26 @@ class FakeModel:
 
 
 class ResearchDocumentProcessorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_text_dispatches_to_plain_text_processor_without_vision(self):
+        downloaded = _downloaded("text", "text/plain", content=b"raw text")
+        extracted = ExtractedResearchText(
+            text="规范化正文",
+            text_sha256=_digest("规范化正文".encode("utf-8")),
+            character_count=len("规范化正文"),
+        )
+        text_processor = FakePlainTextProcessor(extracted)
+        gateway = FakeGateway()
+
+        result = await ResearchDocumentProcessor(
+            FakeSandbox(object()),
+            gateway,
+            plain_text_processor=text_processor,
+        ).process(downloaded)
+
+        self.assertEqual(result, extracted)
+        self.assertEqual(text_processor.calls, [downloaded])
+        self.assertEqual(gateway.calls, [])
+
     async def test_digital_pdf_uses_research_profile_without_llm(self):
         sandbox = FakeSandbox(_parsed_pdf(_pdf_page(1, "第一页"), _pdf_page(2, "第二页")))
         gateway = FakeGateway()

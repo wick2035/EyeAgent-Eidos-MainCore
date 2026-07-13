@@ -180,6 +180,8 @@
 | GET | `/api/info` | API 信息 |
 | GET | `/health` | 系统健康检查 |
 
+医问通医生端 platform 附件的权威接口、双数据面职责及部署/回滚检查统一见[平台附件接口与部署 Preflight](docs/平台附件接口与部署Preflight.md)。
+
 ## 内部调用认证边界
 
 MainCore 的 HTTP 业务接口统一以 `/api` 或 `/api/**` 为边界验证 Java 网关签发的

@@ -13,9 +13,14 @@ from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
+    ResearchTextManifest,
     WorkerManifest,
     WorkerPageManifest,
     WorkerRequest,
+)
+from infrastructure.attachments.research_text_contract import (
+    ResearchTextContractError,
+    normalize_research_text_bytes,
 )
 from utils.pdf_utils import (
     StrictPdfError,
@@ -34,7 +39,7 @@ def parse_attachment_file(
     request: WorkerRequest,
     input_dir: Path | str,
     output_dir: Path | str,
-) -> WorkerManifest | ResearchPdfManifest:
+) -> WorkerManifest | ResearchPdfManifest | ResearchTextManifest:
     input_root = _resolve_directory(input_dir)
     output_root = _resolve_directory(output_dir)
     input_path = input_root / request.input_filename
@@ -52,6 +57,8 @@ def parse_attachment_file(
 
     if request.file_type == "image":
         return _parse_image(request, input_real, output_root)
+    if request.profile == "research_text_v1":
+        return _parse_research_text(input_real, output_root)
     if request.profile == "research_pdf_v1":
         return _parse_research_pdf(request, input_real, output_root)
     return _parse_pdf(request, input_real, output_root)
@@ -181,6 +188,46 @@ def _parse_research_pdf(
     )
 
 
+def _parse_research_text(
+    input_path: Path,
+    output_root: Path,
+) -> ResearchTextManifest:
+    try:
+        content = input_path.read_bytes()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_INPUT_PATH_INVALID") from exc
+    try:
+        normalized = normalize_research_text_bytes(content)
+    except ResearchTextContractError as exc:
+        raise AttachmentParserError(exc.error_code) from exc
+
+    output_path = output_root / "document.txt"
+    try:
+        file_descriptor = os.open(
+            output_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_FAILED") from exc
+    try:
+        with os.fdopen(file_descriptor, "wb") as output:
+            output.write(normalized.utf8_bytes)
+    except OSError as exc:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_FAILED") from exc
+
+    return ResearchTextManifest(
+        profile="research_text_v1",
+        text_relative_path=output_path.name,
+        text_sha256=normalized.sha256,
+        character_count=normalized.character_count,
+    )
+
+
 def _resolve_directory(path: Path | str) -> Path:
     candidate = Path(path)
     try:
@@ -194,7 +241,7 @@ def _resolve_directory(path: Path | str) -> Path:
 
 
 def _write_output_bundle(
-    manifest: WorkerManifest | ResearchPdfManifest,
+    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest,
     output_dir: Path | str,
     bundle_path: Path | str,
 ) -> None:
@@ -248,12 +295,20 @@ def _write_output_bundle(
 
 
 def _manifest_artifacts(
-    manifest: WorkerManifest | ResearchPdfManifest,
+    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest,
 ) -> tuple[tuple[str, str], ...]:
     if isinstance(manifest, WorkerManifest):
         return tuple(
             (page.relative_path, page.sha256) for page in manifest.pages
         )
+    if isinstance(manifest, ResearchTextManifest):
+        manifest = ResearchTextManifest(
+            profile=manifest.profile,
+            text_relative_path=manifest.text_relative_path,
+            text_sha256=manifest.text_sha256,
+            character_count=manifest.character_count,
+        )
+        return ((manifest.text_relative_path, manifest.text_sha256),)
     if not isinstance(manifest, ResearchPdfManifest):
         raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
     manifest = ResearchPdfManifest(tuple(manifest.pages))

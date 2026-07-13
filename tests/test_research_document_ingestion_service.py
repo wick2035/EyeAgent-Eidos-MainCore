@@ -13,9 +13,11 @@ from application.services.research_document_ingestion_service import (
     ResearchDocumentIngestionError,
     ResearchDocumentIngestionService,
 )
+from application.services import research_document_ingestion_service as ingestion_module
 from application.services.research_document_segmenter import SEGMENT_SCHEMA_VERSION
 from domain.models.research_document import (
     ExtractedResearchPage,
+    ExtractedResearchText,
     IngestionIdentity,
     ResearchDocumentClaimResult,
     ResearchDocumentIngestionEntity,
@@ -25,6 +27,9 @@ from infrastructure.attachments.secure_downloader import DownloadedAttachment
 from infrastructure.repositories.research_document_repository_impl import (
     ResearchDocumentFencingError,
 )
+
+
+TXT_SECRET_SENTINEL = "TXT_SECRET_SENTINEL_7f9c"
 
 
 def _downloaded(
@@ -161,6 +166,13 @@ class FakeProcessor:
                 await self.release.wait()
             if item.attachment_id in self.fail_ids:
                 raise RuntimeError("raw processor detail")
+            if item.file_type == "text":
+                text = f"科研正文-{item.attachment_id}"
+                return ExtractedResearchText(
+                    text=text,
+                    text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    character_count=len(text),
+                )
             return [
                 ExtractedResearchPage(
                     page_number=1,
@@ -569,6 +581,103 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.entities[0].attempt_count, 3)
         self.assertEqual(self.processor.calls, ["paper"])
 
+    async def test_text_identity_uses_raw_hash_fixed_version_and_failed_retry(self):
+        raw_content = ("\ufeff" + TXT_SECRET_SENTINEL + "\r\nline").encode(
+            "utf-8"
+        )
+        normalized_hash = hashlib.sha256(
+            (TXT_SECRET_SENTINEL + "\nline").encode("utf-8")
+        ).hexdigest()
+        item = _downloaded(
+            self.temp.name,
+            "notes",
+            file_type="text",
+            mime_type="text/plain",
+            content=raw_content,
+            page_count=None,
+        )
+        self.assertNotEqual(item.content_sha256, normalized_hash)
+        identity = IngestionIdentity(
+            doctor_id="doctor-1",
+            attachment_id=item.attachment_id,
+            document_version=1,
+            content_sha256=item.content_sha256,
+            processor_type="plain_text_v1",
+            extractor_version="research_text_v1",
+            segment_schema_version=SEGMENT_SCHEMA_VERSION,
+        )
+        self.repo.records[identity] = _entity(identity, status="failed", attempt=2)
+
+        result = await self._service().ingest("doctor-1", [item])
+        reused = await self._service().ingest("doctor-1", [item])
+
+        self.assertEqual(
+            getattr(ingestion_module, "TEXT_EXTRACTOR_VERSION", None),
+            "research_text_v1",
+        )
+        self.assertEqual(self.repo.claim_calls[0][0], identity)
+        self.assertEqual(result.entities[0].attempt_count, 3)
+        self.assertEqual(result.entities[0].page_count, 0)
+        self.assertEqual(reused.ingestion_ids, result.ingestion_ids)
+        self.assertEqual(self.processor.calls, ["notes"])
+
+    async def test_text_parse_error_prefix_is_preserved_for_failed_ingestion(self):
+        item = _downloaded(
+            self.temp.name,
+            "bad-notes",
+            file_type="text",
+            mime_type="text/plain",
+            content=b"notes",
+        )
+
+        class TextParseFailureProcessor:
+            @staticmethod
+            async def process(_item):
+                error = RuntimeError(
+                    "RESEARCH_TXT_PARSE_FAILED: " + TXT_SECRET_SENTINEL
+                )
+                error.error_code = "RESEARCH_TXT_PARSE_FAILED"
+                raise error
+
+        self.processor = TextParseFailureProcessor()
+        with self.assertRaises(ResearchDocumentIngestionError) as raised:
+            await self._service().ingest("doctor-1", [item])
+
+        self.assertEqual(raised.exception.error_code, "RESEARCH_TXT_PARSE_FAILED")
+        self.assertEqual(self.repo.fail_calls[0][2], "RESEARCH_TXT_PARSE_FAILED")
+        self.assertNotIn(TXT_SECRET_SENTINEL, str(raised.exception))
+        self.assertNotIn(TXT_SECRET_SENTINEL, repr(raised.exception))
+
+    async def test_expired_text_processing_is_taken_over_with_same_lease_model(self):
+        item = _downloaded(
+            self.temp.name,
+            "expired-text",
+            file_type="text",
+            mime_type="text/plain",
+            content=TXT_SECRET_SENTINEL.encode("utf-8"),
+        )
+        identity = IngestionIdentity(
+            doctor_id="doctor-1",
+            attachment_id=item.attachment_id,
+            document_version=1,
+            content_sha256=item.content_sha256,
+            processor_type="plain_text_v1",
+            extractor_version="research_text_v1",
+            segment_schema_version=SEGMENT_SCHEMA_VERSION,
+        )
+        self.repo.records[identity] = _entity(
+            identity,
+            attempt=2,
+            lease=datetime.now() - timedelta(seconds=1),
+        )
+
+        result = await self._service().ingest("doctor-1", [item])
+
+        self.assertEqual(result.entities[0].attempt_count, 3)
+        self.assertEqual(result.entities[0].page_count, 0)
+        claim_now, lease_until = self.repo.claim_calls[0][1:]
+        self.assertEqual((lease_until - claim_now).total_seconds(), 90)
+
     async def test_expired_processing_is_taken_over_with_default_90_second_lease(self):
         item = _downloaded(self.temp.name, "expired")
         identity = IngestionIdentity(
@@ -643,6 +752,28 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.processor.calls, ["shared"])
         self.assertEqual(first_result.ingestion_ids, second_result.ingestion_ids)
+
+    async def test_two_concurrent_text_ingests_have_one_processor_owner(self):
+        item = _downloaded(
+            self.temp.name,
+            "shared-text",
+            file_type="text",
+            mime_type="text/plain",
+            content=TXT_SECRET_SENTINEL.encode("utf-8"),
+        )
+        self.processor.block = True
+        service = self._service()
+
+        first = asyncio.create_task(service.ingest("doctor-1", [item]))
+        await asyncio.wait_for(self.processor.started.wait(), timeout=1)
+        second = asyncio.create_task(service.ingest("doctor-1", [item]))
+        await asyncio.sleep(0.01)
+        self.processor.release.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        self.assertEqual(self.processor.calls, ["shared-text"])
+        self.assertEqual(first_result.ingestion_ids, second_result.ingestion_ids)
+        self.assertEqual(first_result.entities[0].page_count, 0)
 
     async def test_lease_loss_cancels_work_and_never_completes(self):
         item = _downloaded(self.temp.name, "lease-loss")
