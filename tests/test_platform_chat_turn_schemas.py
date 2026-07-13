@@ -247,6 +247,62 @@ class PlatformChatTurnSchemaTest(unittest.TestCase):
         self.assertIsNone(request.attachments[0].page_count)
         self.assertEqual(request.model_dump(mode="json"), payload)
 
+    def test_v2_research_csv_and_xlsx_execute_match_golden_wires(self):
+        for fixture_name, file_type in (
+            ("platform_research_csv_execute_v2.json", "csv"),
+            ("platform_research_xlsx_execute_v2.json", "xlsx"),
+        ):
+            with self.subTest(file_type=file_type):
+                payload = load_fixture(fixture_name)
+                request = ExecutePlatformChatTurnRequest(**payload)
+                self.assertEqual(request.attachments[0].file_type, file_type)
+                self.assertIsNone(request.attachments[0].page_count)
+                self.assertEqual(request.model_dump(mode="json"), payload)
+
+    def test_v2_research_csv_and_xlsx_reject_invalid_contracts(self):
+        fixtures = (
+            ("platform_research_csv_execute_v2.json", "application/zip"),
+            ("platform_research_xlsx_execute_v2.json", "application/zip"),
+        )
+        for fixture_name, wrong_mime in fixtures:
+            invalid_payloads = []
+            for field, value in (
+                ("size_bytes", _TEN_MIB + 1),
+                ("page_count", 1),
+                ("mime_type", wrong_mime),
+            ):
+                invalid = load_fixture(fixture_name)
+                invalid["attachments"][0][field] = value
+                invalid_payloads.append(invalid)
+
+            missing_page_count = load_fixture(fixture_name)
+            missing_page_count["attachments"][0].pop("page_count")
+            invalid_payloads.append(missing_page_count)
+
+            health = load_fixture(fixture_name)
+            health.update(
+                patient_id="patient-1",
+                agent_type="health",
+                attachment_scope="patient",
+                research_options=None,
+            )
+            invalid_payloads.append(health)
+
+            v1 = load_fixture(fixture_name)
+            v1["version"] = 1
+            v1["patient_id"] = "patient-1"
+            for field in ("agent_type", "attachment_scope", "research_options"):
+                v1.pop(field)
+            invalid_payloads.append(v1)
+
+            for invalid in invalid_payloads:
+                with self.subTest(
+                    fixture_name=fixture_name,
+                    invalid=invalid,
+                ):
+                    with self.assertRaises(ValidationError):
+                        ExecutePlatformChatTurnRequest(**invalid)
+
     def test_v2_research_docx_rejects_invalid_contracts(self):
         invalid_payloads = []
         for field, value in (

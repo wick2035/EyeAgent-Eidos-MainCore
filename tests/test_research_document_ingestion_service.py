@@ -188,6 +188,47 @@ class FakeProcessor:
 
 
 class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
+    def test_c3_stable_error_codes_are_safe_without_registering_processors(self):
+        for error_code in (
+            "RESEARCH_CSV_UNAVAILABLE",
+            "RESEARCH_CSV_SIZE_LIMIT",
+            "RESEARCH_CSV_INVALID",
+            "RESEARCH_CSV_ENCODING_UNSUPPORTED",
+            "RESEARCH_CSV_STRUCTURE_LIMIT",
+            "RESEARCH_CSV_CONTENT_LIMIT",
+            "RESEARCH_CSV_PARSE_FAILED",
+            "RESEARCH_XLSX_UNAVAILABLE",
+            "RESEARCH_XLSX_SIZE_LIMIT",
+            "RESEARCH_XLSX_INVALID",
+            "RESEARCH_XLSX_ENCRYPTED",
+            "RESEARCH_XLSX_STRUCTURE_LIMIT",
+            "RESEARCH_XLSX_FORMULA_UNSUPPORTED",
+            "RESEARCH_XLSX_CONTENT_LIMIT",
+            "RESEARCH_XLSX_PARSE_FAILED",
+        ):
+            with self.subTest(error_code=error_code):
+                error = RuntimeError("private parser detail")
+                error.error_code = error_code
+                self.assertEqual(
+                    ingestion_module._safe_processing_error(error),
+                    error_code,
+                )
+        self.assertNotIn("csv", ingestion_module._PROCESSOR_BY_FILE_TYPE)
+        self.assertNotIn("xlsx", ingestion_module._PROCESSOR_BY_FILE_TYPE)
+
+    def test_unknown_c3_prefixed_errors_fall_back_to_processing_failed(self):
+        for error_code in (
+            "RESEARCH_CSV_INTERNAL_PATH",
+            "RESEARCH_XLSX_WORKER_TRACE",
+        ):
+            with self.subTest(error_code=error_code):
+                error = RuntimeError("private parser detail")
+                error.error_code = error_code
+                self.assertEqual(
+                    ingestion_module._safe_processing_error(error),
+                    "RESEARCH_DOCUMENT_PROCESSING_FAILED",
+                )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.repo = FakeRepository()

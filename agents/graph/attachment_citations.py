@@ -190,20 +190,42 @@ def _candidate_map(
 def _build_locator(candidate: ResearchCitationCandidate) -> dict[str, Any]:
     page_start = candidate.page_start
     page_end = candidate.page_end
-    if page_start is None and page_end is None:
+    sheet_name = candidate.sheet_name
+    row_start = candidate.row_start
+    row_end = candidate.row_end
+    page_values = (page_start, page_end)
+    sheet_values = (sheet_name, row_start, row_end)
+    if all(value is None for value in page_values + sheet_values):
         return {"type": "file"}
-    if (
-        type(page_start) is not int
-        or type(page_end) is not int
-        or page_start < 1
-        or page_end < page_start
-    ):
-        raise ValueError("citation candidate 页码无效")
-    return {
-        "type": "page",
-        "page_start": page_start,
-        "page_end": page_end,
-    }
+    if all(value is None for value in sheet_values):
+        if (
+            type(page_start) is not int
+            or type(page_end) is not int
+            or page_start < 1
+            or page_end < page_start
+        ):
+            raise ValueError("citation candidate 页码无效")
+        return {
+            "type": "page",
+            "page_start": page_start,
+            "page_end": page_end,
+        }
+    if all(value is None for value in page_values):
+        if (
+            not isinstance(sheet_name, str)
+            or type(row_start) is not int
+            or type(row_end) is not int
+            or row_start < 1
+            or row_end < row_start
+        ):
+            raise ValueError("citation candidate 工作表行范围无效")
+        return {
+            "type": "sheet_rows",
+            "sheet_name": sheet_name,
+            "row_start": row_start,
+            "row_end": row_end,
+        }
+    raise ValueError("citation candidate locator 字段混用")
 
 
 def _build_attachment_citation(

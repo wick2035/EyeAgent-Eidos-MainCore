@@ -14,6 +14,10 @@ from pydantic import (
     model_validator,
 )
 import json
+import unicodedata
+
+
+_MAX_SHEET_ROW = 50_000
 
 
 class AttachmentPageLocator(BaseModel):
@@ -36,8 +40,40 @@ class AttachmentFileLocator(BaseModel):
     type: Literal["file"]
 
 
+class AttachmentSheetRowsLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["sheet_rows"]
+    sheet_name: StrictStr = Field(min_length=1, max_length=128)
+    row_start: int = Field(
+        strict=True,
+        ge=1,
+        le=_MAX_SHEET_ROW,
+    )
+    row_end: int = Field(
+        strict=True,
+        ge=1,
+        le=_MAX_SHEET_ROW,
+    )
+
+    @model_validator(mode="after")
+    def require_valid_sheet_rows(self) -> "AttachmentSheetRowsLocator":
+        if not self.sheet_name.strip() or any(
+            unicodedata.category(character) == "Cc"
+            for character in self.sheet_name
+        ):
+            raise ValueError("sheet_name 不得为空白或包含控制字符")
+        if self.row_end < self.row_start:
+            raise ValueError("row_end 不得小于 row_start")
+        return self
+
+
 AttachmentLocator = Annotated[
-    Union[AttachmentPageLocator, AttachmentFileLocator],
+    Union[
+        AttachmentPageLocator,
+        AttachmentFileLocator,
+        AttachmentSheetRowsLocator,
+    ],
     Field(discriminator="type"),
 ]
 

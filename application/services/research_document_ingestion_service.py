@@ -67,6 +67,25 @@ _SAFE_ERROR_PREFIXES = (
     "RESEARCH_DOCX_",
     "RESEARCH_DOCUMENT_",
 )
+_SAFE_C3_ERROR_CODES = frozenset(
+    {
+        "RESEARCH_CSV_UNAVAILABLE",
+        "RESEARCH_CSV_SIZE_LIMIT",
+        "RESEARCH_CSV_INVALID",
+        "RESEARCH_CSV_ENCODING_UNSUPPORTED",
+        "RESEARCH_CSV_STRUCTURE_LIMIT",
+        "RESEARCH_CSV_CONTENT_LIMIT",
+        "RESEARCH_CSV_PARSE_FAILED",
+        "RESEARCH_XLSX_UNAVAILABLE",
+        "RESEARCH_XLSX_SIZE_LIMIT",
+        "RESEARCH_XLSX_INVALID",
+        "RESEARCH_XLSX_ENCRYPTED",
+        "RESEARCH_XLSX_STRUCTURE_LIMIT",
+        "RESEARCH_XLSX_FORMULA_UNSUPPORTED",
+        "RESEARCH_XLSX_CONTENT_LIMIT",
+        "RESEARCH_XLSX_PARSE_FAILED",
+    }
+)
 _INGESTION_TIMEOUT = "RESEARCH_DOCUMENT_INGESTION_TIMEOUT"
 _LEGACY_ERROR_ALIASES = {
     "RESEARCH_DOCUMENT_DEADLINE_EXCEEDED": _INGESTION_TIMEOUT,
@@ -653,7 +672,10 @@ def _is_safe_error_code(value: Any) -> bool:
     return (
         isinstance(value, str)
         and _SAFE_ERROR.fullmatch(value) is not None
-        and value.startswith(_SAFE_ERROR_PREFIXES)
+        and (
+            value in _SAFE_C3_ERROR_CODES
+            or value.startswith(_SAFE_ERROR_PREFIXES)
+        )
     )
 
 

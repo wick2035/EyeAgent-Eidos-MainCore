@@ -10,7 +10,9 @@ from application.services.research_document_context_selector import (
     ResearchContextBlock,
     ResearchSummaryGateway,
     _canonical_tokens,
+    _citation,
     _partition_blocks,
+    _source_metadata,
 )
 from application.services.research_document_segmenter import estimate_tokens_v1
 from domain.models.research_document import (
@@ -171,6 +173,34 @@ class FakeModel:
 
 
 class ResearchDocumentContextSelectorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_c3_source_metadata_propagates_but_selector_stays_closed(self):
+        entity = _ready(7)
+        segment = _segment(entity, 0, "数据行", page=1)
+        segment.page_start = None
+        segment.page_end = None
+        segment.sheet_name = "CSV"
+        segment.row_start = 2
+        segment.row_end = 4
+
+        candidate = _citation(segment, entity, score=0.75)
+        metadata = _source_metadata(segment, entity)
+
+        self.assertEqual(
+            (candidate.sheet_name, candidate.row_start, candidate.row_end),
+            ("CSV", 2, 4),
+        )
+        self.assertEqual(
+            {
+                key: metadata[key]
+                for key in ("sheet_name", "row_start", "row_end")
+            },
+            {"sheet_name": "CSV", "row_start": 2, "row_end": 4},
+        )
+        with self.assertRaises(ResearchDocumentContextError):
+            await ResearchDocumentContextSelector(
+                FakeRepository([segment])
+            ).select([entity.id], {entity.id: entity}, "问题")
+
     async def test_plain_text_focused_and_summary_selection_use_file_sources(self):
         entity = _ready(3, processor_type="plain_text_v1")
         segments = [

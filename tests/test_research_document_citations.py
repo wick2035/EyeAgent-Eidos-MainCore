@@ -23,8 +23,11 @@ from application.services.research_document_context_selector import (
 from application.services.research_document_segmenter import (
     ResearchDocumentSegmenter,
 )
-from domain.models.chat_entity import MessageContext
-from domain.models.research_document import ExtractedResearchText
+from domain.models.chat_entity import AttachmentSheetRowsLocator, MessageContext
+from domain.models.research_document import (
+    ExtractedResearchText,
+    SelectedResearchSegment,
+)
 from utils.transient_attachment_context import (
     TransientResearchDocumentContext,
     bind_research_document_context,
@@ -39,6 +42,9 @@ def _candidate(
     document_version: int = 3,
     page_start: int | None = 1,
     page_end: int | None = 1,
+    sheet_name: str | None = None,
+    row_start: int | None = None,
+    row_end: int | None = None,
     content: str = "  第一段\n\t科研   证据  ",
 ) -> ResearchCitationCandidate:
     return ResearchCitationCandidate(
@@ -48,6 +54,9 @@ def _candidate(
         document_version=document_version,
         page_start=page_start,
         page_end=page_end,
+        sheet_name=sheet_name,
+        row_start=row_start,
+        row_end=row_end,
         content=content,
         token_count=12,
         score=0.9,
@@ -55,6 +64,68 @@ def _candidate(
 
 
 class AttachmentCitationBuilderTest(unittest.TestCase):
+    def test_sheet_rows_locator_accepts_row_50000(self):
+        locator = AttachmentSheetRowsLocator(
+            type="sheet_rows",
+            sheet_name="CSV",
+            row_start=50_000,
+            row_end=50_000,
+        )
+
+        self.assertEqual(locator.row_start, 50_000)
+        self.assertEqual(locator.row_end, 50_000)
+
+    def test_sheet_rows_locator_rejects_row_50001(self):
+        for row_start, row_end in ((50_001, 50_001), (1, 50_001)):
+            with self.subTest(row_start=row_start, row_end=row_end):
+                with self.assertRaises(ValidationError):
+                    AttachmentSheetRowsLocator(
+                        type="sheet_rows",
+                        sheet_name="CSV",
+                        row_start=row_start,
+                        row_end=row_end,
+                    )
+
+    def test_dataset_candidate_above_row_limit_fails_final_citation_validation(self):
+        candidate = _candidate(
+            "segment-over-row-limit",
+            page_start=None,
+            page_end=None,
+            sheet_name="CSV",
+            row_start=1,
+            row_end=50_001,
+        )
+
+        with self.assertRaises(ValidationError):
+            build_attachment_citations(
+                [candidate.segment_id],
+                (candidate,),
+            )
+
+    def test_selected_segment_preserves_sheet_row_source_fields(self):
+        selected = SelectedResearchSegment(
+            segment_id="segment-selected",
+            ingestion_id="ingestion-selected",
+            attachment_id="attachment-selected",
+            document_version=1,
+            content="数据行",
+            page_start=None,
+            page_end=None,
+            sheet_name="Sheet 1",
+            row_start=3,
+            row_end=5,
+            token_count=2,
+        )
+
+        dumped = selected.model_dump()
+        self.assertEqual(
+            {
+                key: dumped[key]
+                for key in ("sheet_name", "row_start", "row_end")
+            },
+            {"sheet_name": "Sheet 1", "row_start": 3, "row_end": 5},
+        )
+
     def test_plain_text_whitespace_chunks_do_not_break_fallback(self):
         text = " " * 7500 + "evidence"
         extracted = ExtractedResearchText(
@@ -102,6 +173,116 @@ class AttachmentCitationBuilderTest(unittest.TestCase):
         self.assertEqual(citation["locator"], {"type": "file"})
         self.assertNotIn("page_start", citation["locator"])
         self.assertNotIn("page_end", citation["locator"])
+
+    def test_dataset_candidate_uses_exact_sheet_rows_locator(self):
+        [citation] = build_attachment_citations(
+            ["segment-dataset"],
+            (
+                _candidate(
+                    "segment-dataset",
+                    attachment_id="attachment-csv",
+                    page_start=None,
+                    page_end=None,
+                    sheet_name="CSV",
+                    row_start=2,
+                    row_end=10,
+                    content="结构化数据行",
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            citation["locator"],
+            {
+                "type": "sheet_rows",
+                "sheet_name": "CSV",
+                "row_start": 2,
+                "row_end": 10,
+            },
+        )
+
+        [boundary] = build_attachment_citations(
+            ["segment-boundary"],
+            (
+                _candidate(
+                    "segment-boundary",
+                    page_start=None,
+                    page_end=None,
+                    sheet_name="表" * 128,
+                    row_start=1,
+                    row_end=50_000,
+                ),
+            ),
+        )
+        self.assertEqual(len(boundary["locator"]["sheet_name"]), 128)
+        self.assertEqual(boundary["locator"]["row_end"], 50_000)
+
+    def test_sheet_rows_rejects_partial_mixed_reversed_and_unsafe_fields(self):
+        invalid_candidates = (
+            _candidate(
+                "partial",
+                page_start=None,
+                page_end=None,
+                sheet_name="CSV",
+                row_start=1,
+                row_end=None,
+            ),
+            _candidate(
+                "mixed",
+                page_start=1,
+                page_end=1,
+                sheet_name="CSV",
+                row_start=1,
+                row_end=2,
+            ),
+            _candidate(
+                "reversed",
+                page_start=None,
+                page_end=None,
+                sheet_name="CSV",
+                row_start=3,
+                row_end=2,
+            ),
+            _candidate(
+                "blank-sheet",
+                page_start=None,
+                page_end=None,
+                sheet_name="   ",
+                row_start=1,
+                row_end=1,
+            ),
+            _candidate(
+                "control-sheet",
+                page_start=None,
+                page_end=None,
+                sheet_name="Sheet\n1",
+                row_start=1,
+                row_end=1,
+            ),
+            _candidate(
+                "long-sheet",
+                page_start=None,
+                page_end=None,
+                sheet_name="S" * 129,
+                row_start=1,
+                row_end=1,
+            ),
+            _candidate(
+                "boolean-row",
+                page_start=None,
+                page_end=None,
+                sheet_name="CSV",
+                row_start=True,
+                row_end=2,
+            ),
+        )
+        for candidate in invalid_candidates:
+            with self.subTest(segment_id=candidate.segment_id):
+                with self.assertRaises((ValidationError, ValueError)):
+                    build_attachment_citations(
+                        [candidate.segment_id],
+                        (candidate,),
+                    )
 
     def test_page_file_mapping_excerpt_cap_and_stable_selected_order(self):
         long_content = "  " + "证 据\n" * 100 + "尾部"
@@ -261,6 +442,32 @@ class CitationMergeAndHistoryTest(unittest.TestCase):
 
         self.assertEqual(encoded, [{"citations": [citation]}])
         self.assertEqual(restored.citations, [citation])
+
+    def test_sheet_rows_history_round_trip_keeps_exact_shape(self):
+        citation = build_attachment_citations(
+            ["segment-sheet"],
+            (
+                _candidate(
+                    "segment-sheet",
+                    page_start=None,
+                    page_end=None,
+                    sheet_name="数据表",
+                    row_start=4,
+                    row_end=8,
+                ),
+            ),
+        )[0]
+
+        encoded = MessageContext(citations=[citation]).to_context_list()
+        restored = MessageContext.from_context_list(encoded)
+
+        self.assertEqual(encoded, [{"citations": [citation]}])
+        self.assertEqual(restored.citations, [citation])
+
+        forged = dict(citation)
+        forged["locator"] = {**citation["locator"], "url": "https://secret"}
+        with self.assertRaises(ValidationError):
+            MessageContext(citations=[forged])
 
     def test_legacy_web_history_keeps_optional_source_type_compatible(self):
         citation = {

@@ -99,6 +99,9 @@ class ResearchCitationCandidate:
     page_end: int | None
     content: str
     token_count: int
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
     score: float = 0.0
 
 
@@ -753,6 +756,9 @@ def _citation(segment, entity, score=0.0):
         page_end=segment.page_end,
         content=segment.content,
         token_count=segment.token_count,
+        sheet_name=segment.sheet_name,
+        row_start=segment.row_start,
+        row_end=segment.row_end,
         score=score,
     )
 
@@ -765,6 +771,9 @@ def _source_metadata(segment, entity):
         "document_version": entity.document_version,
         "page_start": segment.page_start,
         "page_end": segment.page_end,
+        "sheet_name": segment.sheet_name,
+        "row_start": segment.row_start,
+        "row_end": segment.row_end,
     }
 
 

@@ -223,5 +223,8 @@ class SelectedResearchSegment(BaseModel):
     content: str
     page_start: Optional[int] = Field(default=None, ge=1)
     page_end: Optional[int] = Field(default=None, ge=1)
+    sheet_name: Optional[str] = Field(default=None, max_length=128)
+    row_start: Optional[int] = Field(default=None, ge=1)
+    row_end: Optional[int] = Field(default=None, ge=1)
     token_count: int = Field(ge=0)
     score: float = 0.0
