@@ -25,6 +25,9 @@ from agents.prompts.research_prompts import (
     detect_research_intent,
 )
 from agents.tools.research_tools import RESEARCH_AGENT_TOOLS
+from agents.tools.research_dataset_statistics import (
+    build_research_dataset_statistics_tool,
+)
 from agents.graph.attachment_citations import build_attachment_citation_tool
 from utils.transient_attachment_context import (
     get_research_document_context,
@@ -47,6 +50,13 @@ _PATIENT_BOUND_TOOL_NAMES = frozenset(
         "init_patient_reminder_config",
         "modify_patient_reminder_config",
         "create_reminder",
+    }
+)
+_PREPARED_UNBOUND_DATA_TOOL_NAMES = frozenset(
+    {
+        "statistical_analysis",
+        "generate_research_visualization",
+        "export_research_data",
     }
 )
 
@@ -112,6 +122,12 @@ def _prepare_research(state: MedicalState, config: RunnableConfig | None = None)
     if state.get("platform_prepared"):
         research_document_context = get_research_document_context()
         candidates = research_document_context.selection.citation_candidates
+        dataset_statistics_tool = build_research_dataset_statistics_tool(
+            candidates,
+            doctor_id,
+        )
+        if dataset_statistics_tool is not None:
+            available_tools.append(dataset_statistics_tool)
         if candidates:
             available_tools = [
                 *available_tools,
@@ -288,6 +304,12 @@ def _filter_tools_by_permission(
 
     for tool in tools:
         tool_name = getattr(tool, "name", "")
+
+        if (
+            platform_prepared
+            and tool_name in _PREPARED_UNBOUND_DATA_TOOL_NAMES
+        ):
+            continue
 
         if patient_id is None and tool_name in _PATIENT_BOUND_TOOL_NAMES:
             continue

@@ -36,6 +36,7 @@ from agents.graph.citation_extractor import (
 from agents.graph.attachment_citations import (
     CITATION_TOOL_NAME,
     build_attachment_citation_fallback,
+    extract_attachment_citations_from_statistics_output,
     extract_attachment_citations_from_tool_output,
 )
 from application.services.legacy_text_turn_authority import (
@@ -1183,7 +1184,9 @@ class GraphManager:
         # 收集搜索工具来源，流结束后持久化到 context.citations
         collected_citations: List[Dict[str, Any]] = []
         collected_attachment_citations: List[Dict[str, Any]] = []
+        collected_statistics_citations: List[Dict[str, Any]] = []
         citation_tool_seen = False
+        statistics_tool_seen = False
         redact_research_tool_payload = (
             prepared_mode and agent_type == "research"
         )
@@ -1255,6 +1258,11 @@ class GraphManager:
                         and tool_name == CITATION_TOOL_NAME
                     ):
                         citation_tool_seen = True
+                    if (
+                        redact_research_tool_payload
+                        and tool_name == "statistical_analysis"
+                    ):
+                        statistics_tool_seen = True
                     tool_input = event.get("data", {}).get("input", {})
                     retained_tool_input = (
                         {} if redact_research_tool_payload else tool_input
@@ -1288,6 +1296,18 @@ class GraphManager:
                         research_context = get_research_document_context()
                         collected_attachment_citations.extend(
                             extract_attachment_citations_from_tool_output(
+                                raw_tool_output,
+                                research_context.selection.citation_candidates,
+                            )
+                        )
+                    elif (
+                        redact_research_tool_payload
+                        and tool_name == "statistical_analysis"
+                    ):
+                        statistics_tool_seen = True
+                        research_context = get_research_document_context()
+                        collected_statistics_citations.extend(
+                            extract_attachment_citations_from_statistics_output(
                                 raw_tool_output,
                                 research_context.selection.citation_candidates,
                             )
@@ -1505,13 +1525,18 @@ class GraphManager:
             )
             if (
                 not citation_tool_seen
+                and not statistics_tool_seen
                 and not collected_attachment_citations
+                and not collected_statistics_citations
             ):
                 collected_attachment_citations = fallback_citations
 
         final_citations = merge_citations(
             collected_citations,
-            collected_attachment_citations,
+            [
+                *collected_statistics_citations,
+                *collected_attachment_citations,
+            ],
         )
         if prepared_mode:
             yield PreparedGraphTerminal(

@@ -12,6 +12,7 @@ from agents.graph.attachment_citations import (
     build_attachment_citation_fallback,
     build_attachment_citation_tool,
     build_attachment_citations,
+    extract_attachment_citations_from_statistics_output,
 )
 from agents.graph.citation_extractor import merge_citations
 from agents.graph_manager import GraphManager, PreparedGraphTerminal
@@ -216,6 +217,88 @@ class AttachmentCitationBuilderTest(unittest.TestCase):
         )
         self.assertEqual(len(boundary["locator"]["sheet_name"]), 128)
         self.assertEqual(boundary["locator"]["row_end"], 50_000)
+
+    def test_successful_statistics_output_maps_only_exact_dataset_source(self):
+        candidates = (
+            _candidate(
+                "segment-a",
+                page_start=None,
+                page_end=None,
+                sheet_name="Sheet A",
+                row_start=1,
+                row_end=6,
+            ),
+            _candidate(
+                "segment-b",
+                page_start=None,
+                page_end=None,
+                sheet_name="Sheet B",
+                row_start=1,
+                row_end=11,
+            ),
+        )
+        output = json.dumps(
+            {
+                "schema_version": "research_dataset_statistics_v1",
+                "ok": True,
+                "source_segment_id": "segment-b",
+                "operation": "count",
+                "result": {"data_row_count": 10},
+            }
+        )
+
+        citations = extract_attachment_citations_from_statistics_output(
+            output,
+            candidates,
+        )
+
+        self.assertEqual(
+            [citation["segment_id"] for citation in citations],
+            ["segment-b"],
+        )
+        self.assertEqual(citations[0]["locator"]["sheet_name"], "Sheet B")
+
+    def test_failed_or_malformed_statistics_output_cannot_create_citation(self):
+        candidate = _candidate(
+            "segment-dataset",
+            page_start=None,
+            page_end=None,
+            sheet_name="CSV",
+            row_start=1,
+            row_end=6,
+        )
+        invalid = (
+            {
+                "schema_version": "research_dataset_statistics_v1",
+                "ok": False,
+                "error_code": "RESEARCH_DATASET_STATS_PRIVACY_LIMIT",
+            },
+            {
+                "schema_version": "research_dataset_statistics_v1",
+                "ok": True,
+                "source_segment_id": "unknown",
+                "operation": "count",
+                "result": {"data_row_count": 5},
+            },
+            {
+                "schema_version": "research_dataset_statistics_v1",
+                "ok": True,
+                "source_segment_id": "segment-dataset",
+                "operation": "count",
+                "result": {"data_row_count": 5},
+                "extra": True,
+            },
+        )
+
+        for output in invalid:
+            with self.subTest(output=set(output)):
+                self.assertEqual(
+                    extract_attachment_citations_from_statistics_output(
+                        output,
+                        (candidate,),
+                    ),
+                    [],
+                )
 
     def test_sheet_rows_rejects_partial_mixed_reversed_and_unsafe_fields(self):
         invalid_candidates = (
@@ -657,6 +740,183 @@ class GraphManagerAttachmentCitationTest(unittest.IsolatedAsyncioTestCase):
             ["segment-page"],
         )
         self.assertNotIn("segment-file", json.dumps(terminal.citations))
+
+    async def test_statistics_citation_is_automatic_exact_and_has_priority(self):
+        candidates = tuple(
+            _candidate(
+                f"segment-sheet-{index}",
+                attachment_id="attachment-xlsx",
+                page_start=None,
+                page_end=None,
+                sheet_name=f"Sheet {index}",
+                row_start=1,
+                row_end=6,
+            )
+            for index in range(11)
+        )
+        statistics_source = candidates[-1].segment_id
+        events = await self._stream_prepared(
+            candidates,
+            (
+                {
+                    "event": "on_tool_end",
+                    "name": CITATION_TOOL_NAME,
+                    "data": {
+                        "output": {
+                            "segment_ids": [
+                                candidate.segment_id
+                                for candidate in candidates[:10]
+                            ]
+                        }
+                    },
+                },
+                {
+                    "event": "on_tool_end",
+                    "name": "statistical_analysis",
+                    "data": {
+                        "output": json.dumps(
+                            {
+                                "schema_version": (
+                                    "research_dataset_statistics_v1"
+                                ),
+                                "ok": True,
+                                "source_segment_id": statistics_source,
+                                "operation": "count",
+                                "result": {"data_row_count": 5},
+                            }
+                        )
+                    },
+                },
+                {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="安全回答")},
+                },
+            ),
+            safe_attachment_refs=[
+                {
+                    "attachment_id": "attachment-xlsx",
+                    "document_version": 3,
+                    "content_sha256": "a" * 64,
+                    "page_count": 0,
+                }
+            ],
+        )
+
+        terminal = events[-1]
+        self.assertIsInstance(terminal, PreparedGraphTerminal)
+        attachment = [
+            citation
+            for citation in terminal.citations
+            if citation.get("source_type") == "attachment"
+        ]
+        self.assertEqual(len(attachment), 10)
+        self.assertEqual(attachment[0]["segment_id"], statistics_source)
+        self.assertEqual(
+            attachment[0]["locator"],
+            {
+                "type": "sheet_rows",
+                "sheet_name": "Sheet 10",
+                "row_start": 1,
+                "row_end": 6,
+            },
+        )
+
+    async def test_statistics_citation_does_not_depend_on_model_citation_call(self):
+        candidates = tuple(
+            _candidate(
+                f"segment-{name}",
+                attachment_id="attachment-xlsx",
+                page_start=None,
+                page_end=None,
+                sheet_name=name,
+                row_start=1,
+                row_end=6,
+            )
+            for name in ("First", "Selected", "Third")
+        )
+        events = await self._stream_prepared(
+            candidates,
+            (
+                {
+                    "event": "on_tool_end",
+                    "name": "statistical_analysis",
+                    "data": {
+                        "output": {
+                            "schema_version": (
+                                "research_dataset_statistics_v1"
+                            ),
+                            "ok": True,
+                            "source_segment_id": "segment-Selected",
+                            "operation": "numeric_summary",
+                            "result": {"valid_count": 5, "sum": "15"},
+                        }
+                    },
+                },
+                {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="安全回答")},
+                },
+            ),
+            safe_attachment_refs=[
+                {
+                    "attachment_id": "attachment-xlsx",
+                    "document_version": 3,
+                    "content_sha256": "a" * 64,
+                    "page_count": 0,
+                }
+            ],
+        )
+
+        terminal = events[-1]
+        self.assertEqual(
+            [citation["segment_id"] for citation in terminal.citations],
+            ["segment-Selected"],
+        )
+
+    async def test_failed_statistics_does_not_trigger_generic_fallback(self):
+        candidate = _candidate(
+            "segment-dataset",
+            page_start=None,
+            page_end=None,
+            sheet_name="CSV",
+            row_start=1,
+            row_end=6,
+        )
+        events = await self._stream_prepared(
+            (candidate,),
+            (
+                {
+                    "event": "on_tool_end",
+                    "name": "statistical_analysis",
+                    "data": {
+                        "output": {
+                            "schema_version": (
+                                "research_dataset_statistics_v1"
+                            ),
+                            "ok": False,
+                            "error_code": (
+                                "RESEARCH_DATASET_STATS_PRIVACY_LIMIT"
+                            ),
+                        }
+                    },
+                },
+                {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content="无法统计")},
+                },
+            ),
+            safe_attachment_refs=[
+                {
+                    "attachment_id": "attachment-1",
+                    "document_version": 3,
+                    "content_sha256": "a" * 64,
+                    "page_count": 0,
+                }
+            ],
+        )
+
+        terminal = events[-1]
+        self.assertEqual(terminal.citations, [])
 
     async def test_invalid_exact_tool_does_not_silently_trigger_fallback(self):
         candidates = (

@@ -22,6 +22,7 @@ from domain.models.research_dataset import (
     build_research_xlsx_descriptor_sha256,
     build_research_xlsx_sheet_descriptor_sha256,
 )
+from domain.models.research_dataset_query import ResearchDatasetAccessScope
 from domain.models.research_document import (
     IngestionIdentity,
     ResearchDocumentSegmentEntity,
@@ -29,6 +30,9 @@ from domain.models.research_document import (
 from infrastructure.database.mysql_connection import MySQLConnectionPool
 from infrastructure.repositories.research_document_repository_impl import (
     ResearchDocumentRepositoryImpl,
+)
+from infrastructure.repositories.research_dataset_query_repository_impl import (
+    ResearchDatasetQueryRepositoryImpl,
 )
 
 
@@ -48,6 +52,7 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
     def setUpClass(cls):
         cls.db = MySQLConnectionPool()
         cls.repository = ResearchDocumentRepositoryImpl(db=cls.db)
+        cls.query_repository = ResearchDatasetQueryRepositoryImpl(db=cls.db)
         for table_name in (
             "research_document_ingestion",
             "research_document_segment",
@@ -387,11 +392,12 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
             },
         )
 
+        materialization = self._csv_materialization(claim.entity.id)
         completed = self.repository.complete(
             claim.entity.id,
             claim.entity.attempt_count,
             [segment],
-            self._csv_materialization(claim.entity.id),
+            materialization,
         )
 
         self.assertTrue(completed)
@@ -442,6 +448,33 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         self.assertIsNone(csv_defaults["workbook_sheet_count"])
         self.assertIsNone(csv_defaults["empty_sheet_count"])
         self.assertIsNone(csv_defaults["total_record_count"])
+
+        scope = ResearchDatasetAccessScope(
+            doctor_id=self.doctor_id,
+            ingestion_id=claim.entity.id,
+            attachment_id=identity.attachment_id,
+            document_version=identity.document_version,
+            processor_type="csv_dataset_v1",
+        )
+        self.assertEqual(
+            self.query_repository.load_authorized(scope),
+            materialization,
+        )
+        self.assertIsNone(
+            self.query_repository.load_authorized(
+                scope.model_copy(update={"doctor_id": "other-doctor"})
+            )
+        )
+        self.db.execute(
+            """
+                UPDATE research_dataset_row_chunk
+                SET payload_sha256 = %s
+                WHERE sheet_id = %s
+            """,
+            ("0" * 64, materialization.sheets[0].id),
+        )
+        with self.assertRaises(ValueError):
+            self.query_repository.load_authorized(scope)
 
         self.assertEqual(
             self.repository.purge(self.doctor_id, identity.attachment_id),
@@ -532,6 +565,18 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(chunk_count["row_count"], 2)
         self.assertEqual(chunk_count["formula_cell_count"], 1)
+        self.assertEqual(
+            self.query_repository.load_authorized(
+                ResearchDatasetAccessScope(
+                    doctor_id=self.doctor_id,
+                    ingestion_id=claim.entity.id,
+                    attachment_id=identity.attachment_id,
+                    document_version=identity.document_version,
+                    processor_type="xlsx_dataset_v1",
+                )
+            ),
+            materialization,
+        )
 
         self.assertEqual(
             self.repository.purge(self.doctor_id, identity.attachment_id),

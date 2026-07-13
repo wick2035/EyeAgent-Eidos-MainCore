@@ -16,6 +16,24 @@ from domain.models.chat_entity import AttachmentCitation
 CITATION_TOOL_NAME = "cite_research_document_segments"
 MAX_ATTACHMENT_CITATIONS = 10
 MAX_ATTACHMENT_EXCERPT_LENGTH = 300
+_DATASET_STATISTICS_SCHEMA_VERSION = "research_dataset_statistics_v1"
+_DATASET_STATISTICS_OPERATIONS = frozenset(
+    {
+        "count",
+        "numeric_summary",
+        "frequency",
+        "grouped_numeric_summary",
+    }
+)
+_DATASET_STATISTICS_SUCCESS_KEYS = frozenset(
+    {
+        "schema_version",
+        "ok",
+        "source_segment_id",
+        "operation",
+        "result",
+    }
+)
 
 
 class AttachmentCitationSelection(BaseModel):
@@ -163,6 +181,44 @@ def extract_attachment_citations_from_tool_output(
         return []
 
 
+def extract_attachment_citations_from_statistics_output(
+    output: Any,
+    candidates: Iterable[ResearchCitationCandidate],
+) -> list[dict[str, Any]]:
+    """从成功的受限统计结果映射服务端可信的 exact sheet citation。"""
+
+    try:
+        value = getattr(output, "content", output)
+        if isinstance(value, str):
+            value = json.loads(value)
+        if (
+            not isinstance(value, dict)
+            or frozenset(value) != _DATASET_STATISTICS_SUCCESS_KEYS
+            or value.get("schema_version")
+            != _DATASET_STATISTICS_SCHEMA_VERSION
+            or value.get("ok") is not True
+            or type(value.get("source_segment_id")) is not str
+            or not value["source_segment_id"]
+            or value.get("operation")
+            not in _DATASET_STATISTICS_OPERATIONS
+            or not isinstance(value.get("result"), dict)
+        ):
+            return []
+        citations = build_attachment_citations(
+            [value["source_segment_id"]],
+            candidates,
+        )
+        if (
+            len(citations) != 1
+            or citations[0].get("locator", {}).get("type")
+            != "sheet_rows"
+        ):
+            return []
+        return citations
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+
 def _candidate_map(
     candidates: tuple[ResearchCitationCandidate, ...],
 ) -> dict[str, ResearchCitationCandidate]:
@@ -255,4 +311,5 @@ __all__ = [
     "build_attachment_citation_tool",
     "build_attachment_citations",
     "extract_attachment_citations_from_tool_output",
+    "extract_attachment_citations_from_statistics_output",
 ]
