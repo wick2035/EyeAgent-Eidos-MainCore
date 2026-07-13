@@ -12,6 +12,8 @@ from PIL import Image
 
 from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
+    ResearchCsvChunkManifest,
+    ResearchCsvManifest,
     ResearchDocxManifest,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
@@ -19,6 +21,12 @@ from infrastructure.attachments.parser_protocol import (
     WorkerManifest,
     WorkerPageManifest,
     WorkerRequest,
+)
+from infrastructure.attachments.research_csv_contract import (
+    MAX_RESEARCH_CSV_BYTES,
+    RESEARCH_CSV_ERROR_CODES,
+    ResearchCsvContractError,
+    parse_research_csv_bytes,
 )
 from infrastructure.attachments.research_text_contract import (
     ResearchTextContractError,
@@ -85,7 +93,13 @@ def parse_attachment_file(
     request: WorkerRequest,
     input_dir: Path | str,
     output_dir: Path | str,
-) -> WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest:
+) -> (
+    WorkerManifest
+    | ResearchPdfManifest
+    | ResearchTextManifest
+    | ResearchDocxManifest
+    | ResearchCsvManifest
+):
     input_root = _resolve_directory(input_dir)
     output_root = _resolve_directory(output_dir)
     input_path = input_root / request.input_filename
@@ -101,6 +115,8 @@ def parse_attachment_file(
     ):
         raise AttachmentParserError("ATTACHMENT_INPUT_PATH_INVALID")
 
+    if request.profile == "research_csv_v1":
+        return _parse_research_csv(input_real, output_root)
     if request.file_type == "image":
         return _parse_image(request, input_real, output_root)
     if request.profile == "research_text_v1":
@@ -331,6 +347,106 @@ def _parse_research_docx(
         text_sha256=normalized.sha256,
         character_count=normalized.character_count,
     )
+
+
+def _parse_research_csv(
+    input_path: Path,
+    output_root: Path,
+) -> ResearchCsvManifest:
+    created_paths: list[Path] = []
+    try:
+        with input_path.open("rb") as source:
+            content = source.read(MAX_RESEARCH_CSV_BYTES + 1)
+        if len(content) > MAX_RESEARCH_CSV_BYTES:
+            raise AttachmentParserError("RESEARCH_CSV_SIZE_LIMIT")
+        normalized = parse_research_csv_bytes(content)
+
+        descriptor_bytes = normalized.descriptor_canonical_json_bytes
+        descriptor_path = output_root / "descriptor.json"
+        _write_research_csv_artifact(descriptor_path, descriptor_bytes)
+        created_paths.append(descriptor_path)
+
+        chunks: list[ResearchCsvChunkManifest] = []
+        for chunk, chunk_bytes in zip(
+            normalized.chunks,
+            normalized.chunk_canonical_json_bytes,
+        ):
+            relative_path = f"chunk-{chunk.ordinal:05d}.json"
+            output_path = output_root / relative_path
+            _write_research_csv_artifact(output_path, chunk_bytes)
+            created_paths.append(output_path)
+            chunks.append(
+                ResearchCsvChunkManifest(
+                    ordinal=chunk.ordinal,
+                    relative_path=relative_path,
+                    sha256=hashlib.sha256(chunk_bytes).hexdigest(),
+                    byte_count=len(chunk_bytes),
+                    row_count=chunk.row_count,
+                    logical_row_start=chunk.logical_row_start,
+                    logical_row_end=chunk.logical_row_end,
+                    physical_row_start=chunk.physical_row_start,
+                    physical_row_end=chunk.physical_row_end,
+                )
+            )
+
+        descriptor = normalized.descriptor
+        return ResearchCsvManifest(
+            profile="research_csv_v1",
+            descriptor_relative_path=descriptor_path.name,
+            descriptor_sha256=hashlib.sha256(descriptor_bytes).hexdigest(),
+            descriptor_byte_count=len(descriptor_bytes),
+            chunks=tuple(chunks),
+            physical_line_count=descriptor.physical_line_count,
+            record_count=descriptor.record_count,
+            data_row_count=descriptor.data_row_count,
+            column_count=descriptor.column_count,
+            non_empty_cell_count=descriptor.non_empty_cell_count,
+            formula_like_cell_count=descriptor.formula_like_cell_count,
+        )
+    except ResearchCsvContractError as exc:
+        _remove_research_csv_artifacts(created_paths)
+        error_code = (
+            exc.error_code
+            if exc.error_code in RESEARCH_CSV_ERROR_CODES
+            else "RESEARCH_CSV_PARSE_FAILED"
+        )
+        raise AttachmentParserError(error_code) from None
+    except AttachmentParserError as exc:
+        _remove_research_csv_artifacts(created_paths)
+        error_code = (
+            exc.error_code
+            if exc.error_code in RESEARCH_CSV_ERROR_CODES
+            else "RESEARCH_CSV_PARSE_FAILED"
+        )
+        raise AttachmentParserError(error_code) from None
+    except Exception:
+        _remove_research_csv_artifacts(created_paths)
+        raise AttachmentParserError("RESEARCH_CSV_PARSE_FAILED") from None
+
+
+def _write_research_csv_artifact(path: Path, content: bytes) -> None:
+    try:
+        file_descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(file_descriptor, "wb") as output:
+            output.write(content)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise AttachmentParserError("RESEARCH_CSV_PARSE_FAILED") from None
+
+
+def _remove_research_csv_artifacts(paths: list[Path]) -> None:
+    for path in reversed(paths):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _validate_docx_archive(
@@ -599,7 +715,13 @@ def _resolve_directory(path: Path | str) -> Path:
 
 
 def _write_output_bundle(
-    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest,
+    manifest: (
+        WorkerManifest
+        | ResearchPdfManifest
+        | ResearchTextManifest
+        | ResearchDocxManifest
+        | ResearchCsvManifest
+    ),
     output_dir: Path | str,
     bundle_path: Path | str,
 ) -> None:
@@ -618,7 +740,9 @@ def _write_output_bundle(
 
     validated: list[tuple[Path, str]] = []
     total_bytes = 0
-    for relative_path, expected_sha256 in _manifest_artifacts(manifest):
+    for relative_path, expected_sha256, expected_byte_count in _manifest_artifacts(
+        manifest
+    ):
         source = output_root / relative_path
         try:
             metadata = source.lstat()
@@ -635,6 +759,11 @@ def _write_output_bundle(
         total_bytes += metadata.st_size
         if total_bytes > _MAX_OUTPUT_TOTAL_BYTES:
             raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+        if (
+            expected_byte_count is not None
+            and metadata.st_size != expected_byte_count
+        ):
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_SIZE_MISMATCH")
         if _sha256_file(resolved) != expected_sha256:
             raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
         validated.append((resolved, relative_path))
@@ -653,11 +782,17 @@ def _write_output_bundle(
 
 
 def _manifest_artifacts(
-    manifest: WorkerManifest | ResearchPdfManifest | ResearchTextManifest | ResearchDocxManifest,
-) -> tuple[tuple[str, str], ...]:
+    manifest: (
+        WorkerManifest
+        | ResearchPdfManifest
+        | ResearchTextManifest
+        | ResearchDocxManifest
+        | ResearchCsvManifest
+    ),
+) -> tuple[tuple[str, str, int | None], ...]:
     if isinstance(manifest, WorkerManifest):
         return tuple(
-            (page.relative_path, page.sha256) for page in manifest.pages
+            (page.relative_path, page.sha256, None) for page in manifest.pages
         )
     if isinstance(manifest, ResearchTextManifest):
         manifest = ResearchTextManifest(
@@ -666,7 +801,7 @@ def _manifest_artifacts(
             text_sha256=manifest.text_sha256,
             character_count=manifest.character_count,
         )
-        return ((manifest.text_relative_path, manifest.text_sha256),)
+        return ((manifest.text_relative_path, manifest.text_sha256, None),)
     if isinstance(manifest, ResearchDocxManifest):
         manifest = ResearchDocxManifest(
             profile=manifest.profile,
@@ -674,18 +809,44 @@ def _manifest_artifacts(
             text_sha256=manifest.text_sha256,
             character_count=manifest.character_count,
         )
-        return ((manifest.text_relative_path, manifest.text_sha256),)
+        return ((manifest.text_relative_path, manifest.text_sha256, None),)
+    if isinstance(manifest, ResearchCsvManifest):
+        manifest = ResearchCsvManifest(
+            profile=manifest.profile,
+            descriptor_relative_path=manifest.descriptor_relative_path,
+            descriptor_sha256=manifest.descriptor_sha256,
+            descriptor_byte_count=manifest.descriptor_byte_count,
+            chunks=tuple(manifest.chunks),
+            physical_line_count=manifest.physical_line_count,
+            record_count=manifest.record_count,
+            data_row_count=manifest.data_row_count,
+            column_count=manifest.column_count,
+            non_empty_cell_count=manifest.non_empty_cell_count,
+            formula_like_cell_count=manifest.formula_like_cell_count,
+        )
+        artifacts = [
+            (
+                manifest.descriptor_relative_path,
+                manifest.descriptor_sha256,
+                manifest.descriptor_byte_count,
+            )
+        ]
+        artifacts.extend(
+            (chunk.relative_path, chunk.sha256, chunk.byte_count)
+            for chunk in manifest.chunks
+        )
+        return tuple(artifacts)
     if not isinstance(manifest, ResearchPdfManifest):
         raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
     manifest = ResearchPdfManifest(tuple(manifest.pages))
-    artifacts: list[tuple[str, str]] = []
+    artifacts: list[tuple[str, str, int | None]] = []
     for page in manifest.pages:
-        artifacts.append((page.text_relative_path, page.text_sha256))
+        artifacts.append((page.text_relative_path, page.text_sha256, None))
         if page.ocr_image_relative_path is not None:
             if page.ocr_image_sha256 is None:
                 raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
             artifacts.append(
-                (page.ocr_image_relative_path, page.ocr_image_sha256)
+                (page.ocr_image_relative_path, page.ocr_image_sha256, None)
             )
     return tuple(artifacts)
 
@@ -748,6 +909,7 @@ def _assert_input_is_read_only(input_path: Path) -> None:
 
 
 def main() -> int:
+    request: WorkerRequest | None = None
     try:
         payload = sys.stdin.buffer.read(_MAX_REQUEST_BYTES + 1)
         if len(payload) > _MAX_REQUEST_BYTES:
@@ -759,17 +921,31 @@ def main() -> int:
         manifest = parse_attachment_file(request, Path("/input"), Path("/output"))
         _write_output_bundle(manifest, Path("/output"), Path("/output.bundle"))
         sys.stdout.buffer.write(manifest.to_json_bytes())
-        sys.stdout.buffer.write(b"\n")
         sys.stdout.buffer.flush()
         return 0
     except AttachmentParserError as exc:
+        error_code = exc.error_code
+        if (
+            request is not None
+            and request.profile == "research_csv_v1"
+            and error_code not in RESEARCH_CSV_ERROR_CODES
+        ):
+            error_code = "RESEARCH_CSV_PARSE_FAILED"
         sys.stderr.write(
-            json.dumps({"error_code": exc.error_code}, separators=(",", ":"))
+            json.dumps({"error_code": error_code}, separators=(",", ":"))
             + "\n"
         )
         return 2
     except BaseException:
-        sys.stderr.write('{"error_code":"ATTACHMENT_WORKER_FAILED"}\n')
+        error_code = (
+            "RESEARCH_CSV_PARSE_FAILED"
+            if request is not None and request.profile == "research_csv_v1"
+            else "ATTACHMENT_WORKER_FAILED"
+        )
+        sys.stderr.write(
+            json.dumps({"error_code": error_code}, separators=(",", ":"))
+            + "\n"
+        )
         return 2
 
 

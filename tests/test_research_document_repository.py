@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from contextlib import contextmanager
@@ -6,6 +7,14 @@ from pathlib import Path
 
 import pymysql
 
+from domain.models.research_dataset import (
+    ExtractedCsvChunk,
+    ExtractedCsvRow,
+    ExtractedResearchCsv,
+    build_research_csv_chunk_payload_sha256,
+    build_research_csv_descriptor_sha256,
+    build_research_dataset_materialization,
+)
 from domain.models.research_document import (
     IngestionIdentity,
     ResearchDocumentClaimResult,
@@ -15,6 +24,7 @@ from infrastructure.repositories.chat_turn_request_repository_impl import (
     ChatTurnRequestRepositoryImpl,
 )
 from infrastructure.repositories.research_document_repository_impl import (
+    ResearchDocumentFencingError,
     ResearchDocumentRepositoryImpl,
 )
 
@@ -116,6 +126,16 @@ def _ingestion_row(
     }
 
 
+def _csv_ingestion_row(*, status="processing", attempt_count=1):
+    row = _ingestion_row(status=status, attempt_count=attempt_count)
+    row.update(
+        processor_type="csv_dataset_v1",
+        extractor_version="research_csv_v1",
+        page_count=0,
+    )
+    return row
+
+
 def _segment(ordinal=0, content="第一段科研材料"):
     return ResearchDocumentSegmentEntity(
         ingestion_id="11111111-1111-5111-8111-111111111111",
@@ -144,6 +164,68 @@ def _segment_row(metadata_json='{"extraction_mode":"text"}'):
         "token_count": segment.token_count,
         "metadata_json": metadata_json,
     }
+
+
+def _dataset_materialization(
+    ingestion_id="11111111-1111-5111-8111-111111111111",
+):
+    rows = (
+        ExtractedCsvRow(
+            logical_row_number=1,
+            physical_row_start=2,
+            physical_row_end=2,
+            values=("张三", "正常"),
+        ),
+    )
+    chunk_fields = {
+        "ordinal": 1,
+        "logical_row_start": 1,
+        "logical_row_end": 1,
+        "physical_row_start": 2,
+        "physical_row_end": 2,
+        "row_count": 1,
+        "non_empty_cell_count": 2,
+        "formula_like_cell_count": 0,
+        "rows": rows,
+    }
+    chunk = ExtractedCsvChunk(
+        **chunk_fields,
+        payload_sha256=build_research_csv_chunk_payload_sha256(**chunk_fields),
+    )
+    descriptor_fields = {
+        "sheet_name": "CSV",
+        "headers": ("患者", "结果"),
+        "header_row_start": 1,
+        "header_row_end": 1,
+        "physical_line_count": 2,
+        "record_count": 2,
+        "data_row_count": 1,
+        "column_count": 2,
+        "non_empty_cell_count": 4,
+        "formula_like_cell_count": 0,
+        "missing_value_counts": (0, 0),
+    }
+    extracted = ExtractedResearchCsv(
+        **descriptor_fields,
+        chunks=(chunk,),
+        descriptor_sha256=build_research_csv_descriptor_sha256(
+            **descriptor_fields
+        ),
+    )
+    return build_research_dataset_materialization(ingestion_id, extracted)
+
+
+def _csv_segment():
+    return ResearchDocumentSegmentEntity(
+        ingestion_id="11111111-1111-5111-8111-111111111111",
+        ordinal=0,
+        content="CSV 数据集结构摘要",
+        sheet_name="CSV",
+        row_start=1,
+        row_end=1,
+        token_count=10,
+        metadata={"extraction_mode": "structured"},
+    )
 
 
 class ResearchDocumentSchemaTest(unittest.TestCase):
@@ -468,7 +550,7 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         processing = _ingestion_row(attempt_count=2)
         db = ScriptedDB(
             fetch_one_results=[processing],
-            execute_results=[1, 1],
+            execute_results=[1, 1, 1],
             execute_many_results=[2],
         )
         repository = ResearchDocumentRepositoryImpl(db=db)
@@ -479,6 +561,9 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         writes = [op for op in db.operations if op[0] in {"execute", "execute_many"}]
         self.assertTrue(all(op[3] == 1 for op in writes))
         self.assertIn("delete from research_document_segment", writes[0][1].lower())
+        self.assertFalse(
+            any("research_dataset" in operation[1].lower() for operation in writes)
+        )
         self.assertEqual(writes[1][0], "execute_many")
         self.assertIn("status = 'ready'", writes[2][1].lower())
         self.assertEqual(db.transaction_events, ["begin", "commit"])
@@ -490,6 +575,167 @@ class ResearchDocumentRepositoryTest(unittest.TestCase):
         self.assertIn("lease_expires_at > current_timestamp(6)", lock_sql)
         final_where = " ".join(writes[2][1].split()).lower().split("where", 1)[1]
         self.assertNotIn("current_timestamp(6)", final_where)
+
+    def test_complete_persists_dataset_graph_with_canonical_json_params(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        dataset = _dataset_materialization()
+        segment = _csv_segment()
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 1],
+            execute_many_results=[1, 1, 1],
+        )
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            processing["id"],
+            2,
+            [segment],
+            dataset,
+        )
+
+        self.assertTrue(completed)
+        normalized_operations = [
+            (operation, " ".join(sql.split()).lower(), params, depth)
+            for operation, sql, params, depth in db.operations
+        ]
+        dataset_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset (" in operation[1]
+        )
+        self.assertEqual(
+            dataset_insert[2],
+            (
+                dataset.dataset.id,
+                dataset.dataset.ingestion_id,
+                "csv",
+                1,
+                1,
+                2,
+                4,
+                0,
+                dataset.dataset.descriptor_sha256,
+            ),
+        )
+        sheet_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_sheet" in operation[1]
+        )
+        self.assertEqual(sheet_insert[2][0][4], '["患者","结果"]')
+        self.assertEqual(sheet_insert[2][0][11], "[0,0]")
+        chunk_insert = next(
+            operation
+            for operation in normalized_operations
+            if "insert into research_dataset_row_chunk" in operation[1]
+        )
+        expected_rows_json = json.dumps(
+            [row.model_dump(mode="json") for row in dataset.row_chunks[0].rows],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(chunk_insert[2][0][10], expected_rows_json)
+        self.assertIn("张三", chunk_insert[2][0][10])
+        ready_update = next(
+            operation
+            for operation in normalized_operations
+            if "set status = 'ready'" in operation[1]
+        )
+        self.assertEqual(ready_update[2][0], 0)
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_complete_active_attempt_miss_with_dataset_performs_no_write(self):
+        db = ScriptedDB(fetch_one_results=[None])
+
+        completed = ResearchDocumentRepositoryImpl(db=db).complete(
+            "11111111-1111-5111-8111-111111111111",
+            2,
+            [_csv_segment()],
+            _dataset_materialization(),
+        )
+
+        self.assertFalse(completed)
+        self.assertEqual([operation[0] for operation in db.operations], ["fetch_one"])
+        self.assertEqual(db.transaction_events, ["begin", "commit"])
+
+    def test_dataset_insert_failure_rolls_back_without_publishing_ready(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, RuntimeError("dataset insert failed")],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "dataset insert failed"):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"],
+                2,
+                [_csv_segment()],
+                _dataset_materialization(),
+            )
+
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+        self.assertFalse(
+            any("status = 'ready'" in operation[1].lower() for operation in db.operations)
+        )
+
+    def test_dataset_complete_cas_loss_rolls_back_all_materialized_rows(self):
+        processing = _csv_ingestion_row(attempt_count=2)
+        db = ScriptedDB(
+            fetch_one_results=[processing],
+            execute_results=[1, 1, 1, 0],
+            execute_many_results=[1, 1, 1],
+        )
+
+        with self.assertRaises(ResearchDocumentFencingError):
+            ResearchDocumentRepositoryImpl(db=db).complete(
+                processing["id"],
+                2,
+                [_csv_segment()],
+                _dataset_materialization(),
+            )
+
+        self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_rejects_dataset_and_processor_type_mismatch(self):
+        cases = (
+            (_csv_ingestion_row(attempt_count=2), [_csv_segment()], None),
+            (_ingestion_row(attempt_count=2), [_segment()], _dataset_materialization()),
+        )
+        for processing, segments, dataset in cases:
+            with self.subTest(processor_type=processing["processor_type"]):
+                db = ScriptedDB(fetch_one_results=[processing])
+                with self.assertRaisesRegex(ValueError, "processor_type"):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        processing["id"],
+                        2,
+                        segments,
+                        dataset,
+                    )
+                self.assertEqual(
+                    [operation[0] for operation in db.operations],
+                    ["fetch_one"],
+                )
+                self.assertEqual(db.transaction_events, ["begin", "rollback"])
+
+    def test_complete_revalidates_dataset_and_target_before_database_access(self):
+        mutated = _dataset_materialization()
+        object.__setattr__(mutated.dataset, "total_data_row_count", 2)
+        foreign = _dataset_materialization(
+            "22222222-2222-5222-8222-222222222222"
+        )
+
+        for dataset in (mutated, foreign):
+            with self.subTest(dataset_id=dataset.dataset.id):
+                db = ScriptedDB()
+                with self.assertRaises(ValueError):
+                    ResearchDocumentRepositoryImpl(db=db).complete(
+                        "11111111-1111-5111-8111-111111111111",
+                        2,
+                        [_csv_segment()],
+                        dataset,
+                    )
+                self.assertEqual(db.operations, [])
 
     def test_segment_failure_rolls_back_without_publishing_ready(self):
         processing = _ingestion_row(attempt_count=2)

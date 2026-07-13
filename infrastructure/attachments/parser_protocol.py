@@ -4,6 +4,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from infrastructure.attachments.research_csv_contract import (
+    MAX_RESEARCH_CSV_CANONICAL_BYTES,
+    MAX_RESEARCH_CSV_CHUNK_BYTES,
+    MAX_RESEARCH_CSV_CHUNK_RECORDS,
+    MAX_RESEARCH_CSV_COLUMNS,
+    MAX_RESEARCH_CSV_DESCRIPTOR_BYTES,
+    MAX_RESEARCH_CSV_NON_EMPTY_CELLS,
+    MAX_RESEARCH_CSV_PHYSICAL_LINES,
+    MAX_RESEARCH_CSV_RECORDS,
+    NormalizedResearchCsv,
+)
+
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DOCX_MIME_TYPE = (
@@ -39,6 +51,7 @@ class WorkerRequest:
             "pdf": {"application/pdf"},
             "text": {"text/plain"},
             "docx": {_DOCX_MIME_TYPE},
+            "csv": {"text/csv"},
         }
         if (
             not isinstance(self.profile, str)
@@ -48,6 +61,7 @@ class WorkerRequest:
                 "research_pdf_v1",
                 "research_text_v1",
                 "research_docx_v1",
+                "research_csv_v1",
             }
         ):
             raise AttachmentParserError("ATTACHMENT_PROFILE_INVALID")
@@ -67,7 +81,12 @@ class WorkerRequest:
             and self.file_type != "docx"
         ) or (self.profile != "research_docx_v1" and self.file_type == "docx"):
             raise AttachmentParserError("ATTACHMENT_TYPE_INVALID")
-        if self.file_type in {"image", "text", "docx"} and self.declared_page_count is not None:
+        if (
+            self.profile == "research_csv_v1"
+            and self.file_type != "csv"
+        ) or (self.profile != "research_csv_v1" and self.file_type == "csv"):
+            raise AttachmentParserError("ATTACHMENT_TYPE_INVALID")
+        if self.file_type in {"image", "text", "docx", "csv"} and self.declared_page_count is not None:
             raise AttachmentParserError("ATTACHMENT_PAGE_COUNT_INVALID")
         if self.file_type == "pdf" and (
             not isinstance(self.declared_page_count, int)
@@ -431,6 +450,234 @@ class ResearchDocxManifest:
 
 
 @dataclass(frozen=True)
+class ResearchCsvChunkManifest:
+    ordinal: int
+    relative_path: str
+    sha256: str
+    byte_count: int
+    row_count: int
+    logical_row_start: int
+    logical_row_end: int
+    physical_row_start: int
+    physical_row_end: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.ordinal) is not int
+            or not 1 <= self.ordinal <= MAX_RESEARCH_CSV_RECORDS
+            or self.relative_path != f"chunk-{self.ordinal:05d}.json"
+        ):
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        if not isinstance(self.sha256, str) or not _SHA256_PATTERN.fullmatch(
+            self.sha256
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if (
+            type(self.byte_count) is not int
+            or not 1 <= self.byte_count <= MAX_RESEARCH_CSV_CHUNK_BYTES
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if (
+            type(self.row_count) is not int
+            or not 1 <= self.row_count <= MAX_RESEARCH_CSV_CHUNK_RECORDS
+            or type(self.logical_row_start) is not int
+            or type(self.logical_row_end) is not int
+            or not 1 <= self.logical_row_start <= self.logical_row_end <= MAX_RESEARCH_CSV_RECORDS
+            or self.logical_row_end - self.logical_row_start + 1 != self.row_count
+            or type(self.physical_row_start) is not int
+            or type(self.physical_row_end) is not int
+            or not 1 <= self.physical_row_start <= self.physical_row_end <= MAX_RESEARCH_CSV_PHYSICAL_LINES
+            or self.physical_row_end - self.physical_row_start + 1 < self.row_count
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+
+
+@dataclass(frozen=True)
+class ResearchCsvManifest:
+    profile: str
+    descriptor_relative_path: str
+    descriptor_sha256: str
+    descriptor_byte_count: int
+    chunks: tuple[ResearchCsvChunkManifest, ...]
+    physical_line_count: int
+    record_count: int
+    data_row_count: int
+    column_count: int
+    non_empty_cell_count: int
+    formula_like_cell_count: int
+
+    def __post_init__(self) -> None:
+        if self.profile != "research_csv_v1":
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if self.descriptor_relative_path != "descriptor.json":
+            raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+        if not isinstance(
+            self.descriptor_sha256, str
+        ) or not _SHA256_PATTERN.fullmatch(self.descriptor_sha256):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if (
+            type(self.descriptor_byte_count) is not int
+            or not 1
+            <= self.descriptor_byte_count
+            <= MAX_RESEARCH_CSV_DESCRIPTOR_BYTES
+            or not isinstance(self.chunks, tuple)
+            or len(self.chunks) > MAX_RESEARCH_CSV_RECORDS
+            or type(self.physical_line_count) is not int
+            or not 1 <= self.physical_line_count <= MAX_RESEARCH_CSV_PHYSICAL_LINES
+            or type(self.record_count) is not int
+            or not 1 <= self.record_count <= MAX_RESEARCH_CSV_RECORDS
+            or type(self.data_row_count) is not int
+            or not 0 <= self.data_row_count < MAX_RESEARCH_CSV_RECORDS
+            or self.record_count != self.data_row_count + 1
+            or type(self.column_count) is not int
+            or not 1 <= self.column_count <= MAX_RESEARCH_CSV_COLUMNS
+            or type(self.non_empty_cell_count) is not int
+            or not self.column_count
+            <= self.non_empty_cell_count
+            <= MAX_RESEARCH_CSV_NON_EMPTY_CELLS
+            or type(self.formula_like_cell_count) is not int
+            or not 0 <= self.formula_like_cell_count <= self.non_empty_cell_count
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+
+        validated: list[ResearchCsvChunkManifest] = []
+        for raw_chunk in self.chunks:
+            if not isinstance(raw_chunk, ResearchCsvChunkManifest):
+                raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+            validated.append(
+                ResearchCsvChunkManifest(
+                    ordinal=raw_chunk.ordinal,
+                    relative_path=raw_chunk.relative_path,
+                    sha256=raw_chunk.sha256,
+                    byte_count=raw_chunk.byte_count,
+                    row_count=raw_chunk.row_count,
+                    logical_row_start=raw_chunk.logical_row_start,
+                    logical_row_end=raw_chunk.logical_row_end,
+                    physical_row_start=raw_chunk.physical_row_start,
+                    physical_row_end=raw_chunk.physical_row_end,
+                )
+            )
+        chunks = tuple(validated)
+        if bool(chunks) != bool(self.data_row_count):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if chunks:
+            if (
+                tuple(chunk.ordinal for chunk in chunks)
+                != tuple(range(1, len(chunks) + 1))
+                or chunks[0].logical_row_start != 1
+                or chunks[-1].logical_row_end != self.data_row_count
+                or chunks[-1].physical_row_end != self.physical_line_count
+                or sum(chunk.row_count for chunk in chunks) != self.data_row_count
+                or any(
+                    current.logical_row_start != previous.logical_row_end + 1
+                    or current.physical_row_start != previous.physical_row_end + 1
+                    for previous, current in zip(chunks, chunks[1:])
+                )
+            ):
+                raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        if (
+            self.descriptor_byte_count + sum(chunk.byte_count for chunk in chunks)
+            > MAX_RESEARCH_CSV_CANONICAL_BYTES
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        object.__setattr__(self, "chunks", chunks)
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "profile": self.profile,
+                "descriptor_relative_path": self.descriptor_relative_path,
+                "descriptor_sha256": self.descriptor_sha256,
+                "descriptor_byte_count": self.descriptor_byte_count,
+                "chunks": [
+                    {
+                        "ordinal": chunk.ordinal,
+                        "relative_path": chunk.relative_path,
+                        "sha256": chunk.sha256,
+                        "byte_count": chunk.byte_count,
+                        "row_count": chunk.row_count,
+                        "logical_row_start": chunk.logical_row_start,
+                        "logical_row_end": chunk.logical_row_end,
+                        "physical_row_start": chunk.physical_row_start,
+                        "physical_row_end": chunk.physical_row_end,
+                    }
+                    for chunk in self.chunks
+                ],
+                "physical_line_count": self.physical_line_count,
+                "record_count": self.record_count,
+                "data_row_count": self.data_row_count,
+                "column_count": self.column_count,
+                "non_empty_cell_count": self.non_empty_cell_count,
+                "formula_like_cell_count": self.formula_like_cell_count,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json_bytes(cls, payload: bytes) -> "ResearchCsvManifest":
+        try:
+            decoded: Any = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AttachmentParserError(
+                "ATTACHMENT_WORKER_MANIFEST_INVALID"
+            ) from exc
+        expected_fields = {
+            "profile",
+            "descriptor_relative_path",
+            "descriptor_sha256",
+            "descriptor_byte_count",
+            "chunks",
+            "physical_line_count",
+            "record_count",
+            "data_row_count",
+            "column_count",
+            "non_empty_cell_count",
+            "formula_like_cell_count",
+        }
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) != expected_fields
+            or not isinstance(decoded["chunks"], list)
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+        chunk_fields = {
+            "ordinal",
+            "relative_path",
+            "sha256",
+            "byte_count",
+            "row_count",
+            "logical_row_start",
+            "logical_row_end",
+            "physical_row_start",
+            "physical_row_end",
+        }
+        chunks: list[ResearchCsvChunkManifest] = []
+        for raw_chunk in decoded["chunks"]:
+            if not isinstance(raw_chunk, dict) or set(raw_chunk) != chunk_fields:
+                raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+            try:
+                chunks.append(ResearchCsvChunkManifest(**raw_chunk))
+            except TypeError as exc:
+                raise AttachmentParserError(
+                    "ATTACHMENT_WORKER_MANIFEST_INVALID"
+                ) from exc
+        values = dict(decoded)
+        values["chunks"] = tuple(chunks)
+        try:
+            manifest = cls(**values)
+        except TypeError as exc:
+            raise AttachmentParserError(
+                "ATTACHMENT_WORKER_MANIFEST_INVALID"
+            ) from exc
+        if manifest.to_json_bytes() != payload:
+            raise AttachmentParserError(
+                "ATTACHMENT_WORKER_MANIFEST_INVALID"
+            )
+        return manifest
+
+
+@dataclass(frozen=True)
 class ParsedAttachmentPage:
     page_number: int
     mime_type: str
@@ -489,6 +736,18 @@ class ParsedResearchDocx:
     text: str
     text_sha256: str
     character_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.document_version) is not int or self.document_version < 1:
+            raise AttachmentParserError("ATTACHMENT_DOCUMENT_VERSION_INVALID")
+
+
+@dataclass(frozen=True)
+class ParsedResearchCsv:
+    attachment_id: str
+    document_version: int
+    mime_type: str
+    normalized: NormalizedResearchCsv
 
     def __post_init__(self) -> None:
         if type(self.document_version) is not int or self.document_version < 1:

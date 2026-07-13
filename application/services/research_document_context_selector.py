@@ -18,8 +18,10 @@ from application.services.research_document_segmenter import (
     MAX_SEGMENT_TOKENS,
     SEGMENT_SCHEMA_VERSION,
     estimate_tokens_v1,
+    validate_csv_structure_summary_content,
 )
 from application.services.research_document_ingestion_service import (
+    CSV_EXTRACTOR_VERSION,
     IMAGE_EXTRACTOR_VERSION,
     PDF_EXTRACTOR_VERSION,
     TEXT_EXTRACTOR_VERSION,
@@ -61,6 +63,7 @@ _EXTRACTOR_BY_PROCESSOR = {
     "image_vision_v1": IMAGE_EXTRACTOR_VERSION,
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
     "docx_text_v1": DOCX_EXTRACTOR_VERSION,
+    "csv_dataset_v1": CSV_EXTRACTOR_VERSION,
 }
 
 _MAP_PROMPT = (
@@ -546,14 +549,6 @@ def _validate_and_order_segments(ids, entities, raw_segments):
             or raw.id in seen_ids
             or segment.token_count != estimate_tokens_v1(segment.content)
             or segment.token_count > MAX_SEGMENT_TOKENS
-            or any(
-                value is not None
-                for value in (
-                    segment.sheet_name,
-                    segment.row_start,
-                    segment.row_end,
-                )
-            )
         ):
             raise ResearchDocumentContextError()
         seen_ids.add(raw.id)
@@ -571,6 +566,31 @@ def _validate_and_order_segments(ids, entities, raw_segments):
 
 
 def _validate_segment_sources(entity, segments):
+    if entity.processor_type == "csv_dataset_v1":
+        if entity.page_count != 0 or len(segments) != 1:
+            raise ResearchDocumentContextError()
+        segment = segments[0]
+        try:
+            validate_csv_structure_summary_content(segment.content)
+        except ValueError:
+            raise ResearchDocumentContextError() from None
+        if (
+            segment.page_start is not None
+            or segment.page_end is not None
+            or segment.sheet_name != "CSV"
+            or type(segment.row_start) is not int
+            or type(segment.row_end) is not int
+            or not 1 <= segment.row_start <= segment.row_end <= 50_000
+            or segment.metadata
+            != {
+                "block_index": 0,
+                "extraction_method": "csv_structured",
+                "extraction_mode": "structured_summary",
+            }
+        ):
+            raise ResearchDocumentContextError()
+        return
+
     if entity.processor_type == "plain_text_v1":
         if entity.page_count != 0:
             raise ResearchDocumentContextError()
@@ -619,6 +639,9 @@ def _validate_segment_sources(entity, segments):
         if (
             segment.page_start is not None
             or segment.page_end is not None
+            or segment.sheet_name is not None
+            or segment.row_start is not None
+            or segment.row_end is not None
             or metadata.get("block_index") != 0
             or metadata.get("extraction_method") != "vision"
             or metadata.get("extraction_mode") != "vision"
@@ -650,6 +673,9 @@ def _validate_segment_sources(entity, segments):
         ocr_count = metadata.get("ocr_page_count")
         if (
             not required.issubset(metadata)
+            or segment.sheet_name is not None
+            or segment.row_start is not None
+            or segment.row_end is not None
             or metadata.get("block_index") != segment.ordinal
             or not isinstance(pages, list)
             or not pages

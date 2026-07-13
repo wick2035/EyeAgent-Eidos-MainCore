@@ -6,6 +6,11 @@ from typing import Optional
 from application.repositories.research_document_repository import (
     ResearchDocumentRepository,
 )
+from domain.models.research_dataset import (
+    ResearchDatasetMaterialization,
+    ResearchDatasetRowChunkEntity,
+    ResearchDatasetSheetEntity,
+)
 from domain.models.research_document import (
     IngestionIdentity,
     ResearchDocumentClaimResult,
@@ -139,8 +144,10 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         ingestion_id: str,
         attempt_count: int,
         segments: list[ResearchDocumentSegmentEntity],
+        dataset: Optional[ResearchDatasetMaterialization] = None,
     ) -> bool:
         segments = self._validate_completion_segments(ingestion_id, segments)
+        dataset = self._validate_completion_dataset(ingestion_id, dataset)
         with self.db.transaction():
             row = self._select_active_attempt_for_update(
                 ingestion_id,
@@ -152,6 +159,11 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 or row["attempt_count"] != attempt_count
             ):
                 return False
+            is_csv_ingestion = row["processor_type"] == "csv_dataset_v1"
+            if is_csv_ingestion != (dataset is not None):
+                raise ValueError("dataset 必须与 ingestion processor_type 匹配")
+            if dataset is not None and dataset.dataset.file_type != "csv":
+                raise ValueError("CSV ingestion 只能发布 CSV dataset")
 
             self.db.execute(
                 """
@@ -160,6 +172,62 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
                 """,
                 (ingestion_id,),
             )
+            if dataset is not None:
+                self.db.execute(
+                    """
+                        DELETE FROM research_dataset
+                        WHERE ingestion_id = %s
+                    """,
+                    (ingestion_id,),
+                )
+                self.db.execute(
+                    """
+                        INSERT INTO research_dataset (
+                            id, ingestion_id, file_type, sheet_count,
+                            total_data_row_count, total_column_count,
+                            total_non_empty_cell_count,
+                            total_formula_like_cell_count, descriptor_sha256
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """,
+                    self._dataset_params(dataset),
+                )
+                self.db.execute_many(
+                    """
+                        INSERT INTO research_dataset_sheet (
+                            id, dataset_id, ordinal, name, header_json,
+                            header_row_start, header_row_end,
+                            physical_line_count, record_count, data_row_count,
+                            column_count, missing_value_counts_json,
+                            non_empty_cell_count, formula_like_cell_count,
+                            descriptor_sha256
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """,
+                    [self._dataset_sheet_params(sheet) for sheet in dataset.sheets],
+                )
+                if dataset.row_chunks:
+                    self.db.execute_many(
+                        """
+                            INSERT INTO research_dataset_row_chunk (
+                                id, sheet_id, ordinal, physical_row_start,
+                                physical_row_end, logical_row_start,
+                                logical_row_end, row_count,
+                                non_empty_cell_count, formula_like_cell_count,
+                                rows_json, payload_sha256
+                            ) VALUES (
+                                %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s
+                            )
+                        """,
+                        [
+                            self._dataset_row_chunk_params(chunk)
+                            for chunk in dataset.row_chunks
+                        ],
+                    )
             self.db.execute_many(
                 """
                     INSERT INTO research_document_segment (
@@ -439,6 +507,86 @@ class ResearchDocumentRepositoryImpl(ResearchDocumentRepository):
         if len(ordinals) != len(set(ordinals)):
             raise ValueError("segment ordinal 不能重复")
         return validated_segments
+
+    @staticmethod
+    def _validate_completion_dataset(
+        ingestion_id: str,
+        dataset: Optional[ResearchDatasetMaterialization],
+    ) -> Optional[ResearchDatasetMaterialization]:
+        if dataset is None:
+            return None
+        validated_dataset = ResearchDatasetMaterialization.model_validate(
+            copy.deepcopy(dataset.model_dump(mode="python"))
+        )
+        if validated_dataset.dataset.ingestion_id != ingestion_id:
+            raise ValueError("dataset 不属于目标 ingestion")
+        return validated_dataset
+
+    @staticmethod
+    def _dataset_params(dataset: ResearchDatasetMaterialization) -> tuple:
+        entity = dataset.dataset
+        return (
+            entity.id,
+            entity.ingestion_id,
+            entity.file_type,
+            entity.sheet_count,
+            entity.total_data_row_count,
+            entity.total_column_count,
+            entity.total_non_empty_cell_count,
+            entity.total_formula_like_cell_count,
+            entity.descriptor_sha256,
+        )
+
+    @classmethod
+    def _dataset_sheet_params(cls, sheet: ResearchDatasetSheetEntity) -> tuple:
+        return (
+            sheet.id,
+            sheet.dataset_id,
+            sheet.ordinal,
+            sheet.name,
+            cls._canonical_json(sheet.headers),
+            sheet.header_row_start,
+            sheet.header_row_end,
+            sheet.physical_line_count,
+            sheet.record_count,
+            sheet.data_row_count,
+            sheet.column_count,
+            cls._canonical_json(sheet.missing_value_counts),
+            sheet.non_empty_cell_count,
+            sheet.formula_like_cell_count,
+            sheet.descriptor_sha256,
+        )
+
+    @classmethod
+    def _dataset_row_chunk_params(
+        cls,
+        chunk: ResearchDatasetRowChunkEntity,
+    ) -> tuple:
+        return (
+            chunk.id,
+            chunk.sheet_id,
+            chunk.ordinal,
+            chunk.physical_row_start,
+            chunk.physical_row_end,
+            chunk.logical_row_start,
+            chunk.logical_row_end,
+            chunk.row_count,
+            chunk.non_empty_cell_count,
+            chunk.formula_like_cell_count,
+            cls._canonical_json(
+                [row.model_dump(mode="json") for row in chunk.rows]
+            ),
+            chunk.payload_sha256,
+        )
+
+    @staticmethod
+    def _canonical_json(value: object) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _segment_params(segment: ResearchDocumentSegmentEntity) -> tuple:

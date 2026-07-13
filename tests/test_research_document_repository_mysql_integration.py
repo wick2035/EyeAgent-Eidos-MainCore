@@ -5,7 +5,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from domain.models.research_document import IngestionIdentity
+from application.services.research_document_segmenter import estimate_tokens_v1
+from domain.models.research_dataset import (
+    ExtractedCsvChunk,
+    ExtractedCsvRow,
+    ExtractedResearchCsv,
+    build_research_csv_chunk_payload_sha256,
+    build_research_csv_descriptor_sha256,
+    build_research_dataset_id,
+    build_research_dataset_materialization,
+)
+from domain.models.research_document import (
+    IngestionIdentity,
+    ResearchDocumentSegmentEntity,
+)
 from infrastructure.database.mysql_connection import MySQLConnectionPool
 from infrastructure.repositories.research_document_repository_impl import (
     ResearchDocumentRepositoryImpl,
@@ -31,6 +44,9 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         for table_name in (
             "research_document_ingestion",
             "research_document_segment",
+            "research_dataset",
+            "research_dataset_sheet",
+            "research_dataset_row_chunk",
         ):
             row = cls.db.fetch_one(f"SHOW TABLE STATUS LIKE '{table_name}'")
             if row is None:
@@ -62,6 +78,69 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
             processor_type="plain_text_v1",
             extractor_version="plain_text_v1",
             segment_schema_version="segment_v1",
+        )
+
+    def _csv_identity(self) -> IngestionIdentity:
+        return IngestionIdentity(
+            doctor_id=self.doctor_id,
+            attachment_id="task9-csv",
+            document_version=1,
+            content_sha256="c" * 64,
+            processor_type="csv_dataset_v1",
+            extractor_version="research_csv_v1",
+            segment_schema_version="segment_v1",
+        )
+
+    @staticmethod
+    def _csv_materialization(ingestion_id: str):
+        rows = (
+            ExtractedCsvRow(
+                logical_row_number=1,
+                physical_row_start=2,
+                physical_row_end=2,
+                values=("Alice", "1"),
+            ),
+        )
+        chunk_fields = {
+            "ordinal": 1,
+            "logical_row_start": 1,
+            "logical_row_end": 1,
+            "physical_row_start": 2,
+            "physical_row_end": 2,
+            "row_count": 1,
+            "non_empty_cell_count": 2,
+            "formula_like_cell_count": 0,
+            "rows": rows,
+        }
+        chunk = ExtractedCsvChunk(
+            **chunk_fields,
+            payload_sha256=build_research_csv_chunk_payload_sha256(
+                **chunk_fields
+            ),
+        )
+        descriptor_fields = {
+            "sheet_name": "CSV",
+            "headers": ("name", "value"),
+            "header_row_start": 1,
+            "header_row_end": 1,
+            "physical_line_count": 2,
+            "record_count": 2,
+            "data_row_count": 1,
+            "column_count": 2,
+            "non_empty_cell_count": 4,
+            "formula_like_cell_count": 0,
+            "missing_value_counts": (0, 0),
+        }
+        extracted = ExtractedResearchCsv(
+            **descriptor_fields,
+            chunks=(chunk,),
+            descriptor_sha256=build_research_csv_descriptor_sha256(
+                **descriptor_fields
+            ),
+        )
+        return build_research_dataset_materialization(
+            ingestion_id,
+            extracted,
         )
 
     def _concurrent_claims(self, identity, now, lease_until):
@@ -140,3 +219,78 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         self.assertEqual(summary["row_count"], 1)
         self.assertEqual(summary["min_attempt"], 2)
         self.assertEqual(summary["max_attempt"], 2)
+
+    def test_csv_complete_is_atomic_and_purge_cascades_dataset_graph(self):
+        identity = self._csv_identity()
+        now = datetime.now()
+        claim = self.repository.claim(
+            identity,
+            now,
+            now + timedelta(minutes=5),
+        )
+        content = "CSV 结构摘要；本摘要不包含原始数据行"
+        segment = ResearchDocumentSegmentEntity(
+            ingestion_id=claim.entity.id,
+            ordinal=0,
+            content=content,
+            sheet_name="CSV",
+            row_start=1,
+            row_end=2,
+            token_count=estimate_tokens_v1(content),
+            metadata={
+                "block_index": 0,
+                "extraction_method": "csv_structured",
+                "extraction_mode": "structured_summary",
+            },
+        )
+
+        completed = self.repository.complete(
+            claim.entity.id,
+            claim.entity.attempt_count,
+            [segment],
+            self._csv_materialization(claim.entity.id),
+        )
+
+        self.assertTrue(completed)
+        dataset_id = build_research_dataset_id(claim.entity.id)
+        queries = (
+            (
+                "SELECT COUNT(*) AS row_count FROM research_dataset "
+                "WHERE ingestion_id = %s",
+                claim.entity.id,
+            ),
+            (
+                "SELECT COUNT(*) AS row_count FROM research_dataset_sheet "
+                "WHERE dataset_id = %s",
+                dataset_id,
+            ),
+            (
+                """
+                    SELECT COUNT(*) AS row_count
+                    FROM research_dataset_row_chunk chunk
+                    JOIN research_dataset_sheet sheet
+                      ON sheet.id = chunk.sheet_id
+                    WHERE sheet.dataset_id = %s
+                """,
+                dataset_id,
+            ),
+            (
+                "SELECT COUNT(*) AS row_count FROM research_document_segment "
+                "WHERE ingestion_id = %s",
+                claim.entity.id,
+            ),
+        )
+        for sql, value in queries:
+            row = self.db.fetch_one(sql, (value,))
+            self.assertEqual(row["row_count"], 1)
+
+        self.assertEqual(
+            self.repository.purge(self.doctor_id, identity.attachment_id),
+            1,
+        )
+        dataset_row = self.db.fetch_one(
+            "SELECT COUNT(*) AS row_count FROM research_dataset "
+            "WHERE ingestion_id = %s",
+            (claim.entity.id,),
+        )
+        self.assertEqual(dataset_row["row_count"], 0)

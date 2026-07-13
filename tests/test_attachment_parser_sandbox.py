@@ -11,6 +11,7 @@ import tempfile
 import unicodedata
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -19,12 +20,18 @@ from PIL import Image
 from infrastructure.attachments import parser_sandbox as sandbox_module
 from infrastructure.attachments.parser_protocol import AttachmentParserError
 from infrastructure.attachments.parser_protocol import (
+    ParsedResearchCsv,
     ParsedResearchPdf,
     ParsedResearchDocx,
     ParsedResearchText,
+    ResearchCsvChunkManifest,
+    ResearchCsvManifest,
     ResearchPdfManifest,
     ResearchPdfPageManifest,
     ResearchTextManifest,
+)
+from infrastructure.attachments.research_csv_contract import (
+    parse_research_csv_bytes,
 )
 from infrastructure.attachments.parser_sandbox import (
     AttachmentParserSandbox,
@@ -37,7 +44,7 @@ from utils.pdf_utils import RESEARCH_PDF_MAX_OCR_TOTAL_PIXELS, fitz
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_IMAGE = "eyeagent/attachment-parser:research-c2b"
+_IMAGE = "eyeagent/attachment-parser:research-c3-csv"
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 
 
@@ -113,7 +120,7 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             path=source,
         )
 
-    def test_default_image_uses_research_c2b_tag(self):
+    def test_default_image_uses_research_c3_csv_tag(self):
         sandbox = AttachmentParserSandbox(environ={})
         self.assertEqual(sandbox._image, _IMAGE)
         self.assertFalse(sandbox._require_digest)
@@ -910,6 +917,126 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
                         manifest.to_json_bytes(),
                     )
 
+    async def test_host_validates_exact_canonical_research_csv_bundle(self):
+        normalized = parse_research_csv_bytes(b"Name,Value\nA,1\nB,2")
+        descriptor_bytes = normalized.descriptor_canonical_json_bytes
+        chunk_payloads = normalized.chunk_canonical_json_bytes
+        manifest = ResearchCsvManifest(
+            profile="research_csv_v1",
+            descriptor_relative_path="descriptor.json",
+            descriptor_sha256=hashlib.sha256(descriptor_bytes).hexdigest(),
+            descriptor_byte_count=len(descriptor_bytes),
+            chunks=tuple(
+                ResearchCsvChunkManifest(
+                    ordinal=chunk.ordinal,
+                    relative_path=f"chunk-{chunk.ordinal:05d}.json",
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    byte_count=len(content),
+                    row_count=chunk.row_count,
+                    logical_row_start=chunk.logical_row_start,
+                    logical_row_end=chunk.logical_row_end,
+                    physical_row_start=chunk.physical_row_start,
+                    physical_row_end=chunk.physical_row_end,
+                )
+                for chunk, content in zip(normalized.chunks, chunk_payloads)
+            ),
+            physical_line_count=normalized.descriptor.physical_line_count,
+            record_count=normalized.descriptor.record_count,
+            data_row_count=normalized.descriptor.data_row_count,
+            column_count=normalized.descriptor.column_count,
+            non_empty_cell_count=normalized.descriptor.non_empty_cell_count,
+            formula_like_cell_count=(
+                normalized.descriptor.formula_like_cell_count
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_bundle = Path(temporary) / "output.bundle"
+
+            def write_bundle(
+                *,
+                descriptor=descriptor_bytes,
+                chunks=chunk_payloads,
+                extra=False,
+            ):
+                with zipfile.ZipFile(
+                    output_bundle,
+                    mode="w",
+                    compression=zipfile.ZIP_STORED,
+                    allowZip64=False,
+                ) as archive:
+                    archive.writestr("descriptor.json", descriptor)
+                    for index, content in enumerate(chunks, start=1):
+                        archive.writestr(f"chunk-{index:05d}.json", content)
+                    if extra:
+                        archive.writestr("extra.json", b"{}")
+                os.chmod(output_bundle, 0o600)
+
+            write_bundle()
+            rebuilt = sandbox_module._read_validated_research_csv_bundle(
+                output_bundle,
+                manifest.to_json_bytes(),
+            )
+            self.assertEqual(rebuilt, normalized)
+
+            write_bundle(extra=True)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_PATH_INVALID",
+            ):
+                sandbox_module._read_validated_research_csv_bundle(
+                    output_bundle,
+                    manifest.to_json_bytes(),
+                )
+
+            write_bundle()
+            bad_hash = replace(
+                manifest,
+                descriptor_sha256="0" * 64,
+            )
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_OUTPUT_HASH_MISMATCH",
+            ):
+                sandbox_module._read_validated_research_csv_bundle(
+                    output_bundle,
+                    bad_hash.to_json_bytes(),
+                )
+
+            bad_count = replace(
+                manifest,
+                formula_like_cell_count=1,
+            )
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "ATTACHMENT_WORKER_MANIFEST_INVALID",
+            ):
+                sandbox_module._read_validated_research_csv_bundle(
+                    output_bundle,
+                    bad_count.to_json_bytes(),
+                )
+
+            noncanonical_descriptor = json.dumps(
+                json.loads(descriptor_bytes),
+                indent=2,
+            ).encode("utf-8")
+            noncanonical_manifest = replace(
+                manifest,
+                descriptor_sha256=hashlib.sha256(
+                    noncanonical_descriptor
+                ).hexdigest(),
+                descriptor_byte_count=len(noncanonical_descriptor),
+            )
+            write_bundle(descriptor=noncanonical_descriptor)
+            with self.assertRaisesRegex(
+                AttachmentParserError,
+                "RESEARCH_CSV_INVALID",
+            ):
+                sandbox_module._read_validated_research_csv_bundle(
+                    output_bundle,
+                    noncanonical_manifest.to_json_bytes(),
+                )
+
     async def test_host_accepts_canonical_text_expanded_beyond_raw_size_limit(self):
         raw_text = "\u0344" * 250_000
         raw = raw_text.encode("utf-8")
@@ -1364,6 +1491,100 @@ class AttachmentParserSandboxUnitTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(parsed.character_count, len("Caf\u00e9\nline"))
             self.assertEqual(list((root / "sandbox").iterdir()), [])
 
+    async def test_parse_research_csv_profile_returns_identity_and_normalized_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.csv"
+            source.write_bytes(b"Name,Value\nA,1")
+            normalized = parse_research_csv_bytes(source.read_bytes())
+            descriptor_bytes = normalized.descriptor_canonical_json_bytes
+            chunk_bytes = normalized.chunk_canonical_json_bytes[0]
+            chunk = normalized.chunks[0]
+            manifest = ResearchCsvManifest(
+                profile="research_csv_v1",
+                descriptor_relative_path="descriptor.json",
+                descriptor_sha256=hashlib.sha256(
+                    descriptor_bytes
+                ).hexdigest(),
+                descriptor_byte_count=len(descriptor_bytes),
+                chunks=(
+                    ResearchCsvChunkManifest(
+                        ordinal=chunk.ordinal,
+                        relative_path="chunk-00001.json",
+                        sha256=hashlib.sha256(chunk_bytes).hexdigest(),
+                        byte_count=len(chunk_bytes),
+                        row_count=chunk.row_count,
+                        logical_row_start=chunk.logical_row_start,
+                        logical_row_end=chunk.logical_row_end,
+                        physical_row_start=chunk.physical_row_start,
+                        physical_row_end=chunk.physical_row_end,
+                    ),
+                ),
+                physical_line_count=normalized.descriptor.physical_line_count,
+                record_count=normalized.descriptor.record_count,
+                data_row_count=normalized.descriptor.data_row_count,
+                column_count=normalized.descriptor.column_count,
+                non_empty_cell_count=(
+                    normalized.descriptor.non_empty_cell_count
+                ),
+                formula_like_cell_count=(
+                    normalized.descriptor.formula_like_cell_count
+                ),
+            )
+            runner = root / "research-csv-runner.py"
+            runner.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, sys, zipfile\n"
+                "request = json.loads(sys.stdin.buffer.read())\n"
+                "expected = {'input_filename': 'attachment.bin', 'file_type': 'csv', "
+                "'mime_type': 'text/csv', 'declared_page_count': None, "
+                "'profile': 'research_csv_v1'}\n"
+                "if request != expected:\n"
+                "    raise SystemExit(9)\n"
+                f"descriptor = {descriptor_bytes!r}\n"
+                f"chunk = {chunk_bytes!r}\n"
+                "with zipfile.ZipFile(sys.argv[2], 'w', compression=zipfile.ZIP_STORED, allowZip64=False) as archive:\n"
+                "    archive.writestr('descriptor.json', descriptor)\n"
+                "    archive.writestr('chunk-00001.json', chunk)\n"
+                f"sys.stdout.buffer.write({manifest.to_json_bytes()!r})\n",
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o700)
+            payload = source.read_bytes()
+            downloaded = DownloadedAttachment(
+                attachment_id="research-csv-attachment",
+                analysis_attempt_id="research-csv-attempt",
+                file_type="csv",
+                filename="dataset.csv",
+                mime_type="text/csv",
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                page_count=None,
+                path=source,
+                document_version=13,
+            )
+            sandbox = AttachmentParserSandbox(
+                runner_path=runner,
+                docker_binary="true",
+                temp_root=root / "sandbox",
+            )
+            sandbox.preflight = AsyncMock()
+            with patch(
+                "infrastructure.attachments.parser_sandbox._cleanup_container",
+                new=AsyncMock(),
+            ):
+                parsed = await sandbox.parse(
+                    downloaded,
+                    profile="research_csv_v1",
+                )
+
+            self.assertIsInstance(parsed, ParsedResearchCsv)
+            self.assertEqual(parsed.attachment_id, "research-csv-attachment")
+            self.assertEqual(parsed.document_version, 13)
+            self.assertEqual(parsed.mime_type, "text/csv")
+            self.assertEqual(parsed.normalized, normalized)
+            self.assertEqual(list((root / "sandbox").iterdir()), [])
+
     async def test_research_worker_error_code_is_preserved_by_host(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1687,6 +1908,46 @@ class AttachmentParserSandboxDockerIntegrationTest(unittest.IsolatedAsyncioTestC
         self.assertEqual(parsed.text, "真实DOCX正文")
         self.assertEqual(parsed.character_count, len("真实DOCX正文"))
         self.assertEqual(list((self.root / "docx-sandbox").iterdir()), [])
+
+    async def test_research_csv_returns_canonical_rows_in_real_networkless_container(self):
+        source = self.root / "research-data.csv"
+        source.write_bytes(
+            "姓名,备注\r\n张三,普通文本\r\n李四,=SUM(A1:A2)".encode("utf-8")
+        )
+        source.chmod(0o600)
+        payload = source.read_bytes()
+        downloaded = DownloadedAttachment(
+            attachment_id="research-csv-integration",
+            analysis_attempt_id="research-csv-integration-attempt",
+            file_type="csv",
+            filename="research-data.csv",
+            mime_type="text/csv",
+            size_bytes=len(payload),
+            content_sha256=hashlib.sha256(payload).hexdigest(),
+            page_count=None,
+            path=source,
+            document_version=13,
+        )
+        label = "integration-research-csv"
+        sandbox_root = self.root / "sandbox-research-csv"
+        sandbox = AttachmentParserSandbox(
+            temp_root=sandbox_root,
+            label_factory=lambda: label,
+        )
+
+        parsed = await sandbox.parse(downloaded, profile="research_csv_v1")
+
+        self.assertIsInstance(parsed, ParsedResearchCsv)
+        self.assertEqual(parsed.document_version, 13)
+        self.assertEqual(parsed.normalized.descriptor.headers, ("姓名", "备注"))
+        self.assertEqual(parsed.normalized.descriptor.data_row_count, 2)
+        self.assertEqual(parsed.normalized.descriptor.formula_like_cell_count, 1)
+        self.assertEqual(
+            parsed.normalized.chunks[0].rows[1].values,
+            ("李四", "=SUM(A1:A2)"),
+        )
+        self.assertEqual(self._containers_for_label(label), ())
+        self.assertEqual(list(sandbox_root.iterdir()), [])
 
     async def test_research_text_accepts_nfc_expansion_beyond_raw_size_limit(self):
         raw_text = "\u0344" * 250_000

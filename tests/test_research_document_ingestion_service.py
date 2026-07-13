@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from application.services.research_document_ingestion_service import (
+    CSV_EXTRACTOR_VERSION,
     IMAGE_EXTRACTOR_VERSION,
     PDF_EXTRACTOR_VERSION,
     ResearchDocumentIngestionError,
@@ -23,6 +24,14 @@ from domain.models.research_document import (
     ResearchDocumentIngestionEntity,
     build_research_document_ingestion_id,
 )
+from domain.models.research_dataset import (
+    ExtractedCsvChunk,
+    ExtractedCsvRow,
+    ExtractedResearchCsv,
+)
+from infrastructure.attachments.research_csv_contract import (
+    parse_research_csv_bytes,
+)
 from infrastructure.attachments.secure_downloader import DownloadedAttachment
 from infrastructure.repositories.research_document_repository_impl import (
     ResearchDocumentFencingError,
@@ -30,6 +39,51 @@ from infrastructure.repositories.research_document_repository_impl import (
 
 
 TXT_SECRET_SENTINEL = "TXT_SECRET_SENTINEL_7f9c"
+CSV_SECRET_SENTINEL = "CSV_SECRET_SENTINEL_2ac8"
+
+
+def _csv_extracted(raw: bytes) -> ExtractedResearchCsv:
+    normalized = parse_research_csv_bytes(raw)
+    descriptor = normalized.descriptor
+    return ExtractedResearchCsv(
+        schema_version=descriptor.schema_version,
+        sheet_name=descriptor.sheet_name,
+        headers=descriptor.headers,
+        header_row_start=descriptor.header_row_start,
+        header_row_end=descriptor.header_row_end,
+        physical_line_count=descriptor.physical_line_count,
+        record_count=descriptor.record_count,
+        data_row_count=descriptor.data_row_count,
+        column_count=descriptor.column_count,
+        non_empty_cell_count=descriptor.non_empty_cell_count,
+        formula_like_cell_count=descriptor.formula_like_cell_count,
+        missing_value_counts=descriptor.missing_value_counts,
+        descriptor_sha256=descriptor.sha256,
+        chunks=tuple(
+            ExtractedCsvChunk(
+                schema_version=chunk.schema_version,
+                ordinal=chunk.ordinal,
+                logical_row_start=chunk.logical_row_start,
+                logical_row_end=chunk.logical_row_end,
+                physical_row_start=chunk.physical_row_start,
+                physical_row_end=chunk.physical_row_end,
+                row_count=chunk.row_count,
+                non_empty_cell_count=chunk.non_empty_cell_count,
+                formula_like_cell_count=chunk.formula_like_cell_count,
+                rows=tuple(
+                    ExtractedCsvRow(
+                        logical_row_number=row.logical_row_number,
+                        physical_row_start=row.physical_row_start,
+                        physical_row_end=row.physical_row_end,
+                        values=row.values,
+                    )
+                    for row in chunk.rows
+                ),
+                payload_sha256=chunk.sha256,
+            )
+            for chunk in normalized.chunks
+        ),
+    )
 
 
 def _downloaded(
@@ -83,6 +137,7 @@ class FakeRepository:
         self.claim_calls = []
         self.renew_calls = []
         self.complete_calls = []
+        self.datasets = {}
         self.fail_calls = []
         self.renew_results = []
         self.complete_result = True
@@ -119,8 +174,11 @@ class FakeRepository:
         self.renew_calls.append((ingestion_id, attempt_count, lease_until))
         return self.renew_results.pop(0) if self.renew_results else True
 
-    def complete(self, ingestion_id, attempt_count, segments):
-        self.complete_calls.append((ingestion_id, attempt_count, segments))
+    def complete(self, ingestion_id, attempt_count, segments, dataset=None):
+        call = (ingestion_id, attempt_count, segments)
+        if dataset is not None:
+            call = (*call, dataset)
+        self.complete_calls.append(call)
         if self.complete_error is not None:
             raise self.complete_error
         if not self.complete_result:
@@ -130,6 +188,8 @@ class FakeRepository:
         )
         current = self.records[identity]
         self.segments[ingestion_id] = list(segments)
+        if dataset is not None:
+            self.datasets[ingestion_id] = dataset
         self.records[identity] = current.model_copy(
             update={
                 "status": "ready",
@@ -173,6 +233,8 @@ class FakeProcessor:
                     text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                     character_count=len(text),
                 )
+            if item.file_type == "csv":
+                return _csv_extracted(item.path.read_bytes())
             return [
                 ExtractedResearchPage(
                     page_number=1,
@@ -188,7 +250,7 @@ class FakeProcessor:
 
 
 class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
-    def test_c3_stable_error_codes_are_safe_without_registering_processors(self):
+    def test_c3_stable_error_codes_are_safe_with_only_csv_registered(self):
         for error_code in (
             "RESEARCH_CSV_UNAVAILABLE",
             "RESEARCH_CSV_SIZE_LIMIT",
@@ -213,7 +275,10 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
                     ingestion_module._safe_processing_error(error),
                     error_code,
                 )
-        self.assertNotIn("csv", ingestion_module._PROCESSOR_BY_FILE_TYPE)
+        self.assertEqual(
+            ingestion_module._PROCESSOR_BY_FILE_TYPE["csv"],
+            "csv_dataset_v1",
+        )
         self.assertNotIn("xlsx", ingestion_module._PROCESSOR_BY_FILE_TYPE)
 
     def test_unknown_c3_prefixed_errors_fall_back_to_processing_failed(self):
@@ -233,6 +298,38 @@ class ResearchDocumentIngestionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.repo = FakeRepository()
         self.processor = FakeProcessor()
+
+    async def test_csv_ingestion_atomically_materializes_private_rows_and_summary(self):
+        raw = (
+            "name,value\r\n"
+            f"Alice,{CSV_SECRET_SENTINEL}\r\n"
+            "Bob,"
+        ).encode("utf-8")
+        item = _downloaded(
+            self.temp.name,
+            "csv-attachment",
+            file_type="csv",
+            mime_type="text/csv",
+            content=raw,
+        )
+
+        result = await self._service().ingest("doctor-1", [item])
+
+        [entity] = result.entities
+        self.assertEqual(entity.processor_type, "csv_dataset_v1")
+        self.assertEqual(entity.extractor_version, CSV_EXTRACTOR_VERSION)
+        self.assertEqual(entity.page_count, 0)
+        self.assertEqual(len(self.repo.complete_calls[0]), 4)
+        dataset = self.repo.datasets[entity.id]
+        self.assertEqual(dataset.dataset.file_type, "csv")
+        self.assertEqual(
+            dataset.row_chunks[0].rows[0].values[1],
+            CSV_SECRET_SENTINEL,
+        )
+        [segment] = self.repo.segments[entity.id]
+        self.assertNotIn(CSV_SECRET_SENTINEL, segment.content)
+        self.assertEqual(segment.sheet_name, "CSV")
+        self.assertEqual((segment.row_start, segment.row_end), (1, 3))
 
     def tearDown(self):
         self.temp.cleanup()

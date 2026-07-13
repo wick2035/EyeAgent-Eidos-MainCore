@@ -148,6 +148,22 @@ class ResearchDocumentProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text_processor.calls, [downloaded])
         self.assertEqual(gateway.calls, [])
 
+    async def test_csv_dispatches_to_structured_processor_without_vision(self):
+        downloaded = _downloaded("csv", "text/csv", content=b"name\nAlice")
+        extracted = object()
+        csv_processor = FakePlainTextProcessor(extracted)
+        gateway = FakeGateway()
+
+        result = await ResearchDocumentProcessor(
+            FakeSandbox(object()),
+            gateway,
+            csv_processor=csv_processor,
+        ).process(downloaded)
+
+        self.assertIs(result, extracted)
+        self.assertEqual(csv_processor.calls, [downloaded])
+        self.assertEqual(gateway.calls, [])
+
     async def test_digital_pdf_uses_research_profile_without_llm(self):
         sandbox = FakeSandbox(_parsed_pdf(_pdf_page(1, "第一页"), _pdf_page(2, "第二页")))
         gateway = FakeGateway()

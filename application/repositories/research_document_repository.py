@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Optional, Protocol
 
+from domain.models.research_dataset import ResearchDatasetMaterialization
 from domain.models.research_document import (
     IngestionIdentity,
     ResearchDocumentClaimResult,
@@ -34,6 +35,7 @@ class ResearchDocumentRepository(Protocol):
         ingestion_id: str,
         attempt_count: int,
         segments: list[ResearchDocumentSegmentEntity],
+        dataset: Optional[ResearchDatasetMaterialization] = None,
     ) -> bool: ...
 
     def fail(

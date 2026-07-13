@@ -20,7 +20,13 @@ from application.services.research_document_segmenter import (
 from domain.models.research_document import (
     IngestionIdentity,
     ResearchDocumentIngestionEntity,
+    ResearchDocumentSegmentEntity,
     build_research_document_ingestion_id,
+)
+from domain.models.research_dataset import (
+    ExtractedResearchCsv,
+    ResearchDatasetMaterialization,
+    build_research_dataset_materialization,
 )
 from infrastructure.attachments.secure_downloader import DownloadedAttachment
 from infrastructure.repositories.research_document_repository_impl import (
@@ -32,18 +38,21 @@ PDF_EXTRACTOR_VERSION = "pymupdf_v1"
 IMAGE_EXTRACTOR_VERSION = "research_vision_v1"
 TEXT_EXTRACTOR_VERSION = "research_text_v1"
 DOCX_EXTRACTOR_VERSION = "research_docx_v1"
+CSV_EXTRACTOR_VERSION = "research_csv_v1"
 
 _PROCESSOR_BY_FILE_TYPE = {
     "pdf": "pdf_hybrid_v1",
     "image": "image_vision_v1",
     "text": "plain_text_v1",
     "docx": "docx_text_v1",
+    "csv": "csv_dataset_v1",
 }
 _EXTRACTOR_BY_PROCESSOR = {
     "pdf_hybrid_v1": PDF_EXTRACTOR_VERSION,
     "image_vision_v1": IMAGE_EXTRACTOR_VERSION,
     "plain_text_v1": TEXT_EXTRACTOR_VERSION,
     "docx_text_v1": DOCX_EXTRACTOR_VERSION,
+    "csv_dataset_v1": CSV_EXTRACTOR_VERSION,
 }
 
 _MAX_FILES = 4
@@ -52,9 +61,11 @@ _MAX_PDF_BYTES = 30 * 1024 * 1024
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_TEXT_BYTES = 512 * 1024
 _MAX_DOCX_BYTES = 10 * 1024 * 1024
+_MAX_CSV_BYTES = 10 * 1024 * 1024
 _DOCX_MIME_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
+_CSV_MIME_TYPE = "text/csv"
 _MAX_PDF_PAGES = 100
 _MAX_TOTAL_PDF_PAGES = 120
 _IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
@@ -120,6 +131,16 @@ class ResearchDocumentIngestionResult:
 
 class _LeaseLost(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class _ProcessedDocument:
+    segments: tuple[ResearchDocumentSegmentEntity, ...]
+    dataset: ResearchDatasetMaterialization | None = None
+
+    def __post_init__(self) -> None:
+        if not self.segments:
+            raise ValueError("科研文档处理结果必须包含 segment")
 
 
 class ResearchDocumentIngestionService:
@@ -265,14 +286,23 @@ class ResearchDocumentIngestionService:
             self._process_and_segment(identity, entity.id, item)
         )
         try:
-            segments = await self._supervise_owner(work, renewer, deadline)
+            processed = await self._supervise_owner(work, renewer, deadline)
             await _stop_renewer(renewer)
             self._ensure_deadline(deadline)
-            if not self._repository.complete(
-                entity.id,
-                entity.attempt_count,
-                segments,
-            ):
+            if processed.dataset is None:
+                completed = self._repository.complete(
+                    entity.id,
+                    entity.attempt_count,
+                    list(processed.segments),
+                )
+            else:
+                completed = self._repository.complete(
+                    entity.id,
+                    entity.attempt_count,
+                    list(processed.segments),
+                    processed.dataset,
+                )
+            if not completed:
                 raise ResearchDocumentIngestionError(
                     "RESEARCH_DOCUMENT_FENCING_FAILED"
                 )
@@ -319,13 +349,22 @@ class ResearchDocumentIngestionService:
         ingestion_id: str,
         item: DownloadedAttachment,
     ):
-        pages = await self._processor.process(item)
-        return await asyncio.to_thread(
+        extracted = await self._processor.process(item)
+        segments = await asyncio.to_thread(
             self._segmenter.segment,
             ingestion_id,
-            pages,
+            extracted,
             processor_type=identity.processor_type,
         )
+        dataset = (
+            build_research_dataset_materialization(
+                ingestion_id,
+                extracted,
+            )
+            if isinstance(extracted, ExtractedResearchCsv)
+            else None
+        )
+        return _ProcessedDocument(tuple(segments), dataset)
 
     async def _renew_loop(
         self,
@@ -485,6 +524,15 @@ def _validate_metadata(
             if (
                 item.mime_type != _DOCX_MIME_TYPE
                 or item.size_bytes > _MAX_DOCX_BYTES
+                or item.page_count is not None
+            ):
+                raise ResearchDocumentIngestionError(
+                    "RESEARCH_DOCUMENT_CONTENT_LIMIT"
+                )
+        elif item.file_type == "csv":
+            if (
+                item.mime_type != _CSV_MIME_TYPE
+                or item.size_bytes > _MAX_CSV_BYTES
                 or item.page_count is not None
             ):
                 raise ResearchDocumentIngestionError(
@@ -689,6 +737,7 @@ def _safe_processing_error(error: Exception) -> str:
 
 
 __all__ = [
+    "CSV_EXTRACTOR_VERSION",
     "DOCX_EXTRACTOR_VERSION",
     "IMAGE_EXTRACTOR_VERSION",
     "PDF_EXTRACTOR_VERSION",

@@ -15,6 +15,14 @@ from domain.models.research_document import (
     ExtractedResearchText,
     build_research_document_segment_id,
 )
+from domain.models.research_dataset import (
+    ExtractedCsvChunk,
+    ExtractedCsvRow,
+    ExtractedResearchCsv,
+)
+from infrastructure.attachments.research_csv_contract import (
+    parse_research_csv_bytes,
+)
 
 
 def _page(number, text, method="digital_text"):
@@ -22,6 +30,50 @@ def _page(number, text, method="digital_text"):
         page_number=number,
         text=text,
         extraction_method=method,
+    )
+
+
+def _csv_extracted(raw: bytes) -> ExtractedResearchCsv:
+    normalized = parse_research_csv_bytes(raw)
+    descriptor = normalized.descriptor
+    return ExtractedResearchCsv(
+        schema_version=descriptor.schema_version,
+        sheet_name=descriptor.sheet_name,
+        headers=descriptor.headers,
+        header_row_start=descriptor.header_row_start,
+        header_row_end=descriptor.header_row_end,
+        physical_line_count=descriptor.physical_line_count,
+        record_count=descriptor.record_count,
+        data_row_count=descriptor.data_row_count,
+        column_count=descriptor.column_count,
+        non_empty_cell_count=descriptor.non_empty_cell_count,
+        formula_like_cell_count=descriptor.formula_like_cell_count,
+        missing_value_counts=descriptor.missing_value_counts,
+        descriptor_sha256=descriptor.sha256,
+        chunks=tuple(
+            ExtractedCsvChunk(
+                schema_version=chunk.schema_version,
+                ordinal=chunk.ordinal,
+                logical_row_start=chunk.logical_row_start,
+                logical_row_end=chunk.logical_row_end,
+                physical_row_start=chunk.physical_row_start,
+                physical_row_end=chunk.physical_row_end,
+                row_count=chunk.row_count,
+                non_empty_cell_count=chunk.non_empty_cell_count,
+                formula_like_cell_count=chunk.formula_like_cell_count,
+                rows=tuple(
+                    ExtractedCsvRow(
+                        logical_row_number=row.logical_row_number,
+                        physical_row_start=row.physical_row_start,
+                        physical_row_end=row.physical_row_end,
+                        values=row.values,
+                    )
+                    for row in chunk.rows
+                ),
+                payload_sha256=chunk.sha256,
+            )
+            for chunk in normalized.chunks
+        ),
     )
 
 
@@ -109,6 +161,41 @@ class ResearchDocumentSegmenterTest(unittest.TestCase):
                 self.ingestion_id,
                 _page(1, "a" * 7501, "vision"),
             )
+
+    def test_csv_generates_only_deterministic_structure_summary(self):
+        sentinel = "PRIVATE_ROW_SENTINEL_DO_NOT_LEAK"
+        extracted = _csv_extracted(
+            (
+                "name,value\r\n"
+                f"Alice,{sentinel}\r\n"
+                "Bob,=formula-like"
+            ).encode("utf-8")
+        )
+
+        [segment] = self.segmenter.segment(
+            self.ingestion_id,
+            extracted,
+            processor_type="csv_dataset_v1",
+        )
+
+        self.assertNotIn(sentinel, segment.content)
+        self.assertNotIn("Alice", segment.content)
+        self.assertNotIn("Bob", segment.content)
+        self.assertIn("name", segment.content)
+        self.assertIn("本摘要不包含原始数据行", segment.content)
+        self.assertEqual(segment.sheet_name, "CSV")
+        self.assertEqual((segment.row_start, segment.row_end), (1, 3))
+        self.assertIsNone(segment.page_start)
+        self.assertIsNone(segment.page_end)
+        self.assertEqual(
+            segment.metadata,
+            {
+                "block_index": 0,
+                "extraction_method": "csv_structured",
+                "extraction_mode": "structured_summary",
+            },
+        )
+        self.assertLessEqual(segment.token_count, MAX_SEGMENT_TOKENS)
 
     def test_text_segments_have_stable_ids_no_locators_and_exact_metadata(self):
         extracted = ExtractedResearchText(

@@ -13,6 +13,7 @@ ProcessorType = Literal[
     "image_vision_v1",
     "plain_text_v1",
     "docx_text_v1",
+    "csv_dataset_v1",
 ]
 IngestionStatus = Literal["pending", "processing", "ready", "failed"]
 

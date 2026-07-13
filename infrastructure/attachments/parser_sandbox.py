@@ -21,15 +21,25 @@ from infrastructure.attachments.parser_protocol import (
     AttachmentParserError,
     ParsedAttachment,
     ParsedAttachmentPage,
+    ParsedResearchCsv,
+    ParsedResearchDocx,
     ParsedResearchPdf,
     ParsedResearchPdfPage,
-    ParsedResearchDocx,
     ParsedResearchText,
+    ResearchCsvManifest,
     ResearchDocxManifest,
     ResearchPdfManifest,
     ResearchTextManifest,
     WorkerManifest,
     WorkerRequest,
+)
+from infrastructure.attachments.research_csv_contract import (
+    MAX_RESEARCH_CSV_CHUNK_BYTES,
+    MAX_RESEARCH_CSV_DESCRIPTOR_BYTES,
+    RESEARCH_CSV_ERROR_CODES,
+    NormalizedResearchCsv,
+    ResearchCsvContractError,
+    rebuild_research_csv_from_canonical_bytes,
 )
 from infrastructure.attachments.research_text_contract import (
     NormalizedResearchText,
@@ -52,7 +62,7 @@ from utils.pdf_utils import (
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RUNNER = _REPOSITORY_ROOT / "scripts" / "run_attachment_parser_sandbox.sh"
-_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c2b"
+_DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c3-csv"
 _PARSER_IMAGE_ENV = "PLATFORM_ATTACHMENT_PARSER_IMAGE"
 _PARSER_REQUIRE_DIGEST_ENV = "PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST"
 _CID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -61,6 +71,9 @@ _SAFE_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
 _SHA256_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_STDOUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+_MAX_RESEARCH_CSV_BUNDLE_BYTES = 32 * 1024 * 1024
+_MAX_RESEARCH_CSV_DESCRIPTOR_BYTES = MAX_RESEARCH_CSV_DESCRIPTOR_BYTES
+_MAX_RESEARCH_CSV_CHUNK_BYTES = MAX_RESEARCH_CSV_CHUNK_BYTES
 _LABEL_KEY = "eyeagent.attachment-parser.run"
 _STARTUP_CLEANUP_WAIT_SECONDS = 2.0
 _ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
@@ -187,7 +200,13 @@ class AttachmentParserSandbox:
         self,
         downloaded: Any,
         profile: str = "assistant_visual_v1",
-    ) -> ParsedAttachment | ParsedResearchPdf | ParsedResearchText | ParsedResearchDocx:
+    ) -> (
+        ParsedAttachment
+        | ParsedResearchPdf
+        | ParsedResearchText
+        | ParsedResearchDocx
+        | ParsedResearchCsv
+    ):
         await self.preflight()
         self._ensure_temp_root()
         request_directory: Path | None = None
@@ -317,6 +336,17 @@ class AttachmentParserSandbox:
                     text=research_docx.text,
                     text_sha256=research_docx.sha256,
                     character_count=research_docx.character_count,
+                )
+            if profile == "research_csv_v1":
+                normalized = _read_validated_research_csv_bundle(
+                    output_bundle,
+                    stdout,
+                )
+                return ParsedResearchCsv(
+                    attachment_id=str(_value(downloaded, "attachment_id")),
+                    document_version=_value(downloaded, "document_version"),
+                    mime_type=str(_value(downloaded, "mime_type")),
+                    normalized=normalized,
                 )
             pages = _read_validated_bundle(
                 output_bundle,
@@ -871,6 +901,146 @@ def _read_validated_research_docx_bundle(
     ):
         raise AttachmentParserError("ATTACHMENT_OUTPUT_TEXT_INVALID")
     return normalized
+
+
+def _read_validated_research_csv_bundle(
+    output_bundle: Path,
+    stdout: bytes,
+) -> NormalizedResearchCsv:
+    if len(stdout) > _MAX_STDOUT_BYTES:
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    manifest = ResearchCsvManifest.from_json_bytes(stdout)
+    try:
+        metadata = output_bundle.lstat()
+    except OSError as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID") from exc
+    if (
+        output_bundle.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+    if metadata.st_size > _MAX_RESEARCH_CSV_BUNDLE_BYTES:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+
+    expected_names = {manifest.descriptor_relative_path}
+    expected_names.update(chunk.relative_path for chunk in manifest.chunks)
+    _preflight_zip_bundle(
+        output_bundle,
+        file_size=metadata.st_size,
+        expected_names=expected_names,
+    )
+
+    descriptor_bytes: bytes
+    chunk_bytes: list[bytes] = []
+    total_artifact_bytes = 0
+    try:
+        with zipfile.ZipFile(output_bundle, mode="r") as archive:
+            entries = archive.infolist()
+            actual_names = {entry.filename for entry in entries}
+            if (
+                len(entries) != len(actual_names)
+                or actual_names != expected_names
+            ):
+                raise AttachmentParserError("ATTACHMENT_OUTPUT_PATH_INVALID")
+            entries_by_name = {entry.filename: entry for entry in entries}
+
+            descriptor_entry = entries_by_name[
+                manifest.descriptor_relative_path
+            ]
+            descriptor_bytes = _read_research_csv_artifact(
+                archive,
+                descriptor_entry,
+                expected_byte_count=manifest.descriptor_byte_count,
+                expected_sha256=manifest.descriptor_sha256,
+                artifact_limit=_MAX_RESEARCH_CSV_DESCRIPTOR_BYTES,
+            )
+            total_artifact_bytes += len(descriptor_bytes)
+
+            for chunk in manifest.chunks:
+                content = _read_research_csv_artifact(
+                    archive,
+                    entries_by_name[chunk.relative_path],
+                    expected_byte_count=chunk.byte_count,
+                    expected_sha256=chunk.sha256,
+                    artifact_limit=_MAX_RESEARCH_CSV_CHUNK_BYTES,
+                )
+                total_artifact_bytes += len(content)
+                if total_artifact_bytes > _MAX_RESEARCH_CSV_BUNDLE_BYTES:
+                    raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+                chunk_bytes.append(content)
+    except AttachmentParserError:
+        raise
+    except Exception as exc:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_READ_FAILED") from exc
+
+    try:
+        normalized = rebuild_research_csv_from_canonical_bytes(
+            descriptor_bytes,
+            chunk_bytes,
+            descriptor_sha256=manifest.descriptor_sha256,
+            chunk_sha256s=tuple(chunk.sha256 for chunk in manifest.chunks),
+        )
+    except ResearchCsvContractError as exc:
+        error_code = (
+            exc.error_code
+            if exc.error_code in RESEARCH_CSV_ERROR_CODES
+            else "RESEARCH_CSV_PARSE_FAILED"
+        )
+        raise AttachmentParserError(error_code) from None
+    except Exception:
+        raise AttachmentParserError("RESEARCH_CSV_PARSE_FAILED") from None
+
+    descriptor = normalized.descriptor
+    if (
+        descriptor.physical_line_count != manifest.physical_line_count
+        or descriptor.record_count != manifest.record_count
+        or descriptor.data_row_count != manifest.data_row_count
+        or descriptor.column_count != manifest.column_count
+        or descriptor.non_empty_cell_count != manifest.non_empty_cell_count
+        or descriptor.formula_like_cell_count
+        != manifest.formula_like_cell_count
+        or len(normalized.chunks) != len(manifest.chunks)
+    ):
+        raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+
+    for parsed_chunk, declared_chunk in zip(
+        normalized.chunks,
+        manifest.chunks,
+    ):
+        if (
+            parsed_chunk.ordinal != declared_chunk.ordinal
+            or parsed_chunk.row_count != declared_chunk.row_count
+            or parsed_chunk.logical_row_start
+            != declared_chunk.logical_row_start
+            or parsed_chunk.logical_row_end != declared_chunk.logical_row_end
+            or parsed_chunk.physical_row_start
+            != declared_chunk.physical_row_start
+            or parsed_chunk.physical_row_end
+            != declared_chunk.physical_row_end
+        ):
+            raise AttachmentParserError("ATTACHMENT_WORKER_MANIFEST_INVALID")
+    return normalized
+
+
+def _read_research_csv_artifact(
+    archive: zipfile.ZipFile,
+    entry: zipfile.ZipInfo,
+    *,
+    expected_byte_count: int,
+    expected_sha256: str,
+    artifact_limit: int,
+) -> bytes:
+    if entry.file_size != expected_byte_count:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_SIZE_MISMATCH")
+    if entry.file_size > artifact_limit:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_LIMIT")
+    content = _read_research_bundle_entry(archive, entry)
+    if len(content) != expected_byte_count:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_SIZE_MISMATCH")
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise AttachmentParserError("ATTACHMENT_OUTPUT_HASH_MISMATCH")
+    return content
 
 
 def _read_research_bundle_entry(

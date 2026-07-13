@@ -25,6 +25,7 @@ from presentation.schemas.platform_chat_turn_schemas import (
 _PNG = b"\x89PNG\r\n\x1a\n" + b"safe-image"
 _MIB = 1024 * 1024
 _TXT_LIMIT_BYTES = 512 * 1024
+_CSV_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 def _descriptor(url: str, payload: bytes = _PNG, **overrides):
@@ -51,6 +52,18 @@ def _text_descriptor(url: str, payload: bytes, **overrides):
         file_type="text",
         filename="research.txt",
         mime_type="text/plain",
+        page_count=None,
+        **overrides,
+    )
+
+
+def _csv_descriptor(url: str, payload: bytes, **overrides):
+    return _descriptor(
+        url,
+        payload,
+        file_type="csv",
+        filename="dataset.csv",
+        mime_type="text/csv",
         page_count=None,
         **overrides,
     )
@@ -92,6 +105,103 @@ class SecureAttachmentDownloaderTest(unittest.IsolatedAsyncioTestCase):
 
     def test_text_plain_uses_txt_suffix(self):
         self.assertEqual(_safe_suffix("text/plain"), ".txt")
+
+    def test_text_csv_uses_csv_suffix(self):
+        self.assertEqual(_safe_suffix("text/csv"), ".csv")
+
+    async def test_valid_csv_requires_exact_mime_and_skips_binary_magic(self):
+        payload = b"Name,Value\nA,1"
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type="text/csv")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port),
+            temp_root=self.temp_root,
+        )
+        descriptor = _csv_descriptor(
+            f"http://storage.test:{port}/dataset.csv",
+            payload,
+        )
+
+        with patch(
+            "infrastructure.attachments.secure_downloader._matches_magic"
+        ) as matches_magic:
+            async with downloader.download_all(
+                [descriptor],
+                "request-valid-csv",
+            ) as items:
+                self.assertEqual(items[0].file_type, "csv")
+                self.assertEqual(items[0].mime_type, "text/csv")
+                self.assertIsNone(items[0].page_count)
+                self.assertEqual(items[0].path.suffix, ".csv")
+                self.assertEqual(items[0].path.read_bytes(), payload)
+
+        matches_magic.assert_not_called()
+        self._assert_no_request_directories()
+
+    async def test_csv_descriptor_rejects_mime_page_and_size_before_network(self):
+        settings = AttachmentDownloadSettings.from_env(
+            {
+                "PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON": json.dumps(
+                    [["https", "storage.test", 443, "192.0.2.10"]]
+                )
+            }
+        )
+        downloader = SecureAttachmentDownloader(
+            settings,
+            temp_root=self.temp_root,
+        )
+        base = _csv_descriptor(
+            "https://storage.test/dataset.csv",
+            b"A\n1",
+        ).model_dump()
+        cases = (
+            ({**base, "mime_type": "text/plain"}, "ATTACHMENT_DESCRIPTOR_INVALID"),
+            ({**base, "page_count": 1}, "ATTACHMENT_DESCRIPTOR_INVALID"),
+            (
+                {**base, "size_bytes": _CSV_LIMIT_BYTES + 1},
+                "RESEARCH_CSV_SIZE_LIMIT",
+            ),
+        )
+
+        for descriptor, error_code in cases:
+            with self.subTest(error_code=error_code):
+                with self.assertRaisesRegex(AttachmentDownloadError, error_code):
+                    async with downloader.download_all(
+                        [descriptor],
+                        f"request-{error_code}",
+                    ):
+                        self.fail("invalid CSV must fail before networking")
+                self._assert_no_request_directories()
+
+    async def test_csv_stream_returns_size_limit_after_ten_mib(self):
+        payload = b"a" * (_CSV_LIMIT_BYTES + 1)
+
+        async def handler(_request):
+            return web.Response(body=payload, content_type="text/csv")
+
+        port = await self._serve(handler)
+        downloader = SecureAttachmentDownloader(
+            self._settings(port),
+            temp_root=self.temp_root,
+        )
+        descriptor = _csv_descriptor(
+            f"http://storage.test:{port}/oversized.csv",
+            b"a" * _CSV_LIMIT_BYTES,
+        )
+
+        with self.assertRaises(AttachmentDownloadError) as captured:
+            async with downloader.download_all(
+                [descriptor],
+                "request-csv-stream-limit",
+            ):
+                self.fail("CSV stream overflow must fail before yielding")
+
+        self.assertEqual(captured.exception.error_code, "RESEARCH_CSV_SIZE_LIMIT")
+        self.assertEqual(captured.exception.bytes_received, len(payload))
+        self._assert_no_request_directories()
 
     async def test_valid_text_preserves_raw_bytes_and_skips_binary_magic(self):
         payload = b"\xef\xbb\xbfCafe\xcc\x81\r\nline\r"

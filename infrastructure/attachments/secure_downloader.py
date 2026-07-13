@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _TOTAL_LIMIT_BYTES = 40 * 1024 * 1024
 _RESEARCH_TEXT_LIMIT_BYTES = 512 * 1024
 _RESEARCH_DOCX_LIMIT_BYTES = 10 * 1024 * 1024
+_RESEARCH_CSV_LIMIT_BYTES = 10 * 1024 * 1024
 _DOCX_MIME_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
@@ -137,9 +138,31 @@ class SecureAttachmentDownloader:
         items = list(descriptors)
         declared_total = 0
         for item in items:
-            declared_total += _strict_descriptor_integer(item, "size_bytes")
+            size_bytes = _strict_descriptor_integer(item, "size_bytes")
+            declared_total += size_bytes
             _strict_descriptor_integer(item, "document_version")
-            _strict_descriptor_integer(item, "page_count", allow_none=True)
+            page_count = _strict_descriptor_integer(
+                item,
+                "page_count",
+                allow_none=True,
+            )
+            file_type = str(_value(item, "file_type"))
+            mime_type = str(_value(item, "mime_type"))
+            if file_type == "csv" or mime_type == "text/csv":
+                if (
+                    file_type != "csv"
+                    or mime_type != "text/csv"
+                    or page_count is not None
+                ):
+                    raise AttachmentDownloadError(
+                        "ATTACHMENT_DESCRIPTOR_INVALID",
+                        attachment_id=str(_value(item, "attachment_id")),
+                    )
+                if size_bytes > _RESEARCH_CSV_LIMIT_BYTES:
+                    raise AttachmentDownloadError(
+                        "RESEARCH_CSV_SIZE_LIMIT",
+                        attachment_id=str(_value(item, "attachment_id")),
+                    )
         if declared_total > _TOTAL_LIMIT_BYTES:
             raise AttachmentDownloadError("ATTACHMENT_TOTAL_LIMIT_EXCEEDED")
 
@@ -221,6 +244,7 @@ class SecureAttachmentDownloader:
         mime_type = str(_value(descriptor, "mime_type"))
         is_research_text = mime_type == "text/plain"
         is_research_docx = mime_type == _DOCX_MIME_TYPE
+        is_research_csv = mime_type == "text/csv"
         suffix = _safe_suffix(mime_type)
         destination = request_directory / f"{index:02d}-{uuid.uuid4().hex}{suffix}"
         received = 0
@@ -265,6 +289,15 @@ class SecureAttachmentDownloader:
                         ):
                             raise AttachmentDownloadError(
                                 "RESEARCH_DOCX_SIZE_LIMIT",
+                                attachment_id=attachment_id,
+                                bytes_received=received,
+                            )
+                        if (
+                            is_research_csv
+                            and received > _RESEARCH_CSV_LIMIT_BYTES
+                        ):
+                            raise AttachmentDownloadError(
+                                "RESEARCH_CSV_SIZE_LIMIT",
                                 attachment_id=attachment_id,
                                 bytes_received=received,
                             )
@@ -331,7 +364,7 @@ class SecureAttachmentDownloader:
                     attachment_id=attachment_id,
                     bytes_received=received,
                 )
-        elif not _matches_magic(destination, mime_type):
+        elif not is_research_csv and not _matches_magic(destination, mime_type):
             raise AttachmentDownloadError(
                 (
                     _docx_magic_error(destination)
@@ -394,6 +427,7 @@ def _safe_suffix(mime_type: str) -> str:
         "image/webp": ".webp",
         "application/pdf": ".pdf",
         "text/plain": ".txt",
+        "text/csv": ".csv",
         _DOCX_MIME_TYPE: ".docx",
     }.get(mime_type, ".bin")
 
