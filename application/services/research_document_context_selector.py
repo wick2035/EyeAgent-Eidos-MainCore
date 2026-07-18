@@ -1082,6 +1082,7 @@ def _create_summary_model():
         ),
         temperature=0.0,
         max_tokens=4000,
+        model_kwargs={"response_format": {"type": "json_object"}},
         extra_body={"enable_thinking": False},
     )
 

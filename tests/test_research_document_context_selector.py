@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import json
+import os
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 from application.services.research_document_context_selector import (
     ResearchDocumentContextError,
@@ -11,6 +13,7 @@ from application.services.research_document_context_selector import (
     ResearchSummaryGateway,
     _canonical_tokens,
     _citation,
+    _create_summary_model,
     _partition_blocks,
     _source_metadata,
 )
@@ -935,6 +938,33 @@ class ResearchDocumentContextSelectorTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ResearchSummaryGatewayTest(unittest.IsolatedAsyncioTestCase):
+    def test_summary_model_requests_json_object_response(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DASHSCOPE_API_KEY": "test-key",
+                    "RESEARCH_SUMMARY_BASE_URL": "https://example.test/v1",
+                    "RESEARCH_SUMMARY_MODEL": "summary-model",
+                },
+            ),
+            patch(
+                "application.services.research_document_context_selector.ChatOpenAI"
+            ) as chat_open_ai,
+        ):
+            model = _create_summary_model()
+
+        self.assertIs(model, chat_open_ai.return_value)
+        chat_open_ai.assert_called_once_with(
+            model="summary-model",
+            openai_api_key="test-key",
+            openai_api_base="https://example.test/v1",
+            temperature=0.0,
+            max_tokens=4000,
+            model_kwargs={"response_format": {"type": "json_object"}},
+            extra_body={"enable_thinking": False},
+        )
+
     async def test_strict_json_gateway_uses_fixed_untrusted_prompts(self):
         model = FakeModel(
             [
