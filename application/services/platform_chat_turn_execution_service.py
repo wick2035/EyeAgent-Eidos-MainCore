@@ -179,6 +179,7 @@ class PlatformChatTurnExecutionService:
         self,
         request: ExecutePlatformChatTurnRequest,
         principal: CurrentPrincipal,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[dict, None]:
         self._require_principal(
             principal,
@@ -213,10 +214,12 @@ class PlatformChatTurnExecutionService:
                 yield self._error_event(request, exc.error_code)
                 return
 
-        cancel_event = self.registry.register(
-            principal.subject,
-            request.request_id,
-        )
+        owns_registry_entry = cancel_event is None
+        if cancel_event is None:
+            cancel_event = self.registry.register(
+                principal.subject,
+                request.request_id,
+            )
         active_key = (request.request_id, request.assistant_message_id)
         self._active_doctors[active_key] = principal.subject
         binding = None
@@ -562,11 +565,12 @@ class PlatformChatTurnExecutionService:
                     reset_research_document_context(binding)
                 else:
                     reset_attachment_analysis(binding)
-            self.registry.unregister(
-                principal.subject,
-                request.request_id,
-                cancel_event,
-            )
+            if owns_registry_entry:
+                self.registry.unregister(
+                    principal.subject,
+                    request.request_id,
+                    cancel_event,
+                )
             self._active_doctors.pop(active_key, None)
 
     async def _prepare_research_documents(

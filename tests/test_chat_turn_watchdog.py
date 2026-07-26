@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -6,6 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from application.services.chat_turn_watchdog import ChatTurnWatchdog
+from application.services.chat_turn_execution_registry import (
+    ChatTurnExecutionRegistry,
+)
 from domain.models.chat_turn_request import ChatTurnRequestEntity
 from infrastructure.repositories.chat_turn_request_repository_impl import (
     ChatTurnRequestRepositoryImpl,
@@ -383,6 +388,68 @@ class ChatTurnWatchdogRepositoryTest(unittest.TestCase):
 
 
 class ChatTurnWatchdogLifespanTest(unittest.IsolatedAsyncioTestCase):
+    async def test_drain_server_runs_before_uvicorn_base_shutdown(self):
+        import main
+
+        registry = ChatTurnExecutionRegistry()
+        event = registry.register("doctor-1", "request-1")
+        observed = {}
+
+        async def base_shutdown(_server, sockets=None):
+            observed["draining"] = registry.is_draining()
+            observed["active"] = registry.active_count()
+
+        async def finish_after_signal():
+            await event.wait()
+            registry.unregister("doctor-1", "request-1", event)
+
+        finishing = asyncio.create_task(finish_after_signal())
+        config = main.uvicorn.Config("main:app", lifespan="off")
+        server = main.PlatformDrainServer(
+            config,
+            natural_timeout=0.01,
+            abort_timeout=1,
+        )
+        with (
+            patch.object(
+                main,
+                "get_chat_turn_execution_registry",
+                return_value=registry,
+            ),
+            patch.object(main.uvicorn.Server, "shutdown", new=base_shutdown),
+        ):
+            await server.shutdown()
+        await asyncio.wait_for(finishing, timeout=1)
+
+        self.assertEqual(
+            observed,
+            {"draining": True, "active": 0},
+        )
+
+    async def test_invalid_drain_timeout_fails_before_resources_start(self):
+        import main
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS": "invalid",
+                    "PLATFORM_TURN_DRAIN_ABORT_TIMEOUT_SECONDS": "30",
+                },
+            ),
+            patch.object(main, "get_db_connection") as get_db,
+            patch.object(main, "close_db_connection") as close_db,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS",
+            ):
+                async with main.lifespan(SimpleNamespace()):
+                    pass
+
+        get_db.assert_not_called()
+        close_db.assert_not_called()
+
     async def test_run_exits_promptly_after_stop_signal(self):
         watchdog, *_ = _watchdog()
         watchdog._interval_seconds = 60
@@ -452,6 +519,82 @@ class ChatTurnWatchdogLifespanTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(watchdog.stopped.is_set())
         close_db.assert_called_once_with()
+
+    async def test_lifespan_signals_active_turn_before_database_close(self):
+        import main
+
+        class FakeWatchdog:
+            async def run(self, stop):
+                await stop.wait()
+
+        registry = ChatTurnExecutionRegistry()
+        with (
+            patch.object(main, "get_db_connection", return_value=object()),
+            patch.object(main, "close_db_connection") as close_db,
+            patch.object(
+                main,
+                "get_chat_turn_watchdog",
+                return_value=FakeWatchdog(),
+            ),
+            patch.object(
+                main,
+                "get_chat_turn_execution_registry",
+                return_value=registry,
+            ),
+            patch.dict(
+                os.environ,
+                {
+                    "PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS": "0.01",
+                    "PLATFORM_TURN_DRAIN_ABORT_TIMEOUT_SECONDS": "1",
+                },
+            ),
+        ):
+            async with main.lifespan(SimpleNamespace()):
+                event = registry.register("doctor-1", "request-1")
+
+                async def finish_after_signal():
+                    await event.wait()
+                    registry.unregister(
+                        "doctor-1",
+                        "request-1",
+                        event,
+                    )
+
+                finishing = asyncio.create_task(finish_after_signal())
+
+            await asyncio.wait_for(finishing, timeout=1)
+
+        self.assertTrue(registry.is_draining())
+        self.assertEqual(registry.active_count(), 0)
+        close_db.assert_called_once_with()
+
+    async def test_readiness_is_503_while_draining(self):
+        import main
+
+        registry = ChatTurnExecutionRegistry()
+        with patch.object(
+            main,
+            "get_chat_turn_execution_registry",
+            return_value=registry,
+        ):
+            self.assertEqual(
+                await main.readiness_check(),
+                {
+                    "status": "ready",
+                    "active_platform_turns": 0,
+                },
+            )
+            registry.begin_drain()
+            response = await main.readiness_check()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "status": "draining",
+                "active_platform_turns": 0,
+            },
+        )
 
 
 if __name__ == "__main__":

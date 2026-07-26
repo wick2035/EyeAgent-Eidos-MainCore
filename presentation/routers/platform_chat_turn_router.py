@@ -3,8 +3,11 @@ from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from application.services.chat_turn_execution_registry import (
+    ChatTurnExecutionConflictError,
+    ChatTurnExecutionDrainingError,
     ChatTurnExecutionRegistry,
     get_chat_turn_execution_registry,
 )
@@ -74,12 +77,16 @@ async def prepare_platform_chat_turn(
     payload: PreparePlatformChatTurnRequest,
     request: Request,
     service: PlatformChatTurnService = Depends(get_platform_chat_turn_service),
+    registry: ChatTurnExecutionRegistry = Depends(
+        get_chat_turn_execution_registry
+    ),
 ) -> PreparePlatformChatTurnResponse:
     _require_principal(
         request,
         payload.doctor_id,
         payload.agent_type or "health",
     )
+    _reject_if_draining(registry)
     try:
         return service.prepare(payload)
     except ChatTurnNotFoundError as exc:
@@ -97,15 +104,31 @@ async def execute_platform_chat_turn(
     service: PlatformChatTurnExecutionService = Depends(
         get_platform_chat_turn_execution_service
     ),
+    registry: ChatTurnExecutionRegistry = Depends(
+        get_chat_turn_execution_registry
+    ),
 ) -> StreamingResponse:
     principal = _require_principal(
         request,
         payload.doctor_id,
         payload.agent_type or "health",
     )
+    try:
+        cancel_event = registry.register_if_accepting(
+            principal.subject,
+            payload.request_id,
+        )
+    except ChatTurnExecutionDrainingError as exc:
+        raise _http_error(503, "SERVICE_DRAINING") from exc
+    except ChatTurnExecutionConflictError as exc:
+        raise _http_error(409, "TURN_EXECUTION_CONFLICT") from exc
 
     async def stream_sse() -> AsyncGenerator[str, None]:
-        execution = service.stream(payload, principal)
+        execution = service.stream(
+            payload,
+            principal,
+            cancel_event=cancel_event,
+        )
         try:
             async for event in execution:
                 yield "data: " + json.dumps(
@@ -114,7 +137,21 @@ async def execute_platform_chat_turn(
                     separators=(",", ":"),
                 ) + "\n\n"
         finally:
-            await execution.aclose()
+            try:
+                await execution.aclose()
+            finally:
+                registry.unregister(
+                    principal.subject,
+                    payload.request_id,
+                    cancel_event,
+                )
+
+    async def release_admission() -> None:
+        registry.unregister(
+            principal.subject,
+            payload.request_id,
+            cancel_event,
+        )
 
     return StreamingResponse(
         stream_sse(),
@@ -123,6 +160,7 @@ async def execute_platform_chat_turn(
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
         },
+        background=BackgroundTask(release_admission),
     )
 
 
@@ -184,6 +222,11 @@ def _http_error(status_code: int, error_code: str) -> HTTPException:
         status_code=status_code,
         detail={"error_code": error_code},
     )
+
+
+def _reject_if_draining(registry: ChatTurnExecutionRegistry) -> None:
+    if registry.is_draining():
+        raise _http_error(503, "SERVICE_DRAINING")
 
 
 __all__ = ["router"]

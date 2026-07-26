@@ -14,6 +14,8 @@ from application.services.research_document_context_selector import (
     ResearchDocumentContextSelection,
 )
 from application.services.chat_turn_execution_registry import (
+    ChatTurnExecutionConflictError,
+    ChatTurnExecutionDrainingError,
     ChatTurnExecutionRegistry,
 )
 from application.services.chat_turn_watchdog import ChatTurnWatchdog
@@ -1751,6 +1753,18 @@ class PlatformChatTurnExecutionContractTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatTurnExecutionRegistryContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_atomic_admission_rejects_drain_and_duplicate(self):
+        registry = ChatTurnExecutionRegistry()
+        event = registry.register_if_accepting("doctor-1", "request-1")
+
+        with self.assertRaises(ChatTurnExecutionConflictError):
+            registry.register_if_accepting("doctor-1", "request-1")
+
+        registry.unregister("doctor-1", "request-1", event)
+        registry.begin_drain()
+        with self.assertRaises(ChatTurnExecutionDrainingError):
+            registry.register_if_accepting("doctor-1", "request-2")
+
     async def test_abort_signal_is_visible_to_registered_execution(self):
         registry = ChatTurnExecutionRegistry()
         event = registry.register("doctor-1", "request-1")
@@ -1771,6 +1785,37 @@ class ChatTurnExecutionRegistryContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(doctor_two.is_set())
         registry.unregister("doctor-1", "shared-request", doctor_one)
         registry.unregister("doctor-2", "shared-request", doctor_two)
+
+    async def test_drain_waits_for_active_execution_and_signals_all(self):
+        registry = ChatTurnExecutionRegistry()
+        doctor_one = registry.register("doctor-1", "request-1")
+        doctor_two = registry.register("doctor-2", "request-2")
+
+        registry.begin_drain()
+
+        self.assertTrue(registry.is_draining())
+        self.assertEqual(registry.active_count(), 2)
+        self.assertFalse(await registry.wait_until_idle(0))
+        self.assertEqual(registry.signal_all(), 2)
+        self.assertTrue(doctor_one.is_set())
+        self.assertTrue(doctor_two.is_set())
+
+        registry.unregister("doctor-1", "request-1", doctor_one)
+        self.assertFalse(await registry.wait_until_idle(0))
+        registry.unregister("doctor-2", "request-2", doctor_two)
+        self.assertTrue(await registry.wait_until_idle(0))
+
+    async def test_start_accepting_requires_idle_registry(self):
+        registry = ChatTurnExecutionRegistry()
+        registry.begin_drain()
+        event = registry.register("doctor-1", "request-1")
+
+        with self.assertRaises(RuntimeError):
+            registry.start_accepting()
+
+        registry.unregister("doctor-1", "request-1", event)
+        registry.start_accepting()
+        self.assertFalse(registry.is_draining())
 
 
 class ChatTurnRequestIngestionCasTest(unittest.TestCase):

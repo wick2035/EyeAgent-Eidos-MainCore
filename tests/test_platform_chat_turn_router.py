@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from types import SimpleNamespace
@@ -231,6 +232,7 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
                 payload,
                 starlette_request(principal(scopes={"ai:research"})),
                 service,
+                ChatTurnExecutionRegistry(),
             )
 
         self.assertEqual(caught.exception.status_code, 400)
@@ -250,6 +252,7 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
                 research_prepare_request(),
                 starlette_request(principal(scopes={"ai:chat"})),
                 service,
+                ChatTurnExecutionRegistry(),
             )
         self.assertEqual(prepare_error.exception.status_code, 403)
         self.assertEqual(service.prepare_calls, [])
@@ -259,6 +262,7 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
                 research_execute_request(),
                 starlette_request(principal(scopes={"ai:chat"})),
                 SimpleNamespace(),
+                ChatTurnExecutionRegistry(),
             )
         self.assertEqual(execute_error.exception.status_code, 403)
 
@@ -266,8 +270,110 @@ class PlatformChatTurnRouterContractTest(unittest.IsolatedAsyncioTestCase):
             research_prepare_request(),
             starlette_request(principal(scopes={"ai:research"})),
             service,
+            ChatTurnExecutionRegistry(),
         )
         self.assertEqual(response.status, "prepared")
+
+    async def test_draining_rejects_prepare_and_execute_but_keeps_control_routes(self):
+        service = FakeTurnService()
+        registry = ChatTurnExecutionRegistry()
+        registry.begin_drain()
+        request = starlette_request(principal(scopes={"ai:research"}))
+
+        with self.assertRaises(HTTPException) as prepare_error:
+            await prepare_platform_chat_turn(
+                research_prepare_request(),
+                request,
+                service,
+                registry,
+            )
+        self.assertEqual(prepare_error.exception.status_code, 503)
+        self.assertEqual(
+            prepare_error.exception.detail,
+            {"error_code": "SERVICE_DRAINING"},
+        )
+        self.assertEqual(service.prepare_calls, [])
+
+        with self.assertRaises(HTTPException) as execute_error:
+            await execute_platform_chat_turn(
+                research_execute_request(),
+                request,
+                SimpleNamespace(),
+                registry,
+            )
+        self.assertEqual(execute_error.exception.status_code, 503)
+
+        status = await get_platform_chat_turn_status(
+            "request-1",
+            starlette_request(),
+            service,
+        )
+        aborted = await abort_platform_chat_turn(
+            "request-1",
+            AbortPlatformChatTurnRequest(
+                conversation_id="conversation-1",
+                doctor_id="doctor-1",
+            ),
+            starlette_request(),
+            service,
+            registry,
+        )
+        self.assertEqual(status.status, "streaming")
+        self.assertEqual(aborted.status, "cancelled")
+
+    async def test_execute_admission_is_held_across_drain(self):
+        class ExecutionService:
+            async def stream(self, payload, current, cancel_event=None):
+                self.cancel_event = cancel_event
+                yield {
+                    "event": "execution_started",
+                    "request_id": payload.request_id,
+                }
+
+        service = ExecutionService()
+        registry = ChatTurnExecutionRegistry()
+        payload = research_execute_request()
+        response = await execute_platform_chat_turn(
+            payload,
+            starlette_request(principal(scopes={"ai:research"})),
+            service,
+            registry,
+        )
+        self.assertEqual(registry.active_count(), 1)
+
+        registry.begin_drain()
+        self.assertFalse(await registry.wait_until_idle(0))
+        chunks = [chunk async for chunk in response.body_iterator]
+
+        self.assertEqual(len(chunks), 1)
+        self.assertIsNotNone(service.cancel_event)
+        self.assertTrue(await registry.wait_until_idle(0.1))
+
+    async def test_execute_background_releases_unstarted_stream(self):
+        class ExecutionService:
+            async def stream(self, payload, current, cancel_event=None):
+                yield {
+                    "event": "execution_started",
+                    "request_id": payload.request_id,
+                }
+
+        registry = ChatTurnExecutionRegistry()
+        response = await execute_platform_chat_turn(
+            research_execute_request(),
+            starlette_request(principal(scopes={"ai:research"})),
+            ExecutionService(),
+            registry,
+        )
+        self.assertEqual(registry.active_count(), 1)
+        self.assertIsNotNone(response.background)
+        registry.begin_drain()
+        idle_waiter = asyncio.create_task(registry.wait_until_idle(0.5))
+        await asyncio.sleep(0)
+
+        await response.background()
+
+        self.assertEqual(registry.active_count(), 0)
+        self.assertTrue(await idle_waiter)
 
     async def test_status_research_scope_comes_from_persisted_turn(self):
         service = FakeTurnService()

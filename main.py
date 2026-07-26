@@ -4,9 +4,12 @@ FastAPI主应用 - 智能医疗咨询系统
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from math import ceil, isfinite
+import uvicorn
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +26,9 @@ from presentation.exception_handlers.platform_validation_handler import (
 )
 from presentation.middleware.internal_jwt_auth import install_internal_auth
 from application.services.chat_turn_watchdog import get_chat_turn_watchdog
+from application.services.chat_turn_execution_registry import (
+    get_chat_turn_execution_registry,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -35,6 +41,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    natural_timeout = _positive_env_seconds(
+        "PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS",
+        60,
+    )
+    abort_timeout = _positive_env_seconds(
+        "PLATFORM_TURN_DRAIN_ABORT_TIMEOUT_SECONDS",
+        30,
+    )
+    execution_registry = get_chat_turn_execution_registry()
+    execution_registry.start_accepting()
+
     # 启动时：初始化数据库连接池
     logger.info("[Startup] 初始化数据库连接池...")
     try:
@@ -63,6 +80,11 @@ async def lifespan(app: FastAPI):
         yield  # 应用运行中
     finally:
         try:
+            await _drain_platform_turns(
+                execution_registry,
+                natural_timeout,
+                abort_timeout,
+            )
             if watchdog_task is not None:
                 watchdog_stop.set()
                 try:
@@ -155,6 +177,91 @@ async def health_check():
         "version": "3.0.0",
         "architecture": "langgraph",
     }
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    """只表达本实例是否继续接收新的 platform 回合。"""
+    registry = get_chat_turn_execution_registry()
+    payload = {
+        "status": "draining" if registry.is_draining() else "ready",
+        "active_platform_turns": registry.active_count(),
+    }
+    if registry.is_draining():
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
+def _positive_env_seconds(name: str, default: int) -> float:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if not isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+def _strict_env_boolean(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    if raw_value == "true":
+        return True
+    if raw_value == "false":
+        return False
+    raise ValueError(f"{name} must equal true or false")
+
+
+async def _drain_platform_turns(
+    execution_registry,
+    natural_timeout: float,
+    abort_timeout: float,
+) -> bool:
+    if not execution_registry.begin_drain():
+        return execution_registry.active_count() == 0
+    active_at_start = execution_registry.active_count()
+    logger.info(
+        "[Shutdown] platform turn drain 开始: active=%s",
+        active_at_start,
+    )
+    idle = await execution_registry.wait_until_idle(natural_timeout)
+    signalled = 0
+    if not idle:
+        signalled = execution_registry.signal_all()
+        idle = await execution_registry.wait_until_idle(abort_timeout)
+    logger.info(
+        "[Shutdown] platform turn drain 结束: active=%s, "
+        "signalled=%s, idle=%s",
+        execution_registry.active_count(),
+        signalled,
+        idle,
+    )
+    return idle
+
+
+class PlatformDrainServer(uvicorn.Server):
+    """在 Uvicorn 关闭 listener 前先排空 platform 附件回合。"""
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        *,
+        natural_timeout: float,
+        abort_timeout: float,
+    ) -> None:
+        super().__init__(config)
+        self._platform_natural_timeout = natural_timeout
+        self._platform_abort_timeout = abort_timeout
+
+    async def shutdown(self, sockets=None) -> None:
+        await _drain_platform_turns(
+            get_chat_turn_execution_registry(),
+            self._platform_natural_timeout,
+            self._platform_abort_timeout,
+        )
+        await super().shutdown(sockets=sockets)
 
 
 @app.get("/api/users")
@@ -288,12 +395,42 @@ async def api_info():
 
 
 if __name__ == "__main__":
-    print("http://127.0.0.1:8000")
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=20602,
-        reload=True,
-        log_level="info"
+    print("http://127.0.0.1:20602")
+    reload_enabled = _strict_env_boolean("UVICORN_RELOAD", False)
+    graceful_timeout = ceil(
+        _positive_env_seconds(
+            "UVICORN_GRACEFUL_SHUTDOWN_SECONDS",
+            100,
+        )
     )
+    natural_timeout = _positive_env_seconds(
+        "PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS",
+        60,
+    )
+    abort_timeout = _positive_env_seconds(
+        "PLATFORM_TURN_DRAIN_ABORT_TIMEOUT_SECONDS",
+        30,
+    )
+    if reload_enabled:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=20602,
+            reload=True,
+            timeout_graceful_shutdown=graceful_timeout,
+            log_level="info",
+        )
+    else:
+        config = uvicorn.Config(
+            "main:app",
+            host="0.0.0.0",
+            port=20602,
+            reload=False,
+            timeout_graceful_shutdown=graceful_timeout,
+            log_level="info",
+        )
+        PlatformDrainServer(
+            config,
+            natural_timeout=natural_timeout,
+            abort_timeout=abort_timeout,
+        ).run()

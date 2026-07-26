@@ -372,7 +372,10 @@ SEARCH1API_KEY=your_search_api_key
 python main.py
 ```
 
-或使用 uvicorn：
+该入口默认监听 `20602`，并在 Uvicorn 关闭 listener 前执行 platform 附件回合
+drain。发布环境必须使用该入口且保持 `UVICORN_RELOAD=false`。
+
+直接使用 uvicorn 只适合本地热重载开发，不提供发布所需的 listener 前置 drain：
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -380,7 +383,9 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ### 4. 访问应用
 
-打开浏览器访问：http://127.0.0.1:8000
+`python main.py`：http://127.0.0.1:20602
+
+本地 uvicorn 热重载示例：http://127.0.0.1:8000
 
 ## 使用说明
 
