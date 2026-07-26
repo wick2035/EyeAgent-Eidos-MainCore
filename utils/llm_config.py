@@ -100,6 +100,34 @@ def get_streaming_llm():
     return llm
 
 
+def get_conversation_title_llm():
+    """获取会话标题专用的短输出 JSON 模型。"""
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv(
+        "DASHSCOPE_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    model_name = os.getenv(
+        "CONVERSATION_TITLE_MODEL",
+        os.getenv("ALIYUN_MODEL_NAME", "qwen3.5-plus"),
+    )
+
+    if not api_key:
+        raise ValueError("未找到DASHSCOPE_API_KEY环境变量，请在.env文件中配置")
+
+    return SiliconFlowChatOpenAI(
+        model=model_name,
+        openai_api_key=api_key,
+        openai_api_base=base_url,
+        temperature=0.0,
+        max_tokens=64,
+        timeout=5.0,
+        model_kwargs={"response_format": {"type": "json_object"}},
+        streaming=False,
+        extra_body={"enable_thinking": False},
+    )
+
+
 def get_pdf_analysis_llm():
     """
     获取PDF页面视觉分析LLM实例
@@ -117,4 +145,3 @@ def get_pdf_analysis_llm():
         temperature=0.3,
         max_tokens=4000,
     )
-

@@ -429,7 +429,6 @@ class PlatformChatTurnService:
                 "attachment_only": True,
                 "implicit_prompt_id": request.implicit_prompt_id,
             })
-        context = MessageContext(metadata=metadata)
 
         if request.operation in ("normal", "edit_resend"):
             first_message = (
@@ -438,6 +437,14 @@ class PlatformChatTurnService:
                     request.conversation_id
                 )
             )
+            initialize_first_question = (
+                first_message
+                and bool(request.message.strip())
+                and not request.attachment_only
+            )
+            if initialize_first_question:
+                metadata["conversation_first_question"] = True
+            context = MessageContext(metadata=metadata)
             user, assistant = self.chat_persistence_service.create_turn(
                 request.conversation_id,
                 request.message,
@@ -445,17 +452,14 @@ class PlatformChatTurnService:
                 context=context,
                 source_message_id=request.source_message_id,
                 mode="edit" if request.operation == "edit_resend" else "normal",
+                initialize_first_question=initialize_first_question,
             )
-            if first_message and request.message:
-                self.chat_persistence_service.update_conversation_title(
-                    request.conversation_id,
-                    request.message,
-                )
             return {
                 "user_message_id": user.id,
                 "assistant_message_id": assistant.id,
             }
 
+        context = MessageContext(metadata=metadata)
         assistant = self.chat_persistence_service.create_assistant_regeneration(
             request.conversation_id,
             request.source_message_id,
@@ -673,7 +677,13 @@ class PlatformChatTurnService:
             "attachment_ids",
             "attachment_only",
             "implicit_prompt_id",
+            "conversation_first_question",
         }:
+            raise SourceTurnAuthorityError()
+        if (
+            "conversation_first_question" in metadata
+            and metadata["conversation_first_question"] is not True
+        ):
             raise SourceTurnAuthorityError()
 
         has_attachment_only = "attachment_only" in metadata

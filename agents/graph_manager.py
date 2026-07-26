@@ -43,6 +43,7 @@ from application.services.legacy_text_turn_authority import (
     LegacyTextTurnAuthority,
     build_legacy_text_turn_authority,
 )
+from application.services.conversation_title_service import ConversationTitleService
 from utils.transient_attachment_context import (
     get_attachment_analysis,
     get_research_document_context,
@@ -206,6 +207,7 @@ class GraphManager:
         self,
         use_singleton: bool = True,
         persistence_adapter: Optional[PersistenceAdapter] = None,
+        conversation_title_service: Optional[ConversationTitleService] = None,
     ):
         """
         初始化 GraphManager
@@ -224,6 +226,15 @@ class GraphManager:
 
         # 初始化持久化适配器
         self.persistence = persistence_adapter or self._create_default_adapter()
+        persistence_service = getattr(self.persistence, "service", None)
+        self.conversation_title_service = conversation_title_service
+        if (
+            self.conversation_title_service is None
+            and persistence_service is not None
+        ):
+            self.conversation_title_service = ConversationTitleService(
+                persistence_service.conversation_repo
+            )
 
         logger.info("[GraphManager] 初始化完成")
 
@@ -987,6 +998,7 @@ class GraphManager:
         token_used = None
         usage_event_run_ids = set()
         previous_message_count = 0
+        is_first = False
         prepared_message_ids = {}
         branch_history_messages = None
         current_agent = agent_type
@@ -1152,6 +1164,22 @@ class GraphManager:
                     },
                 }
             return
+
+        title_task = None
+        if (
+            not prepared_mode
+            and branch_mode == "normal"
+            and is_first
+            and conversation_id
+            and message.strip()
+            and self.conversation_title_service is not None
+        ):
+            title_task = asyncio.create_task(
+                self.conversation_title_service.generate_if_eligible(
+                    conversation_id,
+                    message,
+                )
+            )
 
         # 准备输入状态（标记流式模式）
         input_kwargs = dict(kwargs)
@@ -1382,6 +1410,18 @@ class GraphManager:
             return
 
         finally:
+            if title_task is not None:
+                if cancelled and not title_task.done():
+                    title_task.cancel()
+                try:
+                    await title_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as title_error:
+                    logger.warning(
+                        "conversation_title_task_failed error_type=%s",
+                        type(title_error).__name__,
+                    )
             # best-effort：取消或异常时，尽量把 running 占位推进到最终状态。
             if (
                 not prepared_mode

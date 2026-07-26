@@ -97,6 +97,27 @@ class IChatConversationRepository(ABC):
         pass
 
     @abstractmethod
+    def initialize_first_question(
+        self,
+        conversation_id: str,
+        summary: str,
+        provisional_title: str,
+    ) -> bool:
+        """首次写入不可变首问摘要，并在默认标题仍存在时写入临时标题。"""
+        pass
+
+    @abstractmethod
+    def compare_and_set_generated_title(
+        self,
+        conversation_id: str,
+        expected_summary: str,
+        expected_titles: List[str],
+        title: str,
+    ) -> bool:
+        """仅在首问和临时标题均未变化时写入 AI 标题。"""
+        pass
+
+    @abstractmethod
     def update_summary_and_count(
         self,
         conversation_id: str,
@@ -108,7 +129,7 @@ class IChatConversationRepository(ABC):
 
         Args:
             conversation_id: 会话UUID
-            summary: 摘要（可选）
+            summary: 摘要（可选）；传入 None 时保留现有摘要
             total_messages: 消息总数
 
         Returns:

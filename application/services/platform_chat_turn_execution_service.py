@@ -12,6 +12,7 @@ from application.services.chat_turn_execution_registry import (
     get_chat_turn_execution_registry,
 )
 from application.services.chat_persistence_service import ChatPersistenceService
+from application.services.conversation_title_service import ConversationTitleService
 from application.services.platform_attachment_analyzer import (
     AttachmentStatusUpdate,
     PlatformAttachmentAnalyzer,
@@ -114,6 +115,7 @@ class PlatformChatTurnExecutionService:
         research_ingestion_service=None,
         research_context_selector=None,
         graph_manager=None,
+        conversation_title_service=None,
         registry: ChatTurnExecutionRegistry | None = None,
         download_settings: AttachmentDownloadSettings | None = None,
         now: Callable[[], datetime] = datetime.now,
@@ -168,6 +170,10 @@ class PlatformChatTurnExecutionService:
             or ResearchDocumentContextSelector(research_repository)
         )
         self.graph_manager = graph_manager or get_graph_manager()
+        self.conversation_title_service = (
+            conversation_title_service
+            or ConversationTitleService(self.conversation_repo)
+        )
         self.registry = registry or get_chat_turn_execution_registry()
         self._now = now
         self._clock = clock
@@ -222,6 +228,19 @@ class PlatformChatTurnExecutionService:
             )
         active_key = (request.request_id, request.assistant_message_id)
         self._active_doctors[active_key] = principal.subject
+        title_task = None
+        if (
+            turn.operation == "normal"
+            and not turn.attachment_only
+            and self._is_first_question_message(user_message)
+            and user_message.message_content.strip()
+        ):
+            title_task = asyncio.create_task(
+                self.conversation_title_service.generate_if_eligible(
+                    request.conversation_id,
+                    user_message.message_content,
+                )
+            )
         binding = None
         analysis_task = None
         graph_stream = None
@@ -511,6 +530,14 @@ class PlatformChatTurnExecutionService:
                 yield public
             if terminal is None:
                 raise RuntimeError("PREPARED_GRAPH_TERMINAL_MISSING")
+            if title_task is not None:
+                try:
+                    await title_task
+                except Exception as title_error:
+                    logger.warning(
+                        "conversation_title_task_failed error_type=%s",
+                        type(title_error).__name__,
+                    )
             result = await self.finalize_platform_turn_success(
                 request.request_id,
                 request.assistant_message_id,
@@ -560,6 +587,10 @@ class PlatformChatTurnExecutionService:
                 if not analysis_task.done():
                     analysis_task.cancel()
                 await asyncio.gather(analysis_task, return_exceptions=True)
+            if title_task is not None:
+                if not title_task.done():
+                    title_task.cancel()
+                await asyncio.gather(title_task, return_exceptions=True)
             if binding is not None:
                 if turn.agent_type == "research":
                     reset_research_document_context(binding)
@@ -572,6 +603,22 @@ class PlatformChatTurnExecutionService:
                     cancel_event,
                 )
             self._active_doctors.pop(active_key, None)
+
+    @staticmethod
+    def _is_first_question_message(user_message) -> bool:
+        try:
+            raw_context = getattr(user_message, "context", None)
+            if isinstance(raw_context, str):
+                raw_context = json.loads(raw_context)
+            if not isinstance(raw_context, list):
+                return False
+            context = MessageContext.from_context_list(raw_context)
+            return (
+                isinstance(context.metadata, dict)
+                and context.metadata.get("conversation_first_question") is True
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     async def _prepare_research_documents(
         self,

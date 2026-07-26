@@ -91,8 +91,34 @@ class FakeConversationRepo:
         self.items[conversation_id].title = title
         return True
 
+    def initialize_first_question(self, conversation_id, summary, provisional_title):
+        conversation = self.items[conversation_id]
+        if conversation.summary:
+            return False
+        conversation.summary = summary
+        if conversation.title in {"新对话", "Untitled"}:
+            conversation.title = provisional_title
+        return True
+
+    def compare_and_set_generated_title(
+        self,
+        conversation_id,
+        expected_summary,
+        expected_titles,
+        title,
+    ):
+        conversation = self.items[conversation_id]
+        if (
+            conversation.summary != expected_summary
+            or conversation.title not in expected_titles
+        ):
+            return False
+        conversation.title = title
+        return True
+
     def update_summary_and_count(self, conversation_id, summary, total_messages):
-        self.items[conversation_id].summary = summary
+        if summary is not None:
+            self.items[conversation_id].summary = summary
         self.items[conversation_id].total_messages = total_messages
         return True
 
@@ -170,6 +196,24 @@ class ChatTreeServiceTest(unittest.TestCase):
         self.assertEqual(user.parent_id, root_id)
         self.assertEqual(assistant.parent_id, user.id)
         self.assertEqual(conv_repo.get_by_id(chat_id).active_node_id, assistant.id)
+
+    def test_first_question_metadata_is_initialized_once_and_count_keeps_summary(self):
+        service, conv_repo, _ = self.make_service()
+        chat_id = service.create_conversation("doctor-1", "doctor", "新对话")
+
+        service.create_turn(
+            chat_id,
+            "  眼睛干涩怎么办？  ",
+            "doctor-1",
+            initialize_first_question=True,
+        )
+        conversation = conv_repo.get_by_id(chat_id)
+        self.assertEqual(conversation.summary, "眼睛干涩怎么办？")
+        self.assertEqual(conversation.title, "眼睛干涩怎么办")
+
+        service.create_turn(chat_id, "第二个问题", "doctor-1")
+        self.assertEqual(conversation.summary, "眼睛干涩怎么办？")
+        self.assertEqual(conversation.title, "眼睛干涩怎么办")
 
     def test_normal_turn_bootstraps_root_for_external_empty_conversation(self):
         service, conv_repo, msg_repo = self.make_service()
@@ -476,7 +520,16 @@ class FakeTreeService:
         self.title_updates = []
         self._counter = 0
 
-    def create_turn(self, chat_id, content, sender_id, context=None, source_message_id=None, mode="normal"):
+    def create_turn(
+        self,
+        chat_id,
+        content,
+        sender_id,
+        context=None,
+        source_message_id=None,
+        mode="normal",
+        initialize_first_question=False,
+    ):
         self._counter += 1
         user = ChatMessageEntity(
             id=f"user-{self._counter}",
@@ -499,6 +552,8 @@ class FakeTreeService:
             status="streaming",
         )
         self.turns.append((user, assistant, context, source_message_id, mode))
+        if initialize_first_question and content.strip():
+            self.update_conversation_title(chat_id, content)
         return user, assistant
 
     def create_assistant_regeneration(self, chat_id, source_assistant_id, context=None):

@@ -133,8 +133,35 @@ class FakeConversationRepository:
         self.items[conversation_id].title = title
         return True
 
+    def initialize_first_question(self, conversation_id, summary, provisional_title):
+        conversation = self.items[conversation_id]
+        if conversation.summary:
+            return False
+        conversation.summary = summary
+        if conversation.title in {"新对话", "Untitled"}:
+            conversation.title = provisional_title
+        self.title_updates.append((conversation_id, provisional_title))
+        return True
+
+    def compare_and_set_generated_title(
+        self,
+        conversation_id,
+        expected_summary,
+        expected_titles,
+        title,
+    ):
+        conversation = self.items[conversation_id]
+        if (
+            conversation.summary != expected_summary
+            or conversation.title not in expected_titles
+        ):
+            return False
+        conversation.title = title
+        return True
+
     def update_summary_and_count(self, conversation_id, summary, total_messages):
-        self.items[conversation_id].summary = summary
+        if summary is not None:
+            self.items[conversation_id].summary = summary
         self.items[conversation_id].total_messages = total_messages
         return True
 
@@ -1390,6 +1417,26 @@ class PlatformChatTurnServiceTest(unittest.TestCase):
         self.assertEqual(metadata["implicit_prompt_id"], "attachment-analysis-v1")
         self.assertEqual(metadata["attachment_ids"], ["attachment-b", "attachment-a"])
         self.assertEqual(turn.attachment_ids, ["attachment-b", "attachment-a"])
+        conversation = self.conversation_repo.get_by_id("conversation-1")
+        self.assertIsNone(conversation.summary)
+        self.assertEqual(conversation.title, "新对话")
+
+    def test_first_text_question_persists_summary_and_execution_marker(self):
+        request = self._request(message="  请分析这份检查报告  ")
+
+        self.service.prepare(request)
+
+        turn = self._stored_turn()
+        user = self.message_repo.get_by_id(turn.user_message_id)
+        metadata = next(
+            item["metadata"]
+            for item in json.loads(user.context)
+            if "metadata" in item
+        )
+        conversation = self.conversation_repo.get_by_id("conversation-1")
+        self.assertEqual(conversation.summary, "请分析这份检查报告")
+        self.assertEqual(conversation.title, "请分析这份检查报告")
+        self.assertIs(metadata["conversation_first_question"], True)
 
     def test_empty_first_message_does_not_update_conversation_title(self):
         request = self._request(

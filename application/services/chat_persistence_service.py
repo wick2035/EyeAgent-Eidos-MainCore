@@ -28,6 +28,19 @@ from infrastructure.repositories.chat_repository_impl import (
 logger = logging.getLogger(__name__)
 
 
+def generate_provisional_title(content: str, max_length: int = 20) -> str:
+    """根据首问生成可用作模型降级结果的短标题。"""
+    if not content or not content.strip():
+        return "新对话"
+
+    normalized = content.strip().rstrip("。，！？,.!?、；;：:")
+    if not normalized:
+        return "新对话"
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[:max_length] + "..."
+
+
 class LegacyBranchSourceInvalidError(Exception):
     """旧分支源消息缺少可信 canonical 配置。"""
 
@@ -239,10 +252,11 @@ class ChatPersistenceService:
         context: Optional[MessageContext] = None,
         source_message_id: Optional[str] = None,
         mode: str = "normal",
+        initialize_first_question: bool = False,
     ) -> Tuple[ChatMessageEntity, ChatMessageEntity]:
         with self._transaction_context():
             conversation = self._lock_conversation_and_assert_idle(chat_id)
-            return self._create_turn_locked(
+            turn = self._create_turn_locked(
                 chat_id,
                 content,
                 sender_id,
@@ -251,6 +265,9 @@ class ChatPersistenceService:
                 mode=mode,
                 conversation=conversation,
             )
+            if initialize_first_question and content.strip():
+                self.update_conversation_title(chat_id, content)
+            return turn
 
     def create_legacy_edit_turn(
         self,
@@ -569,7 +586,7 @@ class ChatPersistenceService:
 
     def update_conversation_title(self, chat_id: str, first_user_message: str) -> bool:
         """
-        根据首条用户消息更新会话标题
+        原子初始化首问摘要与降级标题。
 
         Args:
             chat_id: 会话ID
@@ -578,10 +595,20 @@ class ChatPersistenceService:
         Returns:
             bool: 是否更新成功
         """
-        title = self.generate_title(first_user_message)
-        success = self.conversation_repo.update_title(chat_id, title)
+        summary = first_user_message.strip() if first_user_message else ""
+        if not summary:
+            return False
+        title = self.generate_title(summary)
+        success = self.conversation_repo.initialize_first_question(
+            chat_id,
+            summary,
+            title,
+        )
         if success:
-            logger.info(f"[ChatPersistenceService] 更新会话标题: {chat_id} -> {title}")
+            logger.info(
+                "[ChatPersistenceService] 已初始化首问元数据: chat_id=%s",
+                chat_id,
+            )
         return success
 
     def load_conversation(
@@ -902,23 +929,7 @@ class ChatPersistenceService:
         Returns:
             str: 生成的标题
         """
-        if not content or not content.strip():
-            return "新对话"
-
-        # 去除首尾空白
-        content = content.strip()
-
-        # 去除末尾标点
-        punctuation = "。，！？,.!?、；;：:"
-        content = content.rstrip(punctuation)
-
-        if not content:
-            return "新对话"
-
-        if len(content) <= max_length:
-            return content
-
-        return content[:max_length] + "..."
+        return generate_provisional_title(content, max_length)
 
     def build_context(
         self,

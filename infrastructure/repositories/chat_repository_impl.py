@@ -137,17 +137,85 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
             logger.error(f"[ChatConversationRepository] 更新标题失败: {e}")
             return False
 
+    def initialize_first_question(
+        self,
+        conversation_id: str,
+        summary: str,
+        provisional_title: str,
+    ) -> bool:
+        """只初始化一次首问摘要；已有手工标题不会被临时标题覆盖。"""
+        try:
+            sql = """
+                UPDATE chat_conversation
+                SET summary = %s,
+                    title = CASE
+                        WHEN title IN ('新对话', 'Untitled') THEN %s
+                        ELSE title
+                    END,
+                    update_time = %s,
+                    version = version + 1
+                WHERE id = %s
+                  AND deleted = 0
+                  AND (summary IS NULL OR summary = '')
+            """
+            affected = self.db.execute(
+                sql,
+                (summary, provisional_title, datetime.now(), conversation_id),
+            )
+            return affected > 0
+        except DatabaseError as e:
+            logger.error(f"[ChatConversationRepository] 初始化首问失败: {e}")
+            return False
+
+    def compare_and_set_generated_title(
+        self,
+        conversation_id: str,
+        expected_summary: str,
+        expected_titles: List[str],
+        title: str,
+    ) -> bool:
+        """用摘要与临时标题双重条件保护手工重命名。"""
+        if not expected_titles:
+            return False
+        try:
+            placeholders = ", ".join(["%s"] * len(expected_titles))
+            sql = f"""
+                UPDATE chat_conversation
+                SET title = %s, update_time = %s, version = version + 1
+                WHERE id = %s
+                  AND deleted = 0
+                  AND summary = %s
+                  AND title IN ({placeholders})
+            """
+            affected = self.db.execute(
+                sql,
+                (
+                    title,
+                    datetime.now(),
+                    conversation_id,
+                    expected_summary,
+                    *expected_titles,
+                ),
+            )
+            return affected > 0
+        except DatabaseError as e:
+            logger.error(f"[ChatConversationRepository] 条件更新 AI 标题失败: {e}")
+            return False
+
     def update_summary_and_count(
         self,
         conversation_id: str,
         summary: Optional[str],
         total_messages: int
     ) -> bool:
-        """更新会话摘要和消息数量"""
+        """更新会话摘要和消息数量；summary=None 时不得清空已有首问。"""
         try:
             sql = """
                 UPDATE chat_conversation
-                SET summary = %s, total_messages = %s, update_time = %s, version = version + 1
+                SET summary = COALESCE(%s, summary),
+                    total_messages = %s,
+                    update_time = %s,
+                    version = version + 1
                 WHERE id = %s AND deleted = 0
             """
             affected = self.db.execute(
