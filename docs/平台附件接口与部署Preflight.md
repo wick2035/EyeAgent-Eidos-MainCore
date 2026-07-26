@@ -95,32 +95,64 @@ PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true
 
 科研文档 claim/接管的真实 MySQL 并发门禁必须显式设置
 `RUN_MYSQL_INTEGRATION=1`，并指向已加载
-上述四份 MainCore DDL 的隔离数据库：
+上述四份 MainCore DDL 的隔离数据库。推荐统一执行只读 schema/授权检查与真实
+测试：
 
 ```bash
 RUN_MYSQL_INTEGRATION=1 \
+PLATFORM_ATTACHMENT_PREFLIGHT_DISPOSABLE_DB=true \
 DB_HOST=<host> DB_PORT=<port> \
 DB_USER=<user> DB_PASSWORD=<password> DB_NAME=<database> \
-.venv/bin/python -m unittest \
-  tests.test_research_document_repository_mysql_integration -v
+.venv/bin/python scripts/platform_attachment_preflight.py mysql --json
 ```
 
-未设置开关时测试保持 skip，避免普通单元测试误连数据库；正式验收必须明确输出
-`OK`，且不能出现 `skipped`。C3-2 验收还必须覆盖 XLSX 多工作表的同事务发布、
-fencing rollback、重试替换和 cascade purge，不能只复用 CSV 的单工作表成功路径。
+`PLATFORM_ATTACHMENT_PREFLIGHT_DISPOSABLE_DB` 只接受精确小写 `true`，用于要求
+操作者明确确认这是允许写入和清理测试数据的隔离库。命令不建表、不改授权，也不
+输出密码或完整 grants。它会验证六表、InnoDB、关键列的类型/null/default、索引
+唯一性与列顺序、外键两端和 `ON DELETE CASCADE`、`utf8mb4_bin`，并逐条解析
+`SHOW GRANTS`：只接受当前目标库或上述六表范围内的
+`SELECT/INSERT/UPDATE/DELETE`（另允许 `USAGE ON *.*`）。额外权限、其他库 scope、
+role、`GRANT OPTION` 或无法识别的 grant 都会失败关闭。随后运行 6 项真实 MySQL
+测试；任一 skip、测试数量变化、失败或错误也会失败关闭。6 项覆盖并发
+claim/接管、CSV/XLSX 同事务发布、XLSX final CAS miss 整事务回滚、已有
+materialization 的原子替换与 cascade purge。
 
-生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，不得宣称生产 `enforce` 已完成。
+R1 共享环境浏览器门禁由 Web 仓库提供：
+
+```bash
+pnpm --filter web e2e:r1:install
+
+YIWENTONG_E2E_BASE_URL=<shared-web-url> \
+YIWENTONG_E2E_PHONE=<disposable-doctor-phone> \
+YIWENTONG_E2E_PASSWORD=<disposable-doctor-password> \
+pnpm --filter web e2e:r1
+```
+
+Web URL 必须是无 credential/path/query/fragment 的 HTTPS origin。本机
+loopback HTTP 只允许额外显式设置
+`YIWENTONG_E2E_ALLOW_LOOPBACK_HTTP=true`，共享 HTTP 地址一律拒绝。该用例使用
+运行时生成的无患者数据 TXT 和随机哨兵值，验证登录、科研上传、回答确实来自附件、
+固定、刷新回读和取消固定。测试默认关闭 screenshot、video 和 trace，且缺少任一
+环境变量时直接失败，不能用 skip 或现有浏览器登录态替代。`finally` 会尝试取消
+固定，并只向上传请求实际使用的同一 Java API origin 删除本次测试会话与附件；
+发布流水线还必须等待异步
+storage/research purge 完成，销毁一次性账号，并在发布记录中保留清理结果。
+
+生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、目标
+环境跨实例 SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，
+不得宣称生产 `enforce` 已完成。
 
 ### 5.1.1 门禁状态矩阵
 
 | 门禁 | 仓库内命令/证据 | 外部依赖 | 2026-07-26 状态 |
 |------|-----------------|----------|------------------|
 | parser 配置与节点预取 | `platform_attachment_preflight.py config --json` | registry digest、签名、SBOM/provenance、目标节点 | 自动化已补；本机仍是 mutable tag 且无 `RepoDigests`，未通过 |
-| MainCore 六表与真实并发 | `RUN_MYSQL_INTEGRATION=1 ... tests.test_research_document_repository_mysql_integration`，必须 `OK` 且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 本地 fallback 曾通过；目标环境未通过 |
+| MainCore 六表与真实并发 | `platform_attachment_preflight.py mysql --json`，必须 11 个检查通过、6 项测试且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 一次性本地 MySQL 8 已通过；目标环境未通过 |
 | Java C4-2A membership | `PlatformConversationDocumentMigrationTest` 与迁移连续重放 | Java 目标 MySQL、跨实例恢复 | 本地开发库已通过；目标环境未通过 |
 | 共享 MinIO 下载边界 | Java presign → MainCore allowlist download → Browser 不可达 | 私有 bucket、TLS、DNS/IP、最小权限 | 未通过 |
 | JWT/JWKS 生产切换 | key overlap、真实签发/验签、日志与时钟证据 | HTTPS/mTLS/mesh、K1/K2、NTP | 本地 `enforce` 已验证；生产未通过 |
-| SSE drain、灰度、回滚 | 停止新流量、等待/abort 在途回合、指标与回滚记录 | LB/编排器、监控、受控医生 cohort | 仓库无可执行 drain 控制，未通过 |
+| R1 真实浏览器 | `pnpm --filter web e2e:r1` | 共享 Web/Java/MainCore、一次性医生账号 | 仓库用例已可发现；共享环境未执行 |
+| SSE drain、灰度、回滚 | Java/MainCore drain 单测；停止新流量、等待/abort 在途回合、指标与回滚记录 | LB/编排器、监控、受控医生 cohort | 单实例控制已实现并通过测试；跨实例演练未通过 |
 
 ### 5.2 上线顺序
 
@@ -128,6 +160,29 @@ fencing rollback、重试替换和 cascade purge，不能只复用 CSV 的单工
 2. **Java 灰度**：再灰度 Java upload、附件关系/审计和 MainCore `prepare`/`execute` 调用，仅对受控医生与会话放量，观察错误率、延迟、解析资源和 SSE 终态。
 3. **Web 最后**：Java 灰度稳定后才发布并开启医生端入口；Web 不包含内部服务地址、download URL、storage key 或 Bearer。
 4. **滚动期间 SSE drain**：实例下线或版本切换前停止接收新回合，等待在途 SSE 完成或安全取消，再终止实例；不得直接切断仍在解析或流式输出的回合。
+
+### 5.2.1 R1 排空合同
+
+- Java readiness 使用 `/actuator/health/readiness`。收到 Spring shutdown 后先发布
+  `REFUSING_TRAFFIC`，新 platform 附件流返回 `SERVICE_DRAINING`，自然等待默认
+  60 秒；仍未完成的回合通过既有恢复服务发出 abort，再等待默认 30 秒。
+- MainCore readiness 使用 `/health/ready`。进入 drain 后返回 `503`，拒绝新的
+  `prepare`/`execute`，但 status/abort 保持开放；自然等待默认 60 秒，随后向仍在
+  执行的本地回合发出停止信号，再等待默认 30 秒，最后才停止 watchdog 和数据库
+  连接池。
+- Java 配置为
+  `AI_DIAGNOSIS_DRAIN_NATURAL_TIMEOUT_SECONDS` /
+  `AI_DIAGNOSIS_DRAIN_ABORT_TIMEOUT_SECONDS`；MainCore 配置为
+  `PLATFORM_TURN_DRAIN_NATURAL_TIMEOUT_SECONDS` /
+  `PLATFORM_TURN_DRAIN_ABORT_TIMEOUT_SECONDS`。Uvicorn reload 默认关闭，
+  graceful shutdown 默认 100 秒。
+- MainCore 发布进程必须用 `python main.py` 启动，由 `PlatformDrainServer` 在关闭
+  listener 前切换 readiness 并执行 drain。直接
+  `uvicorn main:app --reload ...` 只用于本地开发，不能作为 R1 发布入口。
+- 编排顺序必须先从 LB 摘除 Java 并完成 Java drain，再允许 MainCore 进入
+  shutdown。两个服务不能同时被强杀；Java termination grace 必须大于自然等待与
+  abort 总预算之和，MainCore 还必须加上
+  `UVICORN_GRACEFUL_SHUTDOWN_SECONDS`，并为进程关闭预留余量。
 
 ### 5.3 回滚边界
 
