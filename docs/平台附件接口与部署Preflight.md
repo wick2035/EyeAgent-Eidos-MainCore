@@ -1,5 +1,10 @@
 # 医问通平台附件接口与部署 Preflight
 
+**最近状态复核：** 2026-07-26
+
+**文档地位：** 本文是医问通附件发布、部署和回滚的唯一现行入口；历史
+plan/spec 只保留当时的设计与执行证据。
+
 本文是 MainCore 内医问通医生端 platform 附件权威链路、双数据面职责和部署/回滚边界的统一入口。本文不表示生产 `enforce` 已就绪；生产认证切换仍需真实环境中的流量、网络和回滚演练证据。
 
 ## 1. 权威链路
@@ -58,7 +63,7 @@ Browser 可以获得业务所需的附件标识、展示元数据、回合状态
 - **download allowlist**：`PLATFORM_ATTACHMENT_DOWNLOAD_ALLOWLIST_JSON` 非空且只包含 Java 内部下载端点的精确 scheme/host/port/IP；生产默认保持 `PLATFORM_ATTACHMENT_ALLOW_HTTP=false`，并验证 MainCore 可达、Browser 不可达。
 - **JWT/JWKS**：Java 签名 key、`kid` 和 JWKS 发布一致，MainCore 可从 `INTERNAL_JWT_JWKS_URL` 拉取并刷新公钥；日志、探针和配置中不得出现私钥或 Bearer。
 - **双端时钟**：Java 签发端与 MainCore 验签端均启用时钟同步，验证 `iat`/`exp` 和短期 token TTL；`INTERNAL_JWT_CLOCK_SKEW_SECONDS` 只能容忍小幅抖动，不能替代时钟同步。
-- **数据库**：全新隔离数据库必须执行最新版 `scripts/create_research_document_tables.sql`；已有 C3-1 六表环境必须执行 `scripts/upgrade_research_dataset_c3_2.sql`，确认 `research_dataset_sheet.visibility` 等 C3-2 字段真实存在。随后再验证六张表、索引、四级 cascade 和应用账号权限；DDL 迁移必须先于 MainCore 新代码部署，更必须先于任何 Java 灰度流量。
+- **数据库**：MainCore 的六张表不是由一份 DDL 创建。全新隔离数据库必须先执行 `scripts/create_chat_turn_request_table.sql` 与 `scripts/upgrade_chat_turn_request_v2_research.sql`，再执行 `scripts/create_research_document_tables.sql` 与 `scripts/upgrade_research_dataset_c3_2.sql`。随后验证六张表、索引、四级 cascade 和应用账号权限。Java 还必须在自己的目标数据库重放 `database/migration/add_platform_ai_conversation_document.sql`，验证 `(conversation_id, attachment_id)` 唯一键、乐观锁版本和最小 DML 权限。所有 DDL 必须先于 MainCore 新代码部署，更必须先于任何 Java 灰度流量。
 - **可观测性**：能按安全事件、固定 route、回合状态和附件错误码聚合，不记录 download URL、storage key、原文 segment 或内部 Bearer。
 
 生产 parser 镜像配置示例：
@@ -70,9 +75,27 @@ PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST=true
 
 `PLATFORM_ATTACHMENT_PARSER_REQUIRE_DIGEST` 未设置时默认为 `false`，仅用于保持本地开发 tag 工作流；生产不得依赖该默认值。digest 门禁只校验不可变引用格式，镜像预取、签名或 provenance 验证仍应由发布流水线完成。
 
+仓库提供只读生产配置 Preflight：
+
+```bash
+.venv/bin/python scripts/platform_attachment_preflight.py config --json
+```
+
+该命令同时验证：
+
+- parser 使用不可变 `repository@sha256:...`，digest 门禁已开启；
+- sandbox runner、Docker daemon、非 root image user 可用；
+- 本机 `RepoDigests` 包含配置的精确 registry digest；
+- download allowlist 全部使用 HTTPS 且未放开 HTTP；
+- MainCore 使用 `INTERNAL_AUTH_MODE=enforce`，JWKS 使用 HTTPS。
+
+命令只输出状态和安全摘要，不输出密码、Bearer、私钥或预签名 query。任一检查失败
+均以非零状态退出。本地 mutable tag、空 `RepoDigests` 或 `/health` 返回 200 都不能
+代替该证据；镜像签名、SBOM 和 provenance 仍必须由 registry/发布流水线提供。
+
 科研文档 claim/接管的真实 MySQL 并发门禁必须显式设置
 `RUN_MYSQL_INTEGRATION=1`，并指向已加载
-`scripts/create_research_document_tables.sql` 的隔离数据库：
+上述四份 MainCore DDL 的隔离数据库：
 
 ```bash
 RUN_MYSQL_INTEGRATION=1 \
@@ -87,6 +110,17 @@ DB_USER=<user> DB_PASSWORD=<password> DB_NAME=<database> \
 fencing rollback、重试替换和 cascade purge，不能只复用 CSV 的单工作表成功路径。
 
 生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，不得宣称生产 `enforce` 已完成。
+
+### 5.1.1 门禁状态矩阵
+
+| 门禁 | 仓库内命令/证据 | 外部依赖 | 2026-07-26 状态 |
+|------|-----------------|----------|------------------|
+| parser 配置与节点预取 | `platform_attachment_preflight.py config --json` | registry digest、签名、SBOM/provenance、目标节点 | 自动化已补；本机仍是 mutable tag 且无 `RepoDigests`，未通过 |
+| MainCore 六表与真实并发 | `RUN_MYSQL_INTEGRATION=1 ... tests.test_research_document_repository_mysql_integration`，必须 `OK` 且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 本地 fallback 曾通过；目标环境未通过 |
+| Java C4-2A membership | `PlatformConversationDocumentMigrationTest` 与迁移连续重放 | Java 目标 MySQL、跨实例恢复 | 本地开发库已通过；目标环境未通过 |
+| 共享 MinIO 下载边界 | Java presign → MainCore allowlist download → Browser 不可达 | 私有 bucket、TLS、DNS/IP、最小权限 | 未通过 |
+| JWT/JWKS 生产切换 | key overlap、真实签发/验签、日志与时钟证据 | HTTPS/mTLS/mesh、K1/K2、NTP | 本地 `enforce` 已验证；生产未通过 |
+| SSE drain、灰度、回滚 | 停止新流量、等待/abort 在途回合、指标与回滚记录 | LB/编排器、监控、受控医生 cohort | 仓库无可执行 drain 控制，未通过 |
 
 ### 5.2 上线顺序
 

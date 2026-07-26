@@ -54,6 +54,7 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         cls.repository = ResearchDocumentRepositoryImpl(db=cls.db)
         cls.query_repository = ResearchDatasetQueryRepositoryImpl(db=cls.db)
         for table_name in (
+            "chat_turn_request",
             "research_document_ingestion",
             "research_document_segment",
             "research_dataset",

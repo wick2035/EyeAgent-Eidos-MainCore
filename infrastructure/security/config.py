@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
-from typing import Optional
+from typing import Mapping, Optional
 
 
 _ALLOW_INSECURE_HTTP_ENV = (
@@ -102,45 +102,49 @@ class InternalAuthSettings:
             )
 
     @classmethod
-    def from_env(cls) -> "InternalAuthSettings":
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "InternalAuthSettings":
+        source = os.environ if environ is None else environ
         defaults = cls()
         return cls(
             mode=InternalAuthMode(
-                os.environ.get("INTERNAL_AUTH_MODE", defaults.mode.value)
+                source.get("INTERNAL_AUTH_MODE", defaults.mode.value)
             ),
-            jwks_url=os.environ.get("INTERNAL_JWT_JWKS_URL"),
+            jwks_url=source.get("INTERNAL_JWT_JWKS_URL"),
             cache_ttl_seconds=int(
-                os.environ.get(
+                source.get(
                     "INTERNAL_JWT_CACHE_TTL_SECONDS",
                     defaults.cache_ttl_seconds,
                 )
             ),
             negative_cache_seconds=int(
-                os.environ.get(
+                source.get(
                     "INTERNAL_JWT_NEGATIVE_CACHE_SECONDS",
                     defaults.negative_cache_seconds,
                 )
             ),
             refresh_cooldown_seconds=int(
-                os.environ.get(
+                source.get(
                     "INTERNAL_JWT_REFRESH_COOLDOWN_SECONDS",
                     defaults.refresh_cooldown_seconds,
                 )
             ),
             request_timeout_seconds=float(
-                os.environ.get(
+                source.get(
                     "INTERNAL_JWT_REQUEST_TIMEOUT_SECONDS",
                     defaults.request_timeout_seconds,
                 )
             ),
             clock_skew_seconds=int(
-                os.environ.get(
+                source.get(
                     "INTERNAL_JWT_CLOCK_SKEW_SECONDS",
                     defaults.clock_skew_seconds,
                 )
             ),
             allow_insecure_non_loopback_http_jwks=_parse_strict_boolean(
-                os.environ.get(_ALLOW_INSECURE_HTTP_ENV),
+                source.get(_ALLOW_INSECURE_HTTP_ENV),
                 default=defaults.allow_insecure_non_loopback_http_jwks,
             ),
         )
