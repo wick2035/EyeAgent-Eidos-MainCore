@@ -117,6 +117,11 @@ role、`GRANT OPTION` 或无法识别的 grant 都会失败关闭。随后运行
 claim/接管、CSV/XLSX 同事务发布、XLSX final CAS miss 整事务回滚、已有
 materialization 的原子替换与 cascade purge。
 
+MySQL 5.7 的 `COLUMN_TYPE` 仍可能返回 `int(10) unsigned` 等整数 display
+width。Preflight 比较前只移除 `tinyint`/`smallint`/`mediumint`/`int`/`bigint`
+的 display width，仍严格保留 `unsigned`、`zerofill`、null/default 等语义；
+`varchar(16)`、`datetime(6)` 和 `decimal(10,2)` 等非整数参数不会被放宽。
+
 R1 共享环境浏览器门禁由 Web 仓库提供：
 
 ```bash
@@ -148,7 +153,7 @@ loopback HTTP 只允许额外显式设置
 | 门禁 | 仓库内命令/证据 | 外部依赖 | 2026-07-26 状态 |
 |------|-----------------|----------|------------------|
 | parser 配置与节点预取 | `platform_attachment_preflight.py config --json` | registry digest、签名、SBOM/provenance、目标节点 | 当前复核 5 项通过、5 项失败；本地镜像非 root 且生成 112-package SPDX SBOM，但仍是 mutable tag、无 `RepoDigests` 和 registry attestation，未通过 |
-| MainCore 六表与真实并发 | `platform_attachment_preflight.py mysql --json`，必须 11 个检查通过、6 项测试且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 一次性本地 MySQL 8 已通过；当前共享 MySQL 只读 schema 通过，但不是 disposable/minimal-DML，且 MySQL 5.7 display width 会触发类型归一化假失败，目标门禁未通过 |
+| MainCore 六表与真实并发 | `platform_attachment_preflight.py mysql --json`，必须 11 个检查通过、6 项测试且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 一次性本地 MySQL 8 已通过；MySQL 5.7 display width 兼容已修复，当前共享 MySQL 六项只读结构检查通过，但不是 disposable/minimal-DML，目标写入门禁未通过 |
 | Java C4-2A membership | `PlatformConversationDocumentMigrationTest` 与迁移连续重放 | Java 目标 MySQL、跨实例恢复 | 本地开发库已通过；目标环境未通过 |
 | 共享 MinIO 下载边界 | Java presign → MainCore allowlist download → Browser 不可达 | 私有 bucket、TLS、DNS/IP、最小权限 | 当前共享 MinIO 业务链路通过，但仍使用 HTTP，生产 TLS 边界未通过 |
 | JWT/JWKS 生产切换 | key overlap、真实签发/验签、日志与时钟证据 | HTTPS/mTLS/mesh、K1/K2、NTP | loopback JWKS 下 `enforce` 已验证；生产 HTTPS/mTLS/mesh 未通过 |

@@ -38,6 +38,9 @@ DEFAULT_IMAGE = "eyeagent/attachment-parser:research-c3-xlsx"
 IMMUTABLE_IMAGE_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}$"
 )
+MYSQL_INTEGER_DISPLAY_WIDTH_PATTERN = re.compile(
+    r"^(tinyint|smallint|mediumint|int|bigint)\(\d+\)(?=\s|$)"
+)
 MYSQL_INTEGRATION_TEST_NAME = (
     "tests.test_research_document_repository_mysql_integration"
 )
@@ -759,6 +762,11 @@ def run_mysql_integration_suite() -> MySQLSuiteEvidence:
     )
 
 
+def _normalize_mysql_column_type(column_type: str) -> str:
+    normalized = re.sub(r"\s+", " ", column_type.strip().lower())
+    return MYSQL_INTEGER_DISPLAY_WIDTH_PATTERN.sub(r"\1", normalized)
+
+
 def _mysql_schema_checks(
     evidence: MySQLSchemaEvidence,
 ) -> tuple[CheckResult, ...]:
@@ -767,8 +775,24 @@ def _mysql_schema_checks(
     engines_pass = tables_pass and all(
         engine.lower() == "innodb" for engine in table_engines.values()
     )
+    normalized_column_definitions = {
+        (
+            table_name,
+            column_name,
+            _normalize_mysql_column_type(column_type),
+            nullable,
+            default,
+        )
+        for (
+            table_name,
+            column_name,
+            column_type,
+            nullable,
+            default,
+        ) in evidence.column_definitions
+    }
     columns_pass = set(MYSQL_REQUIRED_COLUMN_DEFINITIONS).issubset(
-        evidence.column_definitions
+        normalized_column_definitions
     )
     required_index_keys = {
         definition[:2]

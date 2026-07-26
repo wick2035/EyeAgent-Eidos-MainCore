@@ -14,6 +14,7 @@ from scripts.platform_attachment_preflight import (
     MySQLSchemaEvidence,
     MySQLSuiteEvidence,
     _inspect_mysql_grants,
+    _normalize_mysql_column_type,
     collect_config_checks,
     collect_mysql_checks,
 )
@@ -207,6 +208,59 @@ class PlatformAttachmentPreflightTest(unittest.TestCase):
         )
 
         self.assertTrue(all(check.passed for check in checks))
+
+    def test_mysql_gate_accepts_mysql_57_integer_display_widths(self):
+        display_widths = {
+            "tinyint unsigned": "tinyint(3) unsigned",
+            "smallint unsigned": "smallint(5) unsigned",
+            "int unsigned": "int(10) unsigned",
+            "bigint unsigned": "bigint(20) unsigned",
+        }
+        evidence = passing_mysql_schema()
+        mysql_57_schema = replace(
+            evidence,
+            column_definitions=tuple(
+                (
+                    table_name,
+                    column_name,
+                    display_widths.get(column_type, column_type),
+                    nullable,
+                    default,
+                )
+                for (
+                    table_name,
+                    column_name,
+                    column_type,
+                    nullable,
+                    default,
+                ) in evidence.column_definitions
+            ),
+        )
+
+        checks = collect_mysql_checks(
+            passing_mysql_environment(),
+            schema_probe=lambda: mysql_57_schema,
+            suite_probe=lambda: MySQLSuiteEvidence(6, 0, 0, 0),
+        )
+
+        self.assertTrue(all(check.passed for check in checks))
+
+    def test_mysql_column_type_normalization_preserves_type_semantics(self):
+        self.assertEqual(
+            _normalize_mysql_column_type(" INT(10)   UNSIGNED "),
+            "int unsigned",
+        )
+        for column_type in (
+            "varchar(16)",
+            "datetime(6)",
+            "decimal(10,2) unsigned",
+            "int unsigned zerofill",
+        ):
+            with self.subTest(column_type=column_type):
+                self.assertEqual(
+                    _normalize_mysql_column_type(column_type),
+                    column_type,
+                )
 
     def test_mysql_gate_rejects_extra_privileges_before_suite(self):
         evidence = passing_mysql_schema()
