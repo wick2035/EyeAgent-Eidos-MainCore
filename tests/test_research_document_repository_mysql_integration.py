@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import unittest
@@ -29,6 +30,7 @@ from domain.models.research_document import (
 )
 from infrastructure.database.mysql_connection import MySQLConnectionPool
 from infrastructure.repositories.research_document_repository_impl import (
+    ResearchDocumentFencingError,
     ResearchDocumentRepositoryImpl,
 )
 from infrastructure.repositories.research_dataset_query_repository_impl import (
@@ -41,6 +43,25 @@ def _mysql_integration_enabled() -> bool:
 
 
 _RUN_MYSQL_INTEGRATION = _mysql_integration_enabled()
+
+
+class FinalReadyCasMissDatabase:
+    """在真实事务内注入最终 ready CAS miss，验证整图回滚。"""
+
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def execute(self, sql, params=None):
+        normalized = " ".join(sql.split()).lower()
+        if (
+            "update research_document_ingestion" in normalized
+            and "set status = 'ready'" in normalized
+        ):
+            return 0
+        return self.delegate.execute(sql, params)
 
 
 @unittest.skipUnless(
@@ -210,7 +231,11 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _xlsx_materialization(ingestion_id: str):
+    def _xlsx_materialization(
+        ingestion_id: str,
+        *,
+        value_suffix: str = "",
+    ):
         def make_sheet(ordinal, name, visibility, value, formula, merged):
             row = ExtractedXlsxRow(
                 logical_row_number=1,
@@ -269,8 +294,22 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
             )
 
         sheets = (
-            make_sheet(0, "Visible", "visible", "Alice", "=1+1", 1),
-            make_sheet(1, "Hidden", "veryHidden", "Bob", "", 0),
+            make_sheet(
+                0,
+                "Visible",
+                "visible",
+                f"Alice{value_suffix}",
+                "=1+1",
+                1,
+            ),
+            make_sheet(
+                1,
+                "Hidden",
+                "veryHidden",
+                f"Bob{value_suffix}",
+                "",
+                0,
+            ),
         )
         workbook_fields = {
             "date_system": "1900",
@@ -603,3 +642,203 @@ class ResearchDocumentRepositoryMySQLIntegrationTest(unittest.TestCase):
                 values,
             )
             self.assertEqual(row["row_count"], 0)
+
+    def test_xlsx_final_cas_miss_rolls_back_real_transaction(self):
+        identity = self._xlsx_identity()
+        now = datetime.now()
+        claim = self.repository.claim(
+            identity,
+            now,
+            now + timedelta(minutes=5),
+        )
+        content = "XLSX fencing rollback sentinel"
+        segment = ResearchDocumentSegmentEntity(
+            ingestion_id=claim.entity.id,
+            ordinal=0,
+            content=content,
+            sheet_name="Visible",
+            row_start=1,
+            row_end=2,
+            token_count=estimate_tokens_v1(content),
+            metadata={"extraction_mode": "structured_summary"},
+        )
+        materialization = self._xlsx_materialization(
+            claim.entity.id,
+            value_suffix="-rollback",
+        )
+        repository = ResearchDocumentRepositoryImpl(
+            db=FinalReadyCasMissDatabase(self.db)
+        )
+
+        with self.assertRaises(ResearchDocumentFencingError):
+            repository.complete(
+                claim.entity.id,
+                claim.entity.attempt_count,
+                [segment],
+                materialization,
+            )
+
+        ingestion = self.db.fetch_one(
+            """
+                SELECT status, attempt_count
+                FROM research_document_ingestion
+                WHERE id = %s
+            """,
+            (claim.entity.id,),
+        )
+        self.assertEqual(ingestion["status"], "processing")
+        self.assertEqual(ingestion["attempt_count"], 1)
+        for sql, value in (
+            (
+                "SELECT COUNT(*) AS row_count "
+                "FROM research_document_segment WHERE ingestion_id = %s",
+                claim.entity.id,
+            ),
+            (
+                "SELECT COUNT(*) AS row_count "
+                "FROM research_dataset WHERE ingestion_id = %s",
+                claim.entity.id,
+            ),
+            (
+                "SELECT COUNT(*) AS row_count "
+                "FROM research_dataset_sheet WHERE dataset_id = %s",
+                materialization.dataset.id,
+            ),
+        ):
+            row = self.db.fetch_one(sql, (value,))
+            self.assertEqual(row["row_count"], 0)
+        chunk_count = self.db.fetch_one(
+            """
+                SELECT COUNT(*) AS row_count
+                FROM research_dataset_row_chunk chunk
+                JOIN research_dataset_sheet sheet
+                  ON sheet.id = chunk.sheet_id
+                WHERE sheet.dataset_id = %s
+            """,
+            (materialization.dataset.id,),
+        )
+        self.assertEqual(chunk_count["row_count"], 0)
+
+    def test_xlsx_completion_atomically_replaces_existing_materialization(self):
+        identity = self._xlsx_identity()
+        now = datetime.now()
+        claim = self.repository.claim(
+            identity,
+            now,
+            now + timedelta(minutes=5),
+        )
+
+        def segment(content: str) -> ResearchDocumentSegmentEntity:
+            return ResearchDocumentSegmentEntity(
+                ingestion_id=claim.entity.id,
+                ordinal=0,
+                content=content,
+                sheet_name="Visible",
+                row_start=1,
+                row_end=2,
+                token_count=estimate_tokens_v1(content),
+                metadata={"extraction_mode": "structured_summary"},
+            )
+
+        first = self._xlsx_materialization(
+            claim.entity.id,
+            value_suffix="-v1",
+        )
+        self.assertTrue(
+            self.repository.complete(
+                claim.entity.id,
+                claim.entity.attempt_count,
+                [segment("XLSX replacement sentinel v1")],
+                first,
+            )
+        )
+        affected = self.db.execute(
+            """
+                UPDATE research_document_ingestion
+                SET status = 'processing',
+                    attempt_count = attempt_count + 1,
+                    lease_expires_at = DATE_ADD(
+                        CURRENT_TIMESTAMP(6),
+                        INTERVAL 5 MINUTE
+                    ),
+                    completed_at = NULL,
+                    update_time = CURRENT_TIMESTAMP(6)
+                WHERE id = %s AND status = 'ready'
+            """,
+            (claim.entity.id,),
+        )
+        self.assertEqual(affected, 1)
+
+        second = self._xlsx_materialization(
+            claim.entity.id,
+            value_suffix="-v2",
+        )
+        self.assertTrue(
+            self.repository.complete(
+                claim.entity.id,
+                claim.entity.attempt_count + 1,
+                [segment("XLSX replacement sentinel v2")],
+                second,
+            )
+        )
+
+        counts = self.db.fetch_one(
+            """
+                SELECT
+                    (SELECT COUNT(*)
+                     FROM research_document_segment
+                     WHERE ingestion_id = %s) AS segment_count,
+                    (SELECT COUNT(*)
+                     FROM research_dataset
+                     WHERE ingestion_id = %s) AS dataset_count,
+                    (SELECT COUNT(*)
+                     FROM research_dataset_sheet
+                     WHERE dataset_id = %s) AS sheet_count,
+                    (SELECT COUNT(*)
+                     FROM research_dataset_row_chunk chunk
+                     JOIN research_dataset_sheet sheet
+                       ON sheet.id = chunk.sheet_id
+                     WHERE sheet.dataset_id = %s) AS chunk_count
+            """,
+            (
+                claim.entity.id,
+                claim.entity.id,
+                second.dataset.id,
+                second.dataset.id,
+            ),
+        )
+        self.assertEqual(
+            counts,
+            {
+                "segment_count": 1,
+                "dataset_count": 1,
+                "sheet_count": 2,
+                "chunk_count": 2,
+            },
+        )
+        payloads = self.db.fetch_all(
+            """
+                SELECT chunk.rows_json AS rows_json
+                FROM research_dataset_row_chunk chunk
+                JOIN research_dataset_sheet sheet
+                  ON sheet.id = chunk.sheet_id
+                WHERE sheet.dataset_id = %s
+                ORDER BY sheet.ordinal, chunk.ordinal
+            """,
+            (second.dataset.id,),
+        )
+        serialized = json.dumps(payloads, ensure_ascii=False)
+        self.assertIn("-v2", serialized)
+        self.assertNotIn("-v1", serialized)
+        self.assertEqual(
+            self.query_repository.load_authorized(
+                ResearchDatasetAccessScope(
+                    doctor_id=self.doctor_id,
+                    ingestion_id=claim.entity.id,
+                    attachment_id=identity.attachment_id,
+                    document_version=identity.document_version,
+                    processor_type="xlsx_dataset_v1",
+                )
+            ),
+            second,
+        )
