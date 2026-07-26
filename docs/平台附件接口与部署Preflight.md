@@ -135,8 +135,9 @@ loopback HTTP 只允许额外显式设置
 固定、刷新回读和取消固定。测试默认关闭 screenshot、video 和 trace，且缺少任一
 环境变量时直接失败，不能用 skip 或现有浏览器登录态替代。`finally` 会尝试取消
 固定，并只向上传请求实际使用的同一 Java API origin 删除本次测试会话与附件；
-发布流水线还必须等待异步
-storage/research purge 完成，销毁一次性账号，并在发布记录中保留清理结果。
+若附件尚未绑定，会进入对象删除与 research purge 补偿流程，发布流水线应等待其
+终态；若附件已经形成回合，则删除会话并按医疗数据保留规则隐藏关联，不得为通过
+测试而物理删除已绑定附件。两种路径必须分别记录清理结果，最后销毁一次性账号。
 
 生产 `enforce` 仍是独立部署 gate。缺少真实平台/患者流量、JWKS 网络边界、目标
 环境跨实例 SSE drain 和回滚演练证据时，只能维持已批准的 `off`/`observe` 配置，
@@ -146,13 +147,13 @@ storage/research purge 完成，销毁一次性账号，并在发布记录中保
 
 | 门禁 | 仓库内命令/证据 | 外部依赖 | 2026-07-26 状态 |
 |------|-----------------|----------|------------------|
-| parser 配置与节点预取 | `platform_attachment_preflight.py config --json` | registry digest、签名、SBOM/provenance、目标节点 | 自动化已补；本机仍是 mutable tag 且无 `RepoDigests`，未通过 |
-| MainCore 六表与真实并发 | `platform_attachment_preflight.py mysql --json`，必须 11 个检查通过、6 项测试且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 一次性本地 MySQL 8 已通过；目标环境未通过 |
+| parser 配置与节点预取 | `platform_attachment_preflight.py config --json` | registry digest、签名、SBOM/provenance、目标节点 | 当前复核 5 项通过、5 项失败；本地镜像非 root 且生成 112-package SPDX SBOM，但仍是 mutable tag、无 `RepoDigests` 和 registry attestation，未通过 |
+| MainCore 六表与真实并发 | `platform_attachment_preflight.py mysql --json`，必须 11 个检查通过、6 项测试且零 skip | 隔离目标 MySQL、DDL 账号、最小 DML 账号 | 一次性本地 MySQL 8 已通过；当前共享 MySQL 只读 schema 通过，但不是 disposable/minimal-DML，且 MySQL 5.7 display width 会触发类型归一化假失败，目标门禁未通过 |
 | Java C4-2A membership | `PlatformConversationDocumentMigrationTest` 与迁移连续重放 | Java 目标 MySQL、跨实例恢复 | 本地开发库已通过；目标环境未通过 |
-| 共享 MinIO 下载边界 | Java presign → MainCore allowlist download → Browser 不可达 | 私有 bucket、TLS、DNS/IP、最小权限 | 未通过 |
-| JWT/JWKS 生产切换 | key overlap、真实签发/验签、日志与时钟证据 | HTTPS/mTLS/mesh、K1/K2、NTP | 本地 `enforce` 已验证；生产未通过 |
-| R1 真实浏览器 | `pnpm --filter web e2e:r1` | 共享 Web/Java/MainCore、一次性医生账号 | 仓库用例已可发现；共享环境未执行 |
-| SSE drain、灰度、回滚 | Java/MainCore drain 单测；停止新流量、等待/abort 在途回合、指标与回滚记录 | LB/编排器、监控、受控医生 cohort | 单实例控制已实现并通过测试；跨实例演练未通过 |
+| 共享 MinIO 下载边界 | Java presign → MainCore allowlist download → Browser 不可达 | 私有 bucket、TLS、DNS/IP、最小权限 | 当前共享 MinIO 业务链路通过，但仍使用 HTTP，生产 TLS 边界未通过 |
+| JWT/JWKS 生产切换 | key overlap、真实签发/验签、日志与时钟证据 | HTTPS/mTLS/mesh、K1/K2、NTP | loopback JWKS 下 `enforce` 已验证；生产 HTTPS/mTLS/mesh 未通过 |
+| R1 真实浏览器 | `pnpm --filter web e2e:r1` | 共享 Web/Java/MainCore、一次性医生账号 | 当前共享 MySQL/MinIO 加 loopback JWKS 已通过；生产 HTTPS 目标环境未执行 |
+| SSE drain、灰度、回滚 | Java/MainCore drain 单测；停止新流量、等待/abort 在途回合、指标与回滚记录 | LB/编排器、监控、受控医生 cohort | 隔离双实例/LB 中 Java 活跃流自然排空、J2/M2 接管及 J1/M1 回滚均通过；真实编排器与目标 LB 未执行 |
 
 ### 5.2 上线顺序
 
@@ -183,6 +184,21 @@ storage/research purge 完成，销毁一次性账号，并在发布记录中保
   shutdown。两个服务不能同时被强杀；Java termination grace 必须大于自然等待与
   abort 总预算之和，MainCore 还必须加上
   `UVICORN_GRACEFUL_SHUTDOWN_SECONDS`，并为进程关闭预留余量。
+
+2026-07-26 在不影响原有服务的隔离端口完成双 Java、双 MainCore 与临时 Nginx LB
+演练。基线 R1 通过；在科研 SSE 活跃时退出 Java J1，日志记录
+`platform_attachment_drain_started active_at_start=1` 和
+`platform_attachment_drain_complete active_at_start=1 forced_abort=0`，在途 R1
+仍通过。Java 排空后才切换并退出 MainCore M1，其日志记录
+`active=0, signalled=0, idle=True`；J2/M2 接管 R1 通过。恢复 J1/M1 并重新加入
+双实例池后，R1 再次通过，LB 日志确认四个 upstream 均承接请求。
+
+该演练证明进程级 drain 合同和顺序可工作，但不是目标编排器验收。MainCore
+`ChatTurnExecutionRegistry` 是进程内 registry，共享数据库终态才是跨实例事实。
+若 abort 请求命中非 owner 实例，它可以更新共享终态，却不能立即设置 owner
+进程内的 cancel event；目标 LB/控制面必须提供 owner 路由、实例定向 abort 或
+等价机制，并验证 owner 在下一检查点停止，不能只以非 owner 的 HTTP 200 判定
+跨实例取消完成。
 
 ### 5.3 回滚边界
 
