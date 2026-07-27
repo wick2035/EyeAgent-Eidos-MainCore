@@ -254,6 +254,69 @@ class ChatTurnWatchdogTest(unittest.TestCase):
         self.assertEqual(db.transactions, 1)
         self.assertEqual(db.depth, 0)
 
+    def test_streaming_turn_on_deleted_conversation_reaches_terminal_state(self):
+        turn = _turn(
+            request_id="deleted-streaming",
+            status="streaming",
+            create_time=_NOW - timedelta(minutes=15),
+            deadline_at=_NOW,
+        )
+        watchdog, _, conversations, messages, db = _watchdog(turn)
+        conversation = conversations.items[turn.conversation_id]
+        conversation.deleted = True
+        assistant = messages.items[turn.assistant_message_id]
+        assistant.deleted = True
+
+        conversations.lock_by_id_including_deleted = (
+            conversations.lock_by_id
+        )
+        conversations.lock_by_id = lambda _conversation_id: None
+        maintenance_updates = []
+
+        def update_visible(message_id, updates):
+            if db.depth != 1:
+                raise AssertionError(
+                    "message update must run inside turn transaction"
+                )
+            if messages.items[message_id].deleted:
+                return False
+            return _MessageRepository.update(
+                messages,
+                message_id,
+                updates,
+            )
+
+        def update_including_deleted(message_id, updates):
+            if db.depth != 1:
+                raise AssertionError(
+                    "maintenance update must run inside turn transaction"
+                )
+            maintenance_updates.append((message_id, dict(updates)))
+            for key, value in updates.items():
+                setattr(messages.items[message_id], key, value)
+            return True
+
+        messages.update = update_visible
+        messages.update_including_deleted = update_including_deleted
+
+        result = watchdog.reconcile_once(_NOW)
+
+        self.assertEqual(result.streaming_failed, 1)
+        self.assertEqual(turn.status, "failed")
+        self.assertEqual(assistant.status, "failed")
+        self.assertEqual(
+            maintenance_updates,
+            [
+                (
+                    turn.assistant_message_id,
+                    {
+                        "status": "failed",
+                        "error_message": "ATTACHMENT_ANALYSIS_TIMEOUT",
+                    },
+                )
+            ],
+        )
+
     def test_watchdog_does_not_overwrite_newer_active_node(self):
         turn = _turn(
             request_id="old-prepared",

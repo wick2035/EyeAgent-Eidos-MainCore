@@ -14,7 +14,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
-from presentation.routers import chat_router, conversation_router, research_router, compliance_router, recommendation_router
+from presentation.routers import (
+    chat_router,
+    compliance_router,
+    conversation_router,
+    platform_conversation_purge_router,
+    recommendation_router,
+    research_router,
+)
 from presentation.routers import asr_router
 from presentation.routers import file_router
 from presentation.routers import platform_chat_turn_router
@@ -140,6 +147,7 @@ app.include_router(recommendation_router.router)
 app.include_router(asr_router.router)
 app.include_router(file_router.router)
 app.include_router(platform_chat_turn_router.router)
+app.include_router(platform_conversation_purge_router.router)
 app.include_router(research_document_router.router)
 
 logger.info("=" * 80)

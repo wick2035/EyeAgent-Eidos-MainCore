@@ -34,6 +34,10 @@ _LOGGER_NAME = "presentation.middleware.internal_jwt_auth"
 _ENFORCED_REQUESTS = (
     (
         "DELETE",
+        "/api/platform/conversations/conversation-7/purge",
+    ),
+    (
+        "DELETE",
         "/api/platform/research-documents/33333333-3333-4333-8333-333333333333",
     ),
     ("GET", "/api/conversations/conversation-7"),
@@ -837,6 +841,11 @@ class InternalJWTAuthMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
     def test_platform_dynamic_routes_have_stable_telemetry_templates(self):
         cases = (
+            (
+                "DELETE",
+                "/api/platform/conversations/conversation-7/purge",
+                "/api/platform/conversations/{conversationId}/purge",
+            ),
             (
                 "DELETE",
                 "/api/platform/research-documents/33333333-3333-4333-8333-333333333333",

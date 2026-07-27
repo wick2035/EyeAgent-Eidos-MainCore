@@ -46,6 +46,7 @@ _ENFORCED_EXACT_ROUTES = frozenset(
 
 _ENFORCED_DYNAMIC_ROUTES = frozenset(
     {
+        ("DELETE", "/api/platform/conversations/{conversationId}/purge"),
         ("DELETE", "/api/platform/research-documents/{attachment_id}"),
         ("GET", "/api/platform/chat/turns/{request_id}"),
         ("POST", "/api/platform/chat/turns/{request_id}/abort"),
@@ -55,6 +56,7 @@ _ENFORCED_DYNAMIC_ROUTES = frozenset(
 _TELEMETRY_ROUTE_TEMPLATES = frozenset(
     {
         ("DELETE", "/api/platform/research-documents/{attachment_id}"),
+        ("DELETE", "/api/platform/conversations/{conversationId}/purge"),
         ("DELETE", "/api/chat/{session_id}"),
         ("DELETE", "/api/conversations/{conversation_id}"),
         ("DELETE", "/api/research/conversations/{conversation_id}"),

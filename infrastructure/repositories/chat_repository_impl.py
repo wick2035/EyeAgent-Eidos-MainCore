@@ -75,6 +75,27 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
             logger.error(f"[ChatConversationRepository] 获取会话失败: {e}")
             return None
 
+    def get_by_id_including_deleted(
+        self,
+        conversation_id: str,
+    ) -> Optional[ChatConversationEntity]:
+        """维护路径读取会话，包含已软删除记录。"""
+        try:
+            sql = """
+                SELECT id, user_type, host_id, title, summary, total_messages, active_node_id,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_conversation
+                WHERE id = %s
+            """
+            result = self.db.fetch_one(sql, (conversation_id,))
+            return self._row_to_entity(result) if result else None
+        except DatabaseError as e:
+            logger.error(
+                "[ChatConversationRepository] 维护读取会话失败: %s",
+                type(e).__name__,
+            )
+            return None
+
     def lock_by_id(self, conversation_id: str) -> Optional[ChatConversationEntity]:
         """在当前事务中读取并锁定会话行。"""
         sql = """
@@ -82,6 +103,21 @@ class ChatConversationRepositoryImpl(IChatConversationRepository):
                    create_time, create_by, update_time, update_by, deleted, version
             FROM chat_conversation
             WHERE id = %s AND deleted = 0
+            FOR UPDATE
+        """
+        result = self.db.fetch_one(sql, (conversation_id,))
+        return self._row_to_entity(result) if result else None
+
+    def lock_by_id_including_deleted(
+        self,
+        conversation_id: str,
+    ) -> Optional[ChatConversationEntity]:
+        """维护路径锁定会话，允许回合在删除 tombstone 上收敛。"""
+        sql = """
+            SELECT id, user_type, host_id, title, summary, total_messages, active_node_id,
+                   create_time, create_by, update_time, update_by, deleted, version
+            FROM chat_conversation
+            WHERE id = %s
             FOR UPDATE
         """
         result = self.db.fetch_one(sql, (conversation_id,))
@@ -355,6 +391,28 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
             logger.error(f"[ChatMessageRepository] 获取消息失败: {e}")
             return None
 
+    def get_by_id_including_deleted(
+        self,
+        message_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        """维护路径读取消息，包含已软删除记录。"""
+        try:
+            sql = """
+                SELECT id, chat_id, parent_id, siblings_group_id, message_order, message_content,
+                       message_type, sender_id, context, token_used, status, error_message,
+                       create_time, create_by, update_time, update_by, deleted, version
+                FROM chat_message
+                WHERE id = %s
+            """
+            result = self.db.fetch_one(sql, (message_id,))
+            return self._row_to_entity(result) if result else None
+        except DatabaseError as e:
+            logger.error(
+                "[ChatMessageRepository] 维护读取消息失败: %s",
+                type(e).__name__,
+            )
+            return None
+
     def get_by_ids(self, chat_id: str, ids: List[str]) -> List[ChatMessageEntity]:
         """按ID列表获取同一会话内的消息"""
         if not ids:
@@ -420,6 +478,42 @@ class ChatMessageRepositoryImpl(IChatMessageRepository):
 
         except DatabaseError as e:
             logger.error(f"[ChatMessageRepository] 更新消息失败: {e}")
+            return False
+
+    def update_including_deleted(
+        self,
+        message_id: str,
+        updates: Dict[str, Any],
+    ) -> bool:
+        """维护路径更新 tombstone；仅供终态收敛和 watchdog 使用。"""
+        if not updates:
+            return False
+
+        try:
+            set_clauses = []
+            params = []
+            for field, value in updates.items():
+                set_clauses.append(f"{field} = %s")
+                params.append(value)
+            set_clauses.append("update_time = %s")
+            params.append(datetime.now())
+            set_clauses.append("version = version + 1")
+            params.append(message_id)
+
+            affected = self.db.execute(
+                f"""
+                    UPDATE chat_message
+                    SET {', '.join(set_clauses)}
+                    WHERE id = %s
+                """,
+                tuple(params),
+            )
+            return affected > 0
+        except DatabaseError as e:
+            logger.error(
+                "[ChatMessageRepository] 维护更新消息失败: %s",
+                type(e).__name__,
+            )
             return False
 
     def get_by_chat_id(

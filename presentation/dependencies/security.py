@@ -102,6 +102,27 @@ def require_platform_doctor_subject(
     return principal
 
 
+def require_platform_conversation_write(
+    request: Request,
+) -> CurrentPrincipal:
+    principal = get_current_principal(request)
+    if principal is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"error_code": "PLATFORM_AUTH_REQUIRED"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if (
+        principal.principal_type != "doctor"
+        or "conversation:write" not in principal.scopes
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "PLATFORM_CONVERSATION_FORBIDDEN"},
+        )
+    return principal
+
+
 def require_platform_doctor(
     request: Request,
     doctor_id: str,

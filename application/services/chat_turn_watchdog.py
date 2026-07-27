@@ -175,7 +175,13 @@ class ChatTurnWatchdog:
         )
 
     def _lock_conversation(self, conversation_id: str):
-        lock_by_id = getattr(self.conversation_repo, "lock_by_id", None)
+        lock_by_id = getattr(
+            self.conversation_repo,
+            "lock_by_id_including_deleted",
+            None,
+        )
+        if not callable(lock_by_id):
+            lock_by_id = getattr(self.conversation_repo, "lock_by_id", None)
         conversation = (
             lock_by_id(conversation_id)
             if callable(lock_by_id)
@@ -186,7 +192,17 @@ class ChatTurnWatchdog:
         return conversation
 
     def _require_message_update(self, message_id: str, updates: dict) -> None:
-        if not self.message_repo.update(message_id, updates):
+        if self.message_repo.update(message_id, updates):
+            return
+        maintenance_update = getattr(
+            self.message_repo,
+            "update_including_deleted",
+            None,
+        )
+        if not callable(maintenance_update) or not maintenance_update(
+            message_id,
+            updates,
+        ):
             raise RuntimeError("CHAT_MESSAGE_UPDATE_FAILED")
 
 

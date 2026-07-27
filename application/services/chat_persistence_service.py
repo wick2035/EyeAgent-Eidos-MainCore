@@ -27,6 +27,10 @@ from infrastructure.repositories.chat_repository_impl import (
 
 logger = logging.getLogger(__name__)
 
+_ASSISTANT_TERMINAL_STATUSES = frozenset(
+    {"success", "done", "failed", "error", "cancelled"}
+)
+
 
 def generate_provisional_title(content: str, max_length: int = 20) -> str:
     """根据首问生成可用作模型降级结果的短标题。"""
@@ -1003,6 +1007,11 @@ class ChatPersistenceService:
                 return False
 
             success = self.message_repo.update(message_id, updates)
+            if not success and status in _ASSISTANT_TERMINAL_STATUSES:
+                success = self._update_message_including_deleted(
+                    message_id,
+                    updates,
+                )
 
             # 如果状态从 running 变为 success，更新会话的消息数量
             if success and status == "success":
@@ -1047,22 +1056,83 @@ class ChatPersistenceService:
         if error_message is not None:
             updates["error_message"] = error_message
 
-        if not self.message_repo.update(message_id, updates):
+        if not self._update_terminal_message(message_id, updates):
             return False
         if status != "success":
             return True
 
-        message = self.message_repo.get_by_id(message_id)
+        message = self._get_message_including_deleted(message_id)
         if message is None:
             return False
+        if bool(getattr(message, "deleted", False)):
+            return True
         total_messages = self._count_visible_messages(message.chat_id)
-        return bool(
-            self.conversation_repo.update_summary_and_count(
-                message.chat_id,
-                None,
-                total_messages,
-            )
+        if self.conversation_repo.update_summary_and_count(
+            message.chat_id,
+            None,
+            total_messages,
+        ):
+            return True
+        conversation = self._get_conversation_including_deleted(
+            message.chat_id
         )
+        return bool(
+            conversation is not None
+            and getattr(conversation, "deleted", False)
+        )
+
+    def _update_terminal_message(
+        self,
+        message_id: str,
+        updates: Dict[str, Any],
+    ) -> bool:
+        if self.message_repo.update(message_id, updates):
+            return True
+        return self._update_message_including_deleted(
+            message_id,
+            updates,
+        )
+
+    def _update_message_including_deleted(
+        self,
+        message_id: str,
+        updates: Dict[str, Any],
+    ) -> bool:
+        updater = getattr(
+            self.message_repo,
+            "update_including_deleted",
+            None,
+        )
+        return bool(
+            callable(updater)
+            and updater(message_id, updates)
+        )
+
+    def _get_message_including_deleted(
+        self,
+        message_id: str,
+    ) -> Optional[ChatMessageEntity]:
+        getter = getattr(
+            self.message_repo,
+            "get_by_id_including_deleted",
+            None,
+        )
+        if callable(getter):
+            return getter(message_id)
+        return self.message_repo.get_by_id(message_id)
+
+    def _get_conversation_including_deleted(
+        self,
+        conversation_id: str,
+    ) -> Optional[ChatConversationEntity]:
+        getter = getattr(
+            self.conversation_repo,
+            "get_by_id_including_deleted",
+            None,
+        )
+        if callable(getter):
+            return getter(conversation_id)
+        return self.conversation_repo.get_by_id(conversation_id)
 
     def is_first_message(self, chat_id: str) -> bool:
         """
