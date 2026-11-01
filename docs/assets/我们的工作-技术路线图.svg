@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1360" viewBox="0 0 1000 1360" role="img" aria-labelledby="title desc">
+<title id="title">智能医疗咨询系统开发技术路线图</title>
+<desc id="desc">确定开发目标、制定开发方案、系统开发与验证三个阶段，包含六类智能体开发、业务集成和联调验证。</desc>
+<defs><linearGradient id="blue" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e0ecff"/><stop offset="100%" stop-color="#a6d2fb"/></linearGradient></defs>
+<rect width="1000" height="1360" fill="white"/>
+<polyline points="500,126 500,175" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="500.00,175.00 494.50,162.00 505.50,162.00" fill="#ff8800"/>
+<polygon points="500.00,126.00 505.50,139.00 494.50,139.00" fill="#ff8800"/>
+<polyline points="500,245 500,275" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="500.00,245.00 505.50,258.00 494.50,258.00" fill="#ff8800"/>
+<polyline points="285,300 285,275 715,275 715,300" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="715.00,300.00 709.50,287.00 720.50,287.00" fill="#ff8800"/>
+<polygon points="285.00,300.00 279.50,287.00 290.50,287.00" fill="#ff8800"/>
+<polyline points="440,340 560,340" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="560.00,340.00 547.00,345.50 547.00,334.50" fill="#ff8800"/>
+<polygon points="440.00,340.00 453.00,334.50 453.00,345.50" fill="#ff8800"/>
+<polyline points="285,380 285,435" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="285.00,435.00 279.50,422.00 290.50,422.00" fill="#ff8800"/>
+<polygon points="285.00,380.00 290.50,393.00 279.50,393.00" fill="#ff8800"/>
+<polyline points="715,380 715,435" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="715.00,435.00 709.50,422.00 720.50,422.00" fill="#ff8800"/>
+<polygon points="715.00,380.00 720.50,393.00 709.50,393.00" fill="#ff8800"/>
+<polyline points="500,505 500,565" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="500.00,565.00 494.50,552.00 505.50,552.00" fill="#ff8800"/>
+<polyline points="500,641 500,675" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polyline points="285,700 285,675 715,675 715,700" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="715.00,700.00 709.50,687.00 720.50,687.00" fill="#ff8800"/>
+<polygon points="285.00,700.00 279.50,687.00 290.50,687.00" fill="#ff8800"/>
+<polyline points="285,780 285,820 715,820 715,780" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polyline points="500,820 500,865" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="500.00,865.00 494.50,852.00 505.50,852.00" fill="#ff8800"/>
+<polyline points="500,935 500,975" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polyline points="310,1010 310,975 690,975 690,1010" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="690.00,1010.00 684.50,997.00 695.50,997.00" fill="#ff8800"/>
+<polygon points="310.00,1010.00 304.50,997.00 315.50,997.00" fill="#ff8800"/>
+<polyline points="310,1090 310,1150 690,1150 690,1090" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polyline points="500,1150 500,1220" fill="none" stroke="#ff8800" stroke-width="2.6" stroke-linejoin="round"/>
+<polygon points="500.00,1220.00 494.50,1207.00 505.50,1207.00" fill="#ff8800"/>
+<rect x="300" y="50" width="400" height="76" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="71.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="central" fill="#182b3d">查阅医疗智能体相关文献</text>
+<text x="500.0" y="105.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="central" fill="#182b3d">分析眼科服务需求与应用现状</text>
+<rect x="300" y="175" width="400" height="70" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="210.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="central" fill="#182b3d">确定系统开发目标与功能范围</text>
+<rect x="130" y="300" width="310" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="285.0" y="324.5" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">梳理医生与患者需求</text>
+<text x="285.0" y="355.5" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">明确角色权限与业务流程</text>
+<rect x="560" y="300" width="310" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="715.0" y="325.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" text-anchor="middle" dominant-baseline="central" fill="#182b3d">分析现有接口与数据资源</text>
+<text x="715.0" y="355.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" text-anchor="middle" dominant-baseline="central" fill="#182b3d">确定工具调用与持久化方案</text>
+<rect x="130" y="435" width="740" height="70" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="470.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="25" text-anchor="middle" dominant-baseline="central" fill="#182b3d">设计 FastAPI 分层架构与 LangGraph 状态图</text>
+<rect x="290" y="565" width="420" height="76" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="603.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="central" fill="#182b3d">构建混合意图路由与六类智能体</text>
+<rect x="130" y="700" width="310" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="285.0" y="726.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="18" text-anchor="middle" dominant-baseline="central" fill="#182b3d">基础服务智能体</text>
+<text x="285.0" y="754.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="18" text-anchor="middle" dominant-baseline="central" fill="#182b3d">健康咨询 · 医疗报告 · 提醒管理</text>
+<rect x="560" y="700" width="310" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="715.0" y="726.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="18" text-anchor="middle" dominant-baseline="central" fill="#182b3d">扩展服务智能体</text>
+<text x="715.0" y="754.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="18" text-anchor="middle" dominant-baseline="central" fill="#182b3d">科研辅助 · 合规审查 · 产品推荐</text>
+<rect x="130" y="865" width="740" height="70" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="900.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="25" text-anchor="middle" dominant-baseline="central" fill="#182b3d">集成业务工具、会话持久化与多模态交互</text>
+<rect x="160" y="1010" width="300" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="310.0" y="1035.5" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="19" text-anchor="middle" dominant-baseline="central" fill="#182b3d">功能与接口联调</text>
+<text x="310.0" y="1064.5" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="19" text-anchor="middle" dominant-baseline="central" fill="#182b3d">路由 · 工具调用 · 流式响应</text>
+<rect x="540" y="1010" width="300" height="80" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="690.0" y="1035.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" text-anchor="middle" dominant-baseline="central" fill="#182b3d">权限与状态验证</text>
+<text x="690.0" y="1065.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" text-anchor="middle" dominant-baseline="central" fill="#182b3d">角色隔离 · 会话恢复</text>
+<rect x="130" y="1220" width="740" height="75" rx="12" fill="url(#blue)" stroke="#86a6d3" stroke-width="2"/>
+<text x="500.0" y="1257.5" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="26" text-anchor="middle" dominant-baseline="central" fill="#182b3d">问题修复、系统部署与持续迭代</text>
+<path d="M 890 55 C 912 55 912 55 912 79 C 912 130.5 912 143.5 928 152.5 C 912 161.5 912 174.5 912 226 C 912 250 912 250 890 250" fill="none" stroke="#ff8800" stroke-width="2"/>
+<text x="955" y="75.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">确</text>
+<text x="955" y="106.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">定</text>
+<text x="955" y="137.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">开</text>
+<text x="955" y="168.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">发</text>
+<text x="955" y="199.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">目</text>
+<text x="955" y="230.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">标</text>
+<path d="M 105 300 C 83 300 83 300 83 324 C 83 380.5 83 393.5 67 402.5 C 83 411.5 83 424.5 83 481 C 83 505 83 505 105 505" fill="none" stroke="#ff8800" stroke-width="2"/>
+<text x="40" y="325.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">制</text>
+<text x="40" y="356.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">定</text>
+<text x="40" y="387.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">开</text>
+<text x="40" y="418.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">发</text>
+<text x="40" y="449.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">方</text>
+<text x="40" y="480.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">案</text>
+<path d="M 890 565 C 912 565 912 565 912 589 C 912 908.0 912 921.0 928 930.0 C 912 939.0 912 952.0 912 1271 C 912 1295 912 1295 890 1295" fill="none" stroke="#ff8800" stroke-width="2"/>
+<text x="955" y="837.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">系</text>
+<text x="955" y="868.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">统</text>
+<text x="955" y="899.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">开</text>
+<text x="955" y="930.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">发</text>
+<text x="955" y="961.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">与</text>
+<text x="955" y="992.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">验</text>
+<text x="955" y="1023.0" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="21" text-anchor="middle" dominant-baseline="central" fill="#182b3d">证</text>
+</svg>
