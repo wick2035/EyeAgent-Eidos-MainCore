@@ -37,3 +37,6 @@ dist/
 *.tmp
 *.temp
 nul
+
+# Local assistant configuration
+.claude/settings.local.json

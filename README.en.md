@@ -1,8 +1,8 @@
-# EyeAgent MainCore
+# EyeAgent Eidos
 
 English | [简体中文](README.md)
 
-EyeAgent MainCore is a FastAPI and LangGraph multi-agent medical consultation system focused on ophthalmology. It combines health consultation, medical reports, reminders, research assistance, compliance review, and product recommendations with hybrid intent routing and MySQL-backed conversation state.
+EyeAgent Eidos is a FastAPI and LangGraph multi-agent medical consultation system focused on ophthalmology. It combines health consultation, medical reports, reminders, research assistance, compliance review, and product recommendations with hybrid intent routing and MySQL-backed conversation state.
 
 > This project is intended for research and development. Model output can be wrong and does not replace professional medical judgment, diagnosis, or treatment. Clinical use requires review by qualified professionals and appropriate safety, privacy, and regulatory assessment.
 
@@ -164,7 +164,7 @@ main.py          Application entry point
 
 ## Deployment and security
 
-This repository includes demonstration and integration code. Before deployment, implement reliable authentication, server-side authorization, sensitive data protection, auditing and network isolation. The current CORS configuration allows all origins, and a role field is not proof of identity. Explicitly override the default business backend URL and token in the code; inspect and rotate any credentials that may have been exposed. Checkpoints use Python pickle serialization and must only be read from a trusted database. Do not commit real patient data, `.env` files or secrets, or post sensitive information in public issues.
+This repository includes demonstration and integration code. Before deployment, implement reliable authentication, server-side authorization, sensitive data protection, auditing and network isolation. The current CORS configuration allows all origins, and a role field is not proof of identity. Explicitly configure the business backend URL and token; inspect and rotate any credentials that may have been exposed. Checkpoints use Python pickle serialization and must only be read from a trusted database. Do not commit real patient data, `.env` files or secrets, or post sensitive information in public issues.
 
 ## Troubleshooting
 
@@ -179,4 +179,4 @@ Issues and pull requests are welcome. Describe the problem and reproduction step
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE). Follow its terms when using, modifying or distributing the project. Third-party dependencies and services are subject to their own licenses and terms.
+This project is licensed under the [Apache License 2.0](LICENSE). Follow its terms when using, modifying or distributing the project. Third-party dependencies and services are subject to their own licenses and terms. PDF rendering uses [pypdfium2 / PDFium](https://github.com/pypdfium2-team/pypdfium2#licensing); retain its license and bundled dependency notices when redistributing binaries. Dependencies are not fully locked: review the actual resolved versions and transitive dependencies for each release.

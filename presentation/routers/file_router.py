@@ -3,7 +3,7 @@
 
 POST /api/upload
   - 图片 (image/jpeg, image/png, image/webp)：存 MinIO 备份 + 返回 base64
-  - PDF  (application/pdf)：存 MinIO 备份 + pymupdf 转页面图片 base64
+  - PDF  (application/pdf)：存 MinIO 备份 + pypdfium2 转页面图片 base64
 
 返回数据直接附在 ChatRequest.attachments[] 中随消息发送。
 """
@@ -59,7 +59,7 @@ async def upload_attachment(file: UploadFile = File(...)) -> FileUploadResponse:
     上传图片或 PDF 附件。
 
     图片：存 MinIO → 读回字节 → base64，返回 {file_type, base64, mime_type, minio_url}
-    PDF ：存 MinIO → pymupdf 转各页 JPEG → base64，返回 {file_type, page_images, minio_url}
+    PDF ：存 MinIO → pypdfium2 转各页 JPEG → base64，返回 {file_type, page_images, minio_url}
 
     前端拿到响应后，将整个 JSON 对象放入 ChatRequest.attachments[]，
     随消息一起发送给 /api/chat，由 chat_router 触发附件预分析。

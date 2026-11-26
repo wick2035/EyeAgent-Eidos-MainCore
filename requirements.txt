@@ -27,3 +27,7 @@ pandas>=2.0.0,<2.2.0    # 数据处理和分析
 scipy>=1.10.0           # 科学计算和统计分析
 matplotlib>=3.7.0       # 数据可视化
 minio>=7.0.0            # 对象存储（可视化图片存储）
+
+# PDF rendering and business backend HTTP client
+pypdfium2>=4.30.0,<6.0.0
+requests>=2.31.0,<3.0.0

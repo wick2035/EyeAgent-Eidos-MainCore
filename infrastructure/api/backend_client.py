@@ -31,17 +31,16 @@ class NetworkError(Exception):
 class BackendAPIClient:
     """后端 API 统一客户端"""
 
-    BASE_URL = os.getenv('BACKEND_API_URL', 'http://127.0.0.1:8081')
-    HEADERS = {
-        "Agent-Token": os.getenv('BACKEND_API_TOKEN', 'REMOVED_CONFIGURE_BACKEND_API_TOKEN'),
-        "Content-Type": "application/json"
-    }
     TIMEOUT = 30  # 30秒超时
 
     def __init__(self):
-        """初始化 API 客户端"""
+        """从环境变量读取业务后端配置，避免使用硬编码地址和凭据。"""
+        self.BASE_URL = os.getenv("BACKEND_API_URL", "").strip().rstrip("/")
+        token = os.getenv("BACKEND_API_TOKEN", "").strip()
+        if not self.BASE_URL or not token:
+            raise ValueError("请配置 BACKEND_API_URL 和 BACKEND_API_TOKEN")
         self.session = requests.Session()
-        self.session.headers.update(self.HEADERS)
+        self.session.headers.update({"Agent-Token": token, "Content-Type": "application/json"})
 
     def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         """

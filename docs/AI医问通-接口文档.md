@@ -971,9 +971,9 @@ curl -X POST http://localhost:20602/api/upload -F "file=@report.jpg;type=image/j
 
 | 项 | 值 |
 | --- | --- |
-| Base URL | `http://127.0.0.1:8081`（环境变量 `BACKEND_API_URL`，默认值） |
+| Base URL | `http://127.0.0.1:8081`（示例；必须设置环境变量 `BACKEND_API_URL`） |
 | 路径前缀 | `/agent/api` |
-| 鉴权头 | `Agent-Token: <BACKEND_API_TOKEN>`（每个请求携带；默认值由环境变量 `BACKEND_API_TOKEN` 配置） |
+| 鉴权头 | `Agent-Token: <BACKEND_API_TOKEN>`（每个请求携带；必须设置环境变量 `BACKEND_API_TOKEN`） |
 | 内容类型 | `Content-Type: application/json` |
 | 超时 | 30 秒 |
 | 统一响应 | `SaResult` 包装：`{ "code": 200, "msg": "...", "data": <payload> }`，`code != 200` 视为业务失败（AI 端抛 `APIError`），网络异常抛 `NetworkError` |

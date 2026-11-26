@@ -1,5 +1,5 @@
 """
-FastAPI主应用 - 智能医疗咨询系统
+FastAPI主应用 - EyeAgent Eidos
 基于 LangGraph 架构
 """
 import logging
@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="智能医疗咨询系统",
+    title="EyeAgent Eidos",
     description="基于LangGraph的多Agent智能医疗咨询平台",
     version="3.0.0",
     lifespan=lifespan,
@@ -77,7 +77,7 @@ app.include_router(asr_router.router)
 app.include_router(file_router.router)
 
 logger.info("=" * 80)
-logger.info("智能医疗咨询系统启动")
+logger.info("EyeAgent Eidos启动")
 logger.info("架构版本: 3.0.0 (LangGraph)")
 logger.info("已启用: 健康咨询、报告、提醒、科研、合规审查、产品推荐 Agent")
 logger.info("=" * 80)
@@ -216,7 +216,7 @@ async def export_patient_data(session_id: str, conversation_id: str = None):
 async def api_info():
     """API信息"""
     return {
-        "title": "智能医疗咨询系统 API",
+        "title": "EyeAgent Eidos API",
         "version": "3.0.0",
         "architecture": "langgraph",
         "endpoints": {
