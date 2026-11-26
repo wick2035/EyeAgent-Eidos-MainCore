@@ -1,279 +1,182 @@
-# 智能医疗咨询系统
+# EyeAgent MainCore
 
-基于 **LangGraph** 的多智能体状态图系统，实现眼科健康咨询、智能分诊、医生预约、病历管理、合规审查、科研辅助和医药产品推荐等全流程医疗服务。
+[English](README.en.md) | 简体中文
 
-## 系统架构
+EyeAgent MainCore 是基于 FastAPI 和 LangGraph 的多智能体医疗咨询系统，围绕眼科场景提供健康咨询、报告查询、提醒管理、科研辅助、合规审查及医药产品推荐。它结合规则与大模型路由，并通过 MySQL 保存对话状态和历史。
 
-```
-用户消息 --> Router（混合意图路由）
-               |
-    +----------+----------+----------+----------+----------+
-    |          |          |          |          |          |
-  Health    Report    Reminder  Research  Compliance  Recommendation
-  (Agent1)  (Agent2)  (Agent3)  (Agent4)  (Agent5)    (Agent6)
-    |          |          |          |          |          |
-    +----------+----------+----------+----------+----------+
-               |
-         Response Handler --> 返回结果
-```
+> 本项目用于研究和开发，模型输出可能出错，不能替代专业医疗判断、诊断或治疗。临床使用需要由有资质的专业人员审核，并完成适用的安全、隐私和合规评估。
 
-- 每次 `graph.invoke()` 处理一条用户消息，多轮对话通过多次调用实现
-- 状态通过 MySQL Checkpointer 持久化，支持断点续接
-- Router 每条消息重新评估，支持对话中途切换 Agent
+## 功能
 
-## 功能特性
+| 智能体 | 主要能力 | 适用角色 |
+| --- | --- | --- |
+| Health | 眼科健康咨询、症状采集、分诊、医生查询及预约 | 患者、医生 |
+| Report | 处方与检查记录查询、病历及处方文档生成 | 患者、医生 |
+| Reminder | 复诊、用药和预约提醒及通知配置 | 患者、医生 |
+| Research | 文献检索、统计分析、研究设计及写作辅助 | 医生 |
+| Compliance | 处方、诊断、病历与检查合理性审查 | 医生 |
+| Recommendation | 根据症状或诊断推荐药品、器械和结构化产品卡片 | 患者、医生 |
 
-### Agent 1 - 健康咨询智能体 (HealthAgent)
-- 眼科健康咨询与症状评估
-- 智能分诊问诊（主诉、现病史、体征采集）
-- 医生空闲时间查询与预约
-- 患者历史处方记录查看
+支持同步与 SSE 流式对话、会话历史、图片/PDF 附件及语音识别。具体能力依赖模型、业务后端、数据库及相应第三方服务；推荐中的购物车和开处方工具目前是占位实现。角色路由限制不能代替服务端身份认证和授权。
 
-### Agent 2 - 医疗报告智能体 (ReportAgent)
-- 处方记录查询（列表 / 详情）
-- 影像及检查数据查看
-- 病历报告 PDF 生成
-- 处方 PDF 生成（含 Code128 条形码）
+## 架构
 
-### Agent 3 - 提醒管理智能体 (ReminderAgent)
-- 复诊 / 用药 / 预约提醒的创建与查看
-- 提醒配置管理（通知方式、免打扰时间等）
-- 配置初始化与修改
-
-### Agent 4 - 科研智能体 (ResearchAgent) [仅医生]
-- 机构数据库查询（需权限开关）
-- 医学文献搜索（general / pubmed / scholar）
-- 统计分析（描述性统计、相关性、t 检验、回归等）
-- 文献综述与摘要提取
-- 研究方案设计与样本量估算
-- 论文写作辅助
-- 临床指南查询、药物相互作用检查
-- 数据可视化生成（MinIO 存储）
-
-### Agent 5 - 合规审查智能体 (ComplianceAgent) [仅医生]
-- **处方合规审查**：药物剂量、适应症匹配、禁忌症、药物相互作用
-- **诊断合规审查**：诊断依据充分性、指南诊断标准、ICD 编码规范
-- **病历文书合规审查**：主诉 / 现病史 / 体征记录完整性、格式规范性
-- **检查合理性审查**：临床必要性、指南推荐路径
-- 每条审查意见附带权威标准 / 文献引用（联网实时搜索）
-- 审查结果保存与 PDF 导出
-
-### Agent 6 - 医药产品推荐智能体 (RecommendationAgent)
-- **医生端**：根据患者诊断报告 / 病历推荐处方药、非处方药及医疗器械
-- **患者端**：通过症状描述或购药需求推荐 OTC 药品和医疗器械
-- **产品卡片**：响应中包含结构化产品卡片（图片、名称、规格、价格、操作按钮）
-- **交互选项**：问询过程中提供可点击的选项卡片，点击后自动作为消息继续对话
-- 产品搜索、详情查看、加入购物车（stub）、开具处方（stub）
-- 患者端自动过滤处方药直接推荐，仅展示"查看详情"
-
-### 智能路由系统（混合架构）
-
-- **规则引擎**（第一层）：精确模式匹配 + 关键词加权，处理 ~90% 请求，<1ms 延迟
-- **LLM 路由**（第二层）：轻量级 LLM 处理复杂语义，支持融合决策
-- **角色权限控制**：患者无法访问 Research / Compliance Agent（路由层拦截）；Recommendation Agent 医生患者均可使用
-- **状态保持**：关键对话阶段中自动保持当前 Agent，防止误切换
-
-## 技术栈
-
-| 类别 | 技术 |
-|------|------|
-| **核心框架** | LangGraph (StateGraph) + LangChain |
-| **Web 框架** | FastAPI + Uvicorn |
-| **AI 模型** | 硅基流动 Qwen/Qwen2.5-32B-Instruct |
-| **状态持久化** | MySQL Checkpointer (langgraph-checkpoint) |
-| **数据库** | MySQL + Java 后端 API |
-| **搜索引擎** | Search1API (general / pubmed / scholar) |
-| **对象存储** | MinIO（科研文件 / 可视化存储，可选） |
-| **数据分析** | numpy, pandas, scipy, matplotlib |
-| **文档生成** | python-docx, python-barcode (Code128) |
-| **测试前端** | HTML5 + CSS3 + JavaScript (SSE) |
-
-## 项目结构
-
-> 完整的分层说明、目录职责和请求调用链见 [项目结构文档](docs/项目结构.md)。
-
-```
-├── agents/                         # 智能体层
-│   ├── graph/
-│   │   ├── graph_builder.py        # LangGraph 状态图构建
-│   │   ├── state.py                # MedicalState 全局状态定义
-│   │   ├── graph_manager.py        # 图调用管理器（同步/异步/流式）
-│   │   ├── checkpointer.py         # MySQL Checkpoint 持久化
-│   │   ├── nodes/
-│   │   │   ├── router_node.py      # 路由节点（意图识别 + 角色拦截）
-│   │   │   ├── health_node.py      # Agent 1 - 健康咨询
-│   │   │   ├── report_node.py      # Agent 2 - 医疗报告
-│   │   │   ├── reminder_node.py    # Agent 3 - 提醒管理
-│   │   │   ├── research_node.py    # Agent 4 - 科研辅助
-│   │   │   ├── compliance_node.py  # Agent 5 - 合规审查
-│   │   │   ├── recommendation_node.py # Agent 6 - 产品推荐
-│   │   │   └── response_node.py    # 响应后处理
-│   │   └── edges/
-│   │       └── routing.py          # 条件边路由 + 阶段流定义
-│   ├── prompts/                    # 各 Agent 提示词模块
-│   └── tools/                      # 各 Agent 工具定义
-│       ├── agent_tools.py          # Agent 1-3 工具
-│       ├── research_tools.py       # Agent 4 工具
-│       ├── compliance_tools.py     # Agent 5 工具
-│       └── recommendation_tools.py # Agent 6 工具
-├── domain/                         # 领域模型层（实体、枚举）
-├── application/                    # 应用服务层（仓储接口、DTO、持久化服务）
-├── infrastructure/                 # 基础设施层（数据库、API 客户端、MinIO）
-├── presentation/                   # 表现层
-│   ├── routers/
-│   │   ├── chat_router.py          # 通用对话 API
-│   │   ├── research_router.py      # 科研 Agent 专用 API
-│   │   ├── compliance_router.py    # 合规审查 Agent 专用 API
-│   │   ├── recommendation_router.py # 产品推荐 Agent 专用 API
-│   │   └── conversation_router.py  # 会话管理 API
-│   └── schemas/                    # Pydantic 请求/响应模型
-├── utils/                          # 工具函数
-│   ├── hybrid_intent_router.py     # 混合意图路由器
-│   ├── enhanced_rules.py           # 规则引擎
-│   ├── llm_router.py              # LLM 路由器
-│   └── llm_config.py              # LLM 配置
-├── main.py                         # FastAPI 入口
-└── requirements.txt
+```text
+浏览器 / API 客户端
+       │
+       ▼
+FastAPI 路由 → 输入与角色校验 → LangGraph 混合意图路由
+                                  │
+             Health / Report / Reminder / Research / Compliance / Recommendation
+                                  │
+                         响应处理与状态持久化
+                         │                  │
+                    MySQL              外部服务/API
 ```
 
-## API 接口
+规则和 LLM 路由协作选择智能体；MySQL Checkpointer 保存图状态，消息持久化组件管理会话历史。外部集成包括业务后端、DashScope、SiliconFlow、Search1API 和 MinIO。详细设计见 [项目结构](docs/项目结构.md)和[技术路线](docs/我们的工作.md)。
 
-### 通用对话（自动路由）
+## 环境要求
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/chat` | 同步对话 |
-| POST | `/api/chat/stream` | SSE 流式对话 |
-| GET  | `/api/chat/{session_id}/state` | 查询会话状态 |
-| GET  | `/api/chat/{session_id}/messages` | 查询消息历史 |
-
-### 科研 Agent 专用 [仅医生]
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/research/chat` | 科研对话 |
-| POST | `/api/research/chat/stream` | 科研对话 (SSE) |
-| GET  | `/api/research/conversations` | 会话列表 |
-| GET  | `/api/research/health` | 健康检查 |
-
-### 合规审查 Agent 专用 [仅医生]
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/compliance/chat` | 合规审查对话 |
-| POST | `/api/compliance/chat/stream` | 合规审查对话 (SSE) |
-| GET  | `/api/compliance/health` | 健康检查 |
-
-### 产品推荐 Agent 专用
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/recommendation/chat` | 产品推荐对话 |
-| POST | `/api/recommendation/chat/stream` | 产品推荐对话 (SSE) |
-| GET | `/api/recommendation/health` | 健康检查 |
-
-### 其他
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/users` | 患者列表 |
-| GET | `/api/conversations` | 会话管理 |
-| GET | `/api/export/{session_id}` | 导出对话数据 |
-| GET | `/api/info` | API 信息 |
-| GET | `/health` | 系统健康检查 |
+- Python 3.10 或更新版本，以及 `pip`；依赖版本见 [requirements.txt](requirements.txt)。
+- MySQL：完整会话持久化需要检查点表及项目所依赖的业务表。
+- DashScope API 密钥：业务智能体调用模型和语音识别使用。
+- 与本项目接口兼容的业务后端：患者、预约、处方等数据和操作依赖该服务；本仓库不包含完整后端及业务表建表脚本。
+- 按需配置 SiliconFlow、Search1API 和 MinIO。外部服务可能产生费用。
+- 文档转换功能可能需要安装 Microsoft Word、Pandoc 等系统组件；具体取决于所用转换路径和操作系统。
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 获取代码并安装依赖
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/wick2035/EyeAgent-MainCore.git
+cd EyeAgent-MainCore
+python -m venv .venv
+# macOS / Linux
+source .venv/bin/activate
+# Windows PowerShell：.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
 ### 2. 配置环境变量
 
-在项目根目录创建 `.env` 文件：
+在项目根目录创建 `.env`，按实际环境填写；以下值均为示例，不要提交真实密钥。
 
-```env
-# 硅基流动 API 配置
-SILICONFLOW_API_KEY=your_api_key_here
-SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
-MODEL_NAME=Qwen/Qwen2.5-32B-Instruct
+```dotenv
+# 业务智能体及语音识别
+DASHSCOPE_API_KEY=your_dashscope_key
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+ALIYUN_MODEL_NAME=qwen3.5-plus
 
-# 数据库配置
-DB_HOST=your_mysql_host
+# MySQL
+DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_USER=your_user
-DB_PASSWORD=your_password
+DB_USER=your_db_user
+DB_PASSWORD=your_db_password
 DB_NAME=eye_agent_db
 DB_CHARSET=utf8mb4
 
-# 后端 API 配置
-BACKEND_API_URL=http://your_backend:8081
-BACKEND_API_TOKEN=your_token
+# 与本项目兼容的业务后端；务必显式设置
+BACKEND_API_URL=http://127.0.0.1:8081
+BACKEND_API_TOKEN=your_backend_token
 
-# 搜索 API 配置（ResearchAgent / ComplianceAgent 使用）
-SEARCH1API_KEY=your_search_api_key
-
-# 对象存储配置（可选）
-# MINIO_ENDPOINT=your_minio_endpoint
-# MINIO_ACCESS_KEY=your_access_key
-# MINIO_SECRET_KEY=your_secret_key
-# MINIO_BUCKET=research-files
+# 按需：LLM 意图路由
+SILICONFLOW_API_KEY=your_siliconflow_key
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+# 按需：PDF 页面视觉分析，注意变量名与上方不同
+SILICON_FLOW_API_KEY=your_siliconflow_key
+# 按需：科研和合规检索
+SEARCH1API_KEY=your_search1api_key
+# 按需：附件和科研文件对象存储
+MINIO_ENDPOINT=127.0.0.1:9000
+MINIO_ACCESS_KEY=your_minio_access_key
+MINIO_SECRET_KEY=your_minio_secret_key
+MINIO_BUCKET=research-files
 ```
 
-### 3. 启动服务
+`SILICONFLOW_API_KEY` 和 `SILICON_FLOW_API_KEY` 是代码中两个不同的变量。数据库连接池还支持 `DB_POOL_MIN`、`DB_POOL_MAX` 和 `DB_POOL_MAX_CONN`。不配置 MinIO 时，依赖对象存储的功能可能不可用。
+
+### 3. 准备数据库和业务后端
+
+创建数据库并配置具备适当权限的账号。检查 [检查点建表脚本](scripts/create_checkpoint_tables.sql)后，使用支持 `DELIMITER` 的 MySQL 客户端将其导入目标数据库：
 
 ```bash
-python main.py
+mysql -h 127.0.0.1 -u your_db_user -p eye_agent_db < scripts/create_checkpoint_tables.sql
 ```
 
-或使用 uvicorn：
+以上重定向示例适用于 Bash；PowerShell 可使用 `cmd /c "mysql -h 127.0.0.1 -u your_db_user -p eye_agent_db < scripts/create_checkpoint_tables.sql"`。脚本只创建 LangGraph 相关表和过程，**不包含完整业务数据库**。另有 [chat_message 升级脚本](scripts/alter_chat_message_add_status.sql)，仅在已有兼容业务表且确认需要时使用。请自行准备匹配的业务表、数据及后端服务。启动时数据库连接失败不会阻止应用启动，但相关功能可能不可用。
+
+### 4. 启动
+
+在项目根目录运行：
 
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --host 127.0.0.1 --port 20602 --reload
 ```
 
-### 4. 访问应用
+- 聊天界面：<http://127.0.0.1:20602/>
+- 交互式 API 文档：<http://127.0.0.1:20602/docs>
+- 健康检查：<http://127.0.0.1:20602/health>
+- 科研测试页：<http://127.0.0.1:20602/research-test>
+- 推荐测试页：<http://127.0.0.1:20602/recommendation-test>
 
-打开浏览器访问：http://127.0.0.1:8000
+也可运行 `python main.py`；实际监听端口为 `20602`。`/health` 只报告应用状态，并不验证所有外部依赖。
 
-## 使用说明
+## API 示例
 
-### 患者端
+`patient_id` 必须为 UUID，实际业务调用应使用后端中存在的患者 ID。医生请求可提供 `doctor_id`、`role: "doctor"`；角色身份需要由可信的服务端认证机制保证。
 
-患者可使用 Agent 1-3、Agent 6：
+```bash
+curl -X POST http://127.0.0.1:20602/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"眼睛干涩怎么办？","patient_id":"550e8400-e29b-41d4-a716-446655440000","role":"patient"}'
+```
 
-1. **健康咨询**：描述眼部症状，AI 评估严重程度并引导就诊
-2. **预约挂号**：系统化收集信息（主诉、现病史、既往史），完成医生预约
-3. **报告查看**：查看历史处方和检查记录
-4. **提醒管理**：创建 / 查看复诊和用药提醒
-5. **购药推荐**（Agent 6）：根据症状推荐 OTC 药品和医疗器械，产品卡片展示
+上述示例使用 Bash 语法；PowerShell 可使用 `curl.exe` 并按其规则转义 JSON，或通过 `/docs` 调试。响应包含 `response`、`session_id`、`conversation_id`、`stage` 和 `agent_type` 等字段；继续会话时传回返回的会话标识。流式调用使用 `POST /api/chat/stream` 和 SSE。
 
-### 医生端
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| POST | `/api/chat`、`/api/chat/stream` | 普通及流式对话 |
+| GET | `/api/chat/{session_id}/state`、`/messages`、`/checkpoints`、`/agent-history` | 查询状态、消息、检查点和智能体历史（后面三个路径均以 `/api/chat/{session_id}` 为前缀） |
+| GET / DELETE | `/api/conversations`、`/api/conversations/{conversation_id}` | 会话列表、详情与删除；列表不支持 DELETE |
+| POST | `/api/research/chat`、`/api/compliance/chat`、`/api/recommendation/chat` | 专用智能体对话；各自提供 `/stream` 路径 |
+| POST | `/api/upload` | 上传图片或 PDF 附件 |
+| GET | `/api/users`、`/api/info`、`/api/export/{session_id}` | 患者列表、接口信息和会话导出 |
 
-医生可使用全部 6 个 Agent：
+完整参数、语音接口及返回模型以运行时 `/docs` 为准。更多说明见 [AI 医问通接口](docs/AI医问通-接口文档.md)、[多模态附件](docs/多模态附件接口文档.md)、[语音识别](docs/ASR语音识别接口文档.md)和 [Agent 工具 API](docs/Agent工具API文档.md)。
 
-1. **Agent 1-3**：同患者端功能，另有 PDF 生成等高级权限
-2. **科研助手**（Agent 4）：文献检索、统计分析、研究方案设计、论文写作辅助
-3. **合规审查**（Agent 5）：对患者诊断 / 处方 / 病历进行合规性审查，每条审查意见附带权威指南引用
-4. **产品推荐**（Agent 6）：根据患者诊断推荐处方药 / 非处方药 / 医疗器械，支持开具处方
+## 项目结构
 
-### 角色切换
+```text
+agents/          LangGraph 状态图、智能体节点、提示词与工具
+application/     应用服务与仓储接口
+domain/          领域模型、枚举和异常
+infrastructure/  MySQL、业务 API、搜索、语音及对象存储适配
+presentation/    FastAPI 路由与请求/响应模型
+utils/           路由、模型配置、输入检查及文档生成工具
+scripts/         数据库脚本
+templates/       Jinja2 页面
+static/          前端资源和测试页面
+docs/            架构与接口文档
+main.py          应用入口
+```
 
-在前端界面可切换角色：
+## 部署与安全
 
-- **患者模式**：健康咨询、报告查看、提醒管理、购药推荐
-- **医生模式**：以上全部 + 科研助手 + 合规审查 + 产品推荐（处方权限）
+此仓库包含演示和集成代码，部署前应实现可靠的身份认证、服务端授权、敏感数据保护、审计及网络隔离。当前 CORS 配置允许所有来源，角色字段本身不是身份凭证。务必覆盖业务后端地址与令牌的代码默认值；检查和轮换所有可能已暴露的凭据。检查点使用 Python pickle 序列化，只能从可信数据库读取。不要将真实患者数据、`.env` 或密钥提交到仓库，也不要将敏感信息放入公开 Issue。
 
-## 相关文档
+## 常见问题
 
-- [API 接口文档](docs/API_DOCUMENTATION.md)
-- [系统架构文档](docs/README_ARCHITECTURE.md)
-- [科研 Agent 设计文档](docs/RESEARCH_AGENT_DESIGN.md)
-- [Agent 工具 API 文档](docs/Agent工具API文档.md)
+- **服务启动了但对话失败？** 检查 DashScope 密钥、模型权限、数据库及业务后端的地址和日志；`/health` 不检查依赖。
+- **会话无法保存？** 检查 MySQL 连接、业务表和检查点表是否就绪，查看应用日志。
+- **路由或 PDF 分析失败？** 分别检查 `SILICONFLOW_API_KEY` 和 `SILICON_FLOW_API_KEY`；两者拼写不同。
+- **科研搜索或文件功能不可用？** 检查 Search1API、MinIO 的配置和网络可达性。
 
-## 文档规则
+## 参与贡献
 
-- 所有文档统一放置于 `docs/`
-- 所有总结类 Markdown 文件统一放置于 `docs/summary/`
+欢迎提交 Issue 和 Pull Request。请说明问题、复现步骤或变更动机；修改时保持现有分层结构，并验证受影响的功能。请勿提交密钥、个人健康信息或生产数据。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)。使用、修改和分发时请遵循许可证条款。第三方服务与依赖各自适用其许可和使用条款。
